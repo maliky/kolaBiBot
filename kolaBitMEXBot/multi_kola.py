@@ -68,7 +68,7 @@ class MarketAuditeur:
 
         # on garde un suivi de la balance ici pour further analysis
         self.resultats = pd.DataFrame(
-            index=pd.DatetimeIndex(data=[], name="start_time")
+            index=pd.DatetimeIndex(data=[], name="start_time", columns=["balance", "benef"])
         )
         daynum = pd.Timestamp.now().strftime("%j")
         prefix = "tma" + daynum if live else "fma" + daynum
@@ -113,8 +113,11 @@ class MarketAuditeur:
         )
         self.chrs.start()
         # Resultats financiers
-        self.resultats.loc[now(), :] = (self.balance(), np.nan)
-
+        try:
+            self.resultats.loc[now(), :] = (self.balance(), np.nan)
+        except ValueError as ve:
+            import ipdb; ipdb.set_trace()
+            raise(e)
     def stop_server(self):
         """Arrête le serveur."""
         self.stop = True
