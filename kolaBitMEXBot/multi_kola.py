@@ -49,7 +49,7 @@ class MarketAuditeur:
     def __init__(self, live: bool = False, dbo=None, logger=None, symbol=SYMBOL):
         """
         Une classe  pour placer un ordre conditionné et sa trace sur bitmex.
-        Place an order pair on symbol market. 
+        Place an order pair on symbol market.
 
         Un auditeur de marché, c'est une connexion qui écoute les prix du marché
         - serveur chronos:  envoie les ordres au marché
@@ -57,9 +57,9 @@ class MarketAuditeur:
         - ordre de trace conditionné par le prix et qui sert aussi de stop loss.
         """
         self.live: bool = live  # connexion à live bitmex or test.bitmex
-        self.ocp: Optional[
-            Union[OrderConditionned, HookOrder]
-        ] = None  # ordre principal
+        self.ocp: Optional[Union[OrderConditionned, HookOrder]] = (
+            None  # ordre principal
+        )
         self.stop: Optional[bool] = False
 
         self.symbol = symbol
@@ -68,7 +68,8 @@ class MarketAuditeur:
 
         # on garde un suivi de la balance ici pour further analysis
         self.resultats = pd.DataFrame(
-            index=pd.DatetimeIndex(data=[], name="start_time", columns=["balance", "benef"])
+            index=pd.DatetimeIndex(data=[], name="start_time"),
+            columns=["balance", "benef"],
         )
         daynum = pd.Timestamp.now().strftime("%j")
         prefix = "tma" + daynum if live else "fma" + daynum
@@ -116,8 +117,11 @@ class MarketAuditeur:
         try:
             self.resultats.loc[now(), :] = (self.balance(), np.nan)
         except ValueError as ve:
-            import ipdb; ipdb.set_trace()
-            raise(e)
+            import ipdb
+
+            ipdb.set_trace()
+            raise (e)
+
     def stop_server(self):
         """Arrête le serveur."""
         self.stop = True
@@ -190,9 +194,7 @@ class MarketAuditeur:
             "timeout": f"{timeout}m",
             "balance": self.balance(),
         }
-        self.logger.debug(
-            f"#### Go with args :\n{_info}"
-        )
+        self.logger.debug(f"#### Go with args :\n{_info}")
 
         # Init. des paramètres temps pour la condition de validité de l'ocp
         self.tpsDeb = now() + pd.Timedelta(tps_run[0], unit="m")
@@ -269,9 +271,7 @@ class MarketAuditeur:
                 "tpType": (tpType, tOrdType, tExecInst),
                 "timeOut": timeOut,
             }
-            self.logger.info(
-                f"### Essais {i+1}/{essais}, ({nameT}):\n{_info}"
-            )
+            self.logger.info(f"### Essais {i+1}/{essais}, ({nameT}):\n{_info}")
 
             # L'order Price type (déclencheur pour Touched & stop) est déjà dans execInst
             # penser à faire un objet order pour faciliter la mise à jour et l'init
@@ -414,7 +414,9 @@ class MarketAuditeur:
         # revoir le calcul de la balance
         self.resultats.loc[now(), "balance"] = self.balance()
         res_delta = self.resultats.iloc[-1] - self.resultats.iloc[-2]
-        self.resultats.loc[self.resultats.index[-1], "benef"] = res_delta.loc["balance"]
+        self.resultats.loc[self.resultats.index[-1], "benef"] = res_delta.loc[
+            "balance"
+        ]
 
         # info sur la durée de l'essai
         self.logger.info(
@@ -528,7 +530,10 @@ def read_order_file(arg_file):
     """Read the order file, parsing arguments to correct types."""
     # read the morder_file
     df = pd.read_csv(
-        filepath_or_buffer=arg_file, sep="\t", comment="#", skip_blank_lines=True,
+        filepath_or_buffer=arg_file,
+        sep="\t",
+        comment="#",
+        skip_blank_lines=True,
     )
     df = df.set_index([df.index, df.name]).drop(columns="name")
     df = df.apply(coerce_types, axis=1)
@@ -545,8 +550,8 @@ def coerce_types(s):
     - timeout: "int",
     - side: str
     - prix: s.prix,
-    - q: "int", 
-    - tp: "float", 
+    - q: "int",
+    - tp: "float",
     - atype: str
     - oType: str
     - oDelta: "float",
