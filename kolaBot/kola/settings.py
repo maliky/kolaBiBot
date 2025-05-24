@@ -14,6 +14,16 @@ URL = "https://www.bitmex.com/api/v1/"
 LIVE_URL = "https://www.bitmex.com/api/v1/"
 TEST_URL = "https://testnet.bitmex.com/api/v1/"
 
+# Binance endpoints
+BINANCE_URL = "https://api.binance.com/api"
+BINANCE_TEST_URL = "https://testnet.binance.vision/api"
+
+# Binance API credentials placeholders
+BINANCE_API_KEY = ""
+BINANCE_API_SECRET = ""
+BINANCE_TEST_API_KEY = ""
+BINANCE_TEST_API_SECRET = ""
+
 # constante
 XBTSATOSHI = 10 ** -8
 

@@ -211,6 +211,14 @@ def get_args():
         help=(f"Le fichier de sorti log."),
     )
     parser.add_argument(
+        "--platform",
+        "-P",
+        type=str,
+        default="bitmex",
+        choices=["bitmex", "binance"],
+        help=("Trading platform to use."),
+    )
+    parser.add_argument(
         "--liveRun",
         "-L",
         action="store_true",

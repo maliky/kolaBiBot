@@ -23,6 +23,7 @@ class argsO:
         updatepause=10,
         logpause=600,
         dummy=False,
+        platform="bitmex",
         **kwargs,
     ):
         """Simulate the args from command line"""
@@ -33,6 +34,7 @@ class argsO:
         self.dummy = False if liverun else dummy
         self.updatePause = updatepause
         self.logPause = logpause
+        self.platform = platform
 
     def __repr__(self, long=False):
         """Represent the program."""
@@ -45,6 +47,7 @@ class argsO:
             "liveRun": self.liveRun,
             "dummy": self.dummy,
             "updatePause": self.updatePause,
+            "platform": self.platform,
         }
         return f"argsO {obj}"
 
@@ -64,7 +67,11 @@ def main_prg():
     dbo = DummyBitMEX(up=0, logger=logger) if cmdArgs.dummy else None
 
     tma = MarketAuditeur(
-        live=cmdArgs.liveRun, dbo=dbo, logger=logger, symbol=cmdArgs.symbol
+        live=cmdArgs.liveRun,
+        dbo=dbo,
+        logger=logger,
+        symbol=cmdArgs.symbol,
+        platform=cmdArgs.platform,
     )
     tma.start_server()
 
@@ -104,6 +111,15 @@ def get_cmd_args():
             f"Market to listen too. could be XBTM20 XBTU20 ADAU20 BCHM20 ETHUSD LTCM20"
         ),
     )
+    parser.add_argument(
+        "--platform",
+        "-P",
+        type=str,
+        default="bitmex",
+        choices=["bitmex", "binance"],
+        help=("Trading platform to use."),
+    )
+
 
     parser.add_argument(
         "--logLevel", "-l", type=str, default="INFO", help=("Le log level")

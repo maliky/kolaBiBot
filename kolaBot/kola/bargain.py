@@ -11,6 +11,12 @@ from kolaBot.kola.secrets import LIVE_KEY, LIVE_SECRET, TEST_KEY, TEST_SECRET
 from kolaBot.kola.settings import (
     LIVE_URL,
     TEST_URL,
+    BINANCE_URL,
+    BINANCE_TEST_URL,
+    BINANCE_API_KEY,
+    BINANCE_API_SECRET,
+    BINANCE_TEST_API_KEY,
+    BINANCE_TEST_API_SECRET,
     SYMBOL,
     ORDERID_PREFIX,
     TIMEOUT,
@@ -70,8 +76,18 @@ class Bargain:
         self.live = live
         if self.live and dbo is None:
             baseUrl, apiKey, apiSecret = LIVE_URL, LIVE_KEY, LIVE_SECRET
+            b_url, b_key, b_secret = (
+                BINANCE_URL,
+                BINANCE_API_KEY,
+                BINANCE_API_SECRET,
+            )
         else:
             baseUrl, apiKey, apiSecret = TEST_URL, TEST_KEY, TEST_SECRET
+            b_url, b_key, b_secret = (
+                BINANCE_TEST_URL,
+                BINANCE_TEST_API_KEY,
+                BINANCE_TEST_API_SECRET,
+            )
 
         if dbo:
             self.crypto_api = dbo
@@ -91,7 +107,8 @@ class Bargain:
                     logger=self.logger,
                 )
             elif trading_plateform == "binance":
-                self.crypto_api = Binance()
+                self.crypto_api = Binance(api_key=b_key, api_secret=b_secret)
+                self.crypto_api.API_URL = b_url
             self.dbo = None
 
         self.logger.info(f"Fini init {self}")
