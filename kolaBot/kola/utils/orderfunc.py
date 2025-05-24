@@ -78,6 +78,22 @@ def get_abbv_from_ID(oClOrdID_: str):
     return oClOrdID_.split(ORDERID_PREFIX)[-1].split("-O")[0]
 
 
+def normalize_order_dict(order: dict) -> dict:
+    """Normalize order keys between BitMEX and Binance styles.
+
+    Converts ``quantity`` to ``orderQty`` and ``stopPrice`` to ``stopPx``
+    when the BitMEX style keys are missing.  The original dictionary is
+    modified and returned for convenience.
+    """
+
+    if "orderQty" not in order and "quantity" in order:
+        order["orderQty"] = order.pop("quantity")
+    if "stopPx" not in order and "stopPrice" in order:
+        order["stopPx"] = order.pop("stopPrice")
+
+    return order
+
+
 # @log_args()
 def create_order(
     side, _q, opType, ordtype, execinst, prices=None, absdelta=0.5, text=None

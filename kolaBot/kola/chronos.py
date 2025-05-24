@@ -10,7 +10,7 @@ from kolaBot.kola.utils.general import (
     opt_pop_if_in_,
 )
 from kolaBot.kola.utils.pricefunc import setdef_stopPrice
-from kolaBot.kola.utils.orderfunc import get_order_from
+from kolaBot.kola.utils.orderfunc import get_order_from, normalize_order_dict
 from kolaBot.kola.orders.trailstop import TrailStop
 from kolaBot.kola.orders.orders import (
     place,
@@ -79,6 +79,7 @@ class Chronos(threading.Thread):
 
             # make a deep copy of the order to avoid changing rcvLoad
             rcvOrder = pickle.loads(pickle.dumps(rcvLoad["order"]))
+            rcvOrder = normalize_order_dict(rcvOrder)
             ordType = rcvOrder.pop("ordType", None)
             assert ordType, f"Should have an ordType in rcvOrder but {rcvOrder}"
 
@@ -88,7 +89,9 @@ class Chronos(threading.Thread):
                 # 'Limit', 'Market', 'Stop', 'MarketIfTouched',
                 # 'StopLimit', 'LimitIfTouched'
                 side = rcvOrder.pop("side")
-                orderQty = rcvOrder.pop("orderQty")
+                orderQty = rcvOrder.pop("orderQty", None)
+                if orderQty is None:
+                    orderQty = rcvOrder.pop("quantity")
 
                 # pop price from rcvOrder else get market price using side
                 price = self.pop_price_from_(rcvOrder, side, execInst, symbol)
@@ -226,7 +229,7 @@ class Chronos(threading.Thread):
                 # attention chronos pourrait traiter un autre ordre
                 # que celui générant l'erreur, non ?
                 sender = rcvLoad["sender"]
-                overQty = sender.order.get("orderQty", 0)
+                overQty = sender.order.get("orderQty", sender.order.get("quantity", 0))
                 reducedQty = round(overQty * 0.8)
                 if reducedQty < 31:
                     self.logger.exception("Canceling order.  Closing the essai?")
@@ -238,7 +241,10 @@ class Chronos(threading.Thread):
                         }
                     )
                 else:
-                    sender.order["orderQty"] = reducedQty
+                    if "orderQty" in sender.order:
+                        sender.order["orderQty"] = reducedQty
+                    else:
+                        sender.order["quantity"] = reducedQty
                     sender.send_order()
 
             except ke.InvalidOrder as io:
@@ -519,6 +525,8 @@ class Chronos(threading.Thread):
         """
         # absdelta = PRICE_PRECISION.get(symbol,1) if absdelta is None else absdelta
         stopPx = rcvOrder.pop("stopPx", None)
+        if stopPx is None:
+            stopPx = rcvOrder.pop("stopPrice", None)
         if stopPx is None and contains(["Stop", "Touched"], ordtype):
             # probably not necessary as stop should be set
             # defaut to 2 for XBTUSD

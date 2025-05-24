@@ -1,4 +1,4 @@
-name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	q	tp	prix	hook
+name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	prix	hook
 # buy  
 ################
 XTop	0 5440	1			sell	S		S-		qAt%pA	2000	2.6	7995 8009

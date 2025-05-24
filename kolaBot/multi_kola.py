@@ -591,7 +591,7 @@ def coerce_types(s):
         "timeout": coerce_to("int", s.tOut),
         "side": s.side.strip(),
         "prix": handle_tuple(s.prix, s.atype.strip()),
-        "q": coerce_to("int", s.q),
+        "q": coerce_to("int", s["quantity"] if "quantity" in s else s.q),
         "tp": coerce_to("float", s.tp),
         "atype": s.atype.strip(),
         "oType": s.oType.strip(),

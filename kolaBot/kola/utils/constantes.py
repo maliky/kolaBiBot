@@ -6,9 +6,11 @@ EXECOLS = [
     "orderID",
     "clOrdID",
     "side",
-    "orderQty",
+    "orderQty",  # BitMEX
+    "quantity",  # Binance
     "price",
-    "stopPx",
+    "stopPx",  # BitMEX
+    "stopPrice",  # Binance
     "execType",
     "ordType",
     "execInst",
