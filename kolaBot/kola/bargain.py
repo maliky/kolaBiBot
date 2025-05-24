@@ -28,6 +28,12 @@ from kolaBot.kola.utils.constantes import (
     INSTRUMENT_PRICES,
 )
 from kolaBot.kola.binance_api.client import Client as Binance
+from kolaBot.kola.exchange import (
+    place_order,
+    cancel_order,
+    get_balance as exch_balance,
+    get_prices as exch_prices,
+)
 
 
 # MULTIPLIER À CORRIGER
@@ -145,9 +151,11 @@ class Bargain:
         Si atPrice is None, use market buy sell or mid price
         Voir aussi abonnement "wallet"
         """
-        satoshi_balance = (
-            self.crypto_api.margin()["availableMargin"] * self.get_leverage()
-        )
+        satoshi_balance = exch_balance(self.crypto_api, self.symbol)
+        if satoshi_balance is not None:
+            satoshi_balance *= self.get_leverage()
+        else:
+            satoshi_balance = 0
         xbt_balance = satoshi_balance * XBTSATOSHI
 
         if isinstance(atPrice, str):
@@ -488,11 +496,7 @@ class Bargain:
         """
         _symbol = self.symbol if symbol_ is None else symbol_
 
-        prices = {
-            k: v
-            for (k, v) in self.crypto_api.instrument(_symbol).items()
-            if "rice" in k
-        }
+        prices = exch_prices(self.crypto_api, _symbol)
         # prices.keys = 'maxPrice', 'prevClosePrice', 'prevPrice24h', 'highPrice',
         # 'lastPrice', 'lastPriceProtected', 'bidPrice', 'midPrice', 'askPrice',
         # 'impactBidPrice', 'impactMidPrice', 'impactAskPrice', 'markPrice',
@@ -614,7 +618,7 @@ class Bargain:
         qty = -qty
 
         if qty != 0:
-            return self.crypto_api.place(qty, execInst="Close")
+            return place_order(self.crypto_api, qty, execInst="Close")
         else:
             self.logger.warning("Probably no position to close.")
 
@@ -624,6 +628,6 @@ class Bargain:
         oes = self.get_open_orders()
         ids = [oe["orderID"] for oe in oes]
         if ids != []:
-            self.crypto_api.cancel(ids)
+            cancel_order(self.crypto_api, ids)
             return True
         return False
