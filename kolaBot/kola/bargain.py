@@ -7,7 +7,12 @@ from copy import deepcopy
 
 from kolaBot.kola.kolatypes import ordStatusT
 from kolaBot.kola.bitmex_api.custom_api import BitMEX
-from kolaBot.kola.secrets import LIVE_KEY, LIVE_SECRET, TEST_KEY, TEST_SECRET
+import os
+
+LIVE_KEY = os.getenv("BITMEX_KEY", "")
+LIVE_SECRET = os.getenv("BITMEX_SECRET", "")
+TEST_KEY = os.getenv("BITMEX_TEST_KEY", "")
+TEST_SECRET = os.getenv("BITMEX_TEST_SECRET", "")
 from kolaBot.kola.settings import (
     LIVE_URL,
     TEST_URL,
