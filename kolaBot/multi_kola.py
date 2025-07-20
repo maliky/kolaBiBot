@@ -46,7 +46,14 @@ time.tzset()
 class MarketAuditeur:
     """Classe du Market Auditeur."""
 
-    def __init__(self, live: bool = False, dbo=None, logger=None, symbol=SYMBOL):
+    def __init__(
+        self,
+        live: bool = False,
+        dbo=None,
+        logger=None,
+        symbol=SYMBOL,
+        platform: str = "bitmex",
+    ):
         """
         Une classe  pour placer un ordre conditionné et sa trace sur bitmex.
         Place an order pair on symbol market.
@@ -63,6 +70,7 @@ class MarketAuditeur:
         self.stop: Optional[bool] = False
 
         self.symbol = symbol
+        self.trading_plateform = platform
 
         self.dbo = dbo  # dummy bitmex for test
 
@@ -86,7 +94,9 @@ class MarketAuditeur:
 
     def __repr__(self):
         """Représentation du Market auditeur."""
-        rep = f"Live={self.live}-{self.symbol}, log to {self.logger}"
+        rep = (
+            f"Live={self.live}-{self.symbol}({self.trading_plateform}), log to {self.logger}"
+        )
         if len(self.resultats):
             rep += f"Resultats={self.resultats}"
 
@@ -100,9 +110,13 @@ class MarketAuditeur:
         # canal échange ordre, serveur dispacheur
         self.fileDeConfirmation: Queue = Queue()
 
-        # connexion avec Bitmex
+        # connexion avec la plateforme d'échange
         self.brg: Bargain = Bargain(
-            live=self.live, logger=self.logger, dbo=self.dbo, symbol=self.symbol
+            live=self.live,
+            logger=self.logger,
+            dbo=self.dbo,
+            symbol=self.symbol,
+            trading_plateform=self.trading_plateform,
         )
         # Serveur dispacheur d'ordre
         self.chrs: Chronos = Chronos(
@@ -632,7 +646,13 @@ def main_prg():
         name=LOGNAME, sLL=args.logLevel, logFile=args.logFile, fmt_=LOGFMT
     )
     dbo = DummyBitMEX(up=0, logger=rlogger) if args.dummy else None
-    tma = MarketAuditeur(live=args.liveRun, dbo=dbo, logger=rlogger, symbol=args.symbol)
+    tma = MarketAuditeur(
+        live=args.liveRun,
+        dbo=dbo,
+        logger=rlogger,
+        symbol=args.symbol,
+        platform=args.platform,
+    )
     tma.start_server()
 
     try:
