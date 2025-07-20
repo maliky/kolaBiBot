@@ -64,9 +64,9 @@ class MarketAuditeur:
         - ordre de trace conditionné par le prix et qui sert aussi de stop loss.
         """
         self.live: bool = live  # connexion à live bitmex or test.bitmex
-        self.ocp: Optional[
-            Union[OrderConditionned, HookOrder]
-        ] = None  # ordre principal
+        self.ocp: Optional[Union[OrderConditionned, HookOrder]] = (
+            None  # ordre principal
+        )
         self.stop: Optional[bool] = False
 
         self.symbol = symbol
@@ -76,7 +76,8 @@ class MarketAuditeur:
 
         # on garde un suivi de la balance ici pour further analysis
         self.resultats = pd.DataFrame(
-            index=pd.DatetimeIndex(data=[], name="start_time")
+            index=pd.DatetimeIndex(data=[], name="start_time"),
+            columns=["balance", "benef"],
         )
         daynum = pd.Timestamp.now().strftime("%j")
         prefix = "tma" + daynum if live else "fma" + daynum
@@ -127,7 +128,13 @@ class MarketAuditeur:
         )
         self.chrs.start()
         # Resultats financiers
-        self.resultats.loc[now(), :] = (self.balance(), np.nan)
+        try:
+            self.resultats.loc[now(), :] = (self.balance(), np.nan)
+        except ValueError as ve:
+            import ipdb
+
+            ipdb.set_trace()
+            raise (e)
 
     def stop_server(self):
         """Arrête le serveur."""
@@ -419,7 +426,9 @@ class MarketAuditeur:
         # revoir le calcul de la balance
         self.resultats.loc[now(), "balance"] = self.balance()
         res_delta = self.resultats.iloc[-1] - self.resultats.iloc[-2]
-        self.resultats.loc[self.resultats.index[-1], "benef"] = res_delta.loc["balance"]
+        self.resultats.loc[self.resultats.index[-1], "benef"] = res_delta.loc[
+            "balance"
+        ]
 
         # info sur la durée de l'essai
         self.logger.info(
