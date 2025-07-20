@@ -174,17 +174,17 @@ would recommand doing it as a pip editable module with:
     # install the package from local source
     pip install -e . 
 
-Add you API keys in \`kolaBitMEXBot/kola/secret.py\`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Set your API keys with environment variables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-This file it should contain your keys and secrets as for example:
+Create environment variables before running the bot. Expected variable names are::
 
-.. code:: example
+    BITMEX_KEY
+    BITMEX_SECRET
+    BITMEX_TEST_KEY
+    BITMEX_TEST_SECRET
 
-    LIVE_KEY = "zIKTHISISARANDOMKEYNHII3"
-    LIVE_SECRET = "HUMOI9OkK89aIoXDAND THIS IS A SECRET0KAthnauwKj0"
-    TEST_KEY = "THEn_XATESTgXOcfKEYbuttz"
-    TEST_SECRET = "ANDjmJ3tbACz12VERYnzJS7LONGrPKI3r4uSECRETMU2C4HO"
+You can load them from ``.env-dev`` or ``.env-prod`` using the ``load_env.sh`` helper script located at the repository root.
 
 Write your orders in the `morder.tsv <https://github.com/maliky/kolaBitMEXBot/blob/master/kolaBitMEXBot/morders.tsv>`__
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -275,8 +275,8 @@ Core program files
     │   │   ├── orders.py  ->  functions to places limit, stop, limit if touched ...
     │   │   └── trailstop.py  ->  orders that follow price variation and update 
     │   ├── price.py  ->  object to follow the different prices indexes
-    │   ├── settings.py  ->  setting files (where your keys may be)
-    │   ├── secrets.py  ->  where API keys could be
+    │   ├── settings.py  ->  global configuration values
+    │   ├── load_env.sh  ->  helper to load API keys
     │   ├── types.py  ->  (new) types to start typing the programm
     │   └── utils
     │       ├── argfunc.py  ->  handle command line arguments

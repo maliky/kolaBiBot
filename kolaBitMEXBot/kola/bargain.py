@@ -7,7 +7,7 @@ from copy import deepcopy
 
 from kolaBitMEXBot.kola.kolatypes import ordStatusT
 from kolaBitMEXBot.kola.custom_bitmex import BitMEX
-from kolaBitMEXBot.kola.secrets import LIVE_KEY, LIVE_SECRET, TEST_KEY, TEST_SECRET
+import os
 from kolaBitMEXBot.kola.settings import (
     LIVE_URL,
     TEST_URL,
@@ -64,9 +64,13 @@ class Bargain:
 
         self.live = live
         if self.live and dbo is None:
-            baseUrl, apiKey, apiSecret = LIVE_URL, LIVE_KEY, LIVE_SECRET
+            baseUrl = LIVE_URL
+            apiKey = os.getenv("BITMEX_KEY")
+            apiSecret = os.getenv("BITMEX_SECRET")
         else:
-            baseUrl, apiKey, apiSecret = TEST_URL, TEST_KEY, TEST_SECRET
+            baseUrl = TEST_URL
+            apiKey = os.getenv("BITMEX_TEST_KEY")
+            apiSecret = os.getenv("BITMEX_TEST_SECRET")
 
         if dbo:
             self.bto = dbo
