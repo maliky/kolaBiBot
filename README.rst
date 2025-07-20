@@ -328,5 +328,8 @@ README.rst
     this README
 requirements.txt
     set of required modules
-setup.py
-    package file for python
+
+How to add a new exchange
+-------------------------
+Implement `ExchangeABC` in a module under `kola/exchanges` and pass --exchange name when running run_kola.py.
+
