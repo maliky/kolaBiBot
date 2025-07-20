@@ -174,17 +174,29 @@ would recommand doing it as a pip editable module with:
     # install the package from local source
     pip install -e . 
 
-Add you API keys in \`kolaBot/kola/secret.py\`
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Set your API keys with environment variables
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-This file it should contain your keys and secrets as for example:
+Credentials are now read from the environment. Define at least the
+following variables before using the bot:
 
-.. code:: example
+.. code:: bash
 
-    LIVE_KEY = "zIKTHISISARANDOMKEYNHII3"
-    LIVE_SECRET = "HUMOI9OkK89aIoXDAND THIS IS A SECRET0KAthnauwKj0"
-    TEST_KEY = "THEn_XATESTgXOcfKEYbuttz"
-    TEST_SECRET = "ANDjmJ3tbACz12VERYnzJS7LONGrPKI3r4uSECRETMU2C4HO"
+    BITMEX_KEY=...            # live BitMEX API key
+    BITMEX_SECRET=...
+    BITMEX_TEST_KEY=...       # testnet BitMEX API key
+    BITMEX_TEST_SECRET=...
+    BINANCE_KEY=...
+    BINANCE_SECRET=...
+    BINANCE_TEST_KEY=...
+    BINANCE_TEST_SECRET=...
+
+You can use ``env.sh`` to load these from ``.env-dev`` or ``.env-prod``:
+
+.. code:: bash
+
+    source env.sh        # loads .env-dev
+    source env.sh prod   # loads .env-prod
 
 Write your orders in the `morder.tsv <https://github.com/maliky/kolaBot/blob/master/kolaBot/morders.tsv>`__
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -276,7 +288,7 @@ Core program files
     │   │   └── trailstop.py  ->  orders that follow price variation and update 
     │   ├── price.py  ->  object to follow the different prices indexes
     │   ├── settings.py  ->  setting files (where your keys may be)
-    │   ├── secrets.py  ->  where API keys could be
+    │   ├── env.sh       ->  helper to load environment variables
     │   ├── types.py  ->  (new) types to start typing the programm
     │   └── utils
     │       ├── argfunc.py  ->  handle command line arguments
@@ -293,10 +305,11 @@ Core program files
     ├── multi_kola.py  ->  handle the (multiple runs) of one pair of orders 
     ├── pos_test.py  ->  (depreciated...)
     ├── run_multi_kola.py  ->  handle multiple pairs of orders (parse morders.tsv)
+    ├── env.sh       ->  source to load .env-dev or .env-prod
     └── tests
         └── utils.py
 
-    5 directories, 33 files
+    5 directories, 34 files
 
 Setup and annexes program files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
