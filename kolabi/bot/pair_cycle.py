@@ -1,12 +1,15 @@
-"""Pair-cycle runtime reducer and execution bridge.
+"""Pair-cycle reducer and runner bridge for the active bot runtime.
 
-Purpose: run one head/tail pair cycle against runtime state and exchange gateway, with pure transition decisions in `step_pair`.
-Inputs: `OrderPairSpec`, runtime market state, exchange acknowledgements,runtime events.
-Outputs: `PairCycleResult`, transition commands, and normalized broker replies.
-Side effects: exchange submission in runner methods and threaded IO bridging.
-Important types: `PairCycleState`, `RuntimeEvent`, `RuntimeCommand`,`OrderAck`, `ExecutionOutcome`.
+Purpose: evaluate one head/tail pair lifecycle through typed reducer moves and
+emit typed runtime commands, while keeping exchange IO in a thin runner shell.
+Inputs: `OrderPairSpec`, `StrategyState`, `EggMove`, market snapshots, and
+exchange acknowledgements.
+Outputs: `PairCycleResult`, updated strategy memory, and runtime commands.
+Side effects: exchange submission in runner methods and async/thread IO bridging.
+Important types: `PairCycleState`, `StrategyState`, `EggMove`,
+`RuntimeCommand`, `OrderAck`.
 Role: interpreter shell plus pure reducer core.
-Transitional: yes, bridges legacy vocabulary while moving to typed commands.
+Transitional: yes, still bridges legacy payloads at boundary helpers.
 """
 from __future__ import annotations
 
@@ -18,7 +21,8 @@ from typing import Protocol, cast
 
 from kolabi.bot.domain import (
     ConfirmedOrder,
-    ExecutionOutcome,
+    EggMove,
+    EggMoveKind,
     HeadState,
     OrderIdentity,
     OrderPairSpec,
@@ -26,39 +30,37 @@ from kolabi.bot.domain import (
     PairCycleEvent,
     PairCycleState,
     Side,
+    StrategyState,
     TailState,
-    classify_confirmed_state,
     normalize_reason,
 )
+from kolabi.bot.ids import head_client_order_id
+from kolabi.bot.order_building import head_order_dict, tail_command
+from kolabi.bot.pricing import pair_window_is_active, resolve_head_price
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     BrokerReply,
-    OrderDict,
-    OrderQty,
     OrderRole,
-    PriceOffset,
     RuntimeCommand,
     RuntimeCommandKind,
-    RuntimeEvent,
-    RuntimeEventKind,
-    StopPrice,
     Symbol,
-    decimal_to_float,
     to_decimal,
 )
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, PublicMarketState
 
-PAIR_EVENT_HEAD_HOOKED = "head_hooked"
-PAIR_EVENT_HEAD_SUBMITTED = "head_submitted"
-PAIR_EVENT_HEAD_PLAYED = "head_played"
-PAIR_EVENT_HEAD_PARTIAL_FILL = "head_partial_fill"
-PAIR_EVENT_HEAD_FAILED = "head_failed"
-PAIR_EVENT_HEAD_CANCELED = "head_canceled"
-PAIR_EVENT_HEAD_CLOSED = "head_closed"
-PAIR_EVENT_HEAD_ACKNOWLEDGED = "head_acknowledged"
+PAIR_EVENT_HEAD_HOOKED = EggMoveKind.HEAD_HOOKED.value
+PAIR_EVENT_HEAD_SUBMITTED = EggMoveKind.HEAD_SUBMITTED.value
+PAIR_EVENT_HEAD_PLAYED = EggMoveKind.HEAD_FILLED.value
+PAIR_EVENT_HEAD_PARTIAL_FILL = EggMoveKind.HEAD_PARTIAL_FILL.value
+PAIR_EVENT_HEAD_FAILED = EggMoveKind.HEAD_FAILED.value
+PAIR_EVENT_HEAD_CANCELED = EggMoveKind.HEAD_CANCELED_AFTER_FILL.value
+PAIR_EVENT_HEAD_CLOSED = EggMoveKind.HEAD_CLOSED.value
+PAIR_EVENT_HEAD_ACKNOWLEDGED = EggMoveKind.HEAD_ACKNOWLEDGED.value
 
 
 class ExchangeGateway(Protocol):
+    """Exchange write boundary used by the runner shell."""
+
     def place_order(
         self,
         side: str,
@@ -76,13 +78,14 @@ class ExchangeGateway(Protocol):
 
 @dataclass(frozen=True)
 class PairCycleResult:
+    """Runner result payload for one pair pass."""
+
     state: PairCycleState
     events: tuple[PairCycleEvent, ...]
 
 
 class PairCycleRunner:
-    """Runs one typed pair/head/tail cycle against DB state and an exchange."""
-# > define  a typed cycle...
+    """Run one typed pair cycle against DB state and an exchange boundary."""
 
     def __init__(
         self,
@@ -96,41 +99,48 @@ class PairCycleRunner:
         self.runtime_state = runtime_state
         self.symbol = symbol
         self.dry_run = dry_run
+        self.strategy_state: StrategyState | None = None
 
-    async def run_pairs_once(
+    async def run_pairs_once(self, pairs: list[OrderPairSpec]) -> list[PairCycleResult]:
+        """Evaluate all pairs once, concurrently at the IO boundary."""
+        now = datetime.now(timezone.utc)
+        return await asyncio.gather(*(self.run_pair_once(pair, now=now) for pair in pairs))
+
+    async def run_pair_once(
         self,
-        pairs: list[OrderPairSpec],
-    ) -> list[PairCycleResult]:
-        """Evaluate each pair once, concurrently at the IO boundary."""
-        return await asyncio.gather(*(self.run_pair_once(pair) for pair in pairs))
-
-    async def run_pair_once(self, pair: OrderPairSpec) -> PairCycleResult:
-        """Advance one order pair by at most one automatic step."""
-        state = PairCycleState(pair=pair)
+        pair: OrderPairSpec,
+        *,
+        now: datetime | None = None,
+    ) -> PairCycleResult:
+        """Advance one order pair by at most one submission step."""
+        current_time = now or datetime.now(timezone.utc)
+        state = self._state_for_pair(pair, current_time)
         events: list[PairCycleEvent] = []
         market = self._market_state()
-        if not pair_window_is_active(pair):
+        assert self.strategy_state is not None
+        if not pair_window_is_active(
+            pair,
+            launched_at=self.strategy_state.launched_at,
+            now=current_time,
+        ):
             return self._result(state, events, "pair outside time window")
         if market is None or not market.ready:
             return self._result(state, events, "public market state is not ready")
 
-        # > But where do I evaluate the other conditions other than time to hook the order?
-        # > eg, price conditions ?
-        symbol = Symbol(self.symbol)
         hooked, _ = step_pair(
             state,
-            RuntimeEvent(
-                kind=RuntimeEventKind.ORDER_REQUESTED,
-                at=datetime.now(timezone.utc),
-                symbol=symbol,
-                note=PAIR_EVENT_HEAD_HOOKED,
+            EggMove(
+                kind=EggMoveKind.HEAD_HOOKED,
+                occurred_at=current_time,
+                symbol=self.symbol,
             ),
         )
         events.append(PairCycleEvent(pair.name, hooked, "head hooked"))
         if self.dry_run:
+            self._save_pair_state(pair.name, hooked)
             return self._result(hooked, events, "dry run stopped before submission")
 
-        client_order_id = head_client_order_id(pair)
+        client_order_id = head_client_order_id(pair, at=current_time)
         submission_ack = await asyncio.to_thread(
             self._submit_head,
             pair,
@@ -139,36 +149,47 @@ class PairCycleRunner:
         )
         submitted, _ = step_pair(
             hooked,
-            RuntimeEvent(
-                kind=RuntimeEventKind.ORDER_ACK,
-                at=datetime.now(timezone.utc),
-                symbol=symbol,
+            EggMove(
+                kind=EggMoveKind.HEAD_SUBMITTED,
+                occurred_at=datetime.now(timezone.utc),
+                symbol=self.symbol,
                 order=head_order_dict(pair, client_order_id=client_order_id),
                 reply=broker_reply_from_ack(submission_ack, client_order_id=client_order_id),
-                note=PAIR_EVENT_HEAD_SUBMITTED,
             ),
         )
         events.append(PairCycleEvent(pair.name, submitted, "head submitted"))
-
-        confirmed_head = confirmed_from_ack(pair, submission_ack)
-        advanced, commands = step_pair(
+        self._save_pair_state(pair.name, submitted)
+        return self._result(
             submitted,
-            runtime_event_from_confirmed_head(
-                pair,
-                confirmed_head,
-                symbol=symbol,
-            ),
+            events,
+            "head submitted; awaiting private confirmation",
         )
-        if advanced.tail_mode in {None, TailState.LATENT}:
-            return self._result(advanced, events, "tail not eligible yet")
-        del commands
-        assert advanced.tail_mode is not None
-        events.append(
-            PairCycleEvent(pair.name, advanced, f"tail mode {advanced.tail_mode.value}")
+
+    def _state_for_pair(self, pair: OrderPairSpec, now: datetime) -> PairCycleState:
+        """Return persistent pair state from strategy memory or initialize it."""
+        if self.strategy_state is None:
+            self.strategy_state = StrategyState(launched_at=now, pairs={})
+        existing = self.strategy_state.pairs.get(pair.name)
+        if existing is None:
+            initial = PairCycleState(pair=pair)
+            self._save_pair_state(pair.name, initial)
+            return initial
+        if existing.pair != pair:
+            migrated = replace(existing, pair=pair)
+            self._save_pair_state(pair.name, migrated)
+            return migrated
+        return existing
+
+    def _save_pair_state(self, pair_name: str, state: PairCycleState) -> None:
+        """Persist one pair state in strategy memory."""
+        assert self.strategy_state is not None
+        self.strategy_state = replace(
+            self.strategy_state,
+            pairs={**self.strategy_state.pairs, pair_name: state},
         )
-        return PairCycleResult(advanced, tuple(events))
 
     def _market_state(self) -> PublicMarketState | None:
+        """Read the current public market state snapshot for this runner symbol."""
         if self.runtime_state is None:
             return None
         return self.runtime_state.fetch_market_state(self.symbol)
@@ -179,6 +200,7 @@ class PairCycleRunner:
         market: PublicMarketState,
         client_order_id: str,
     ) -> OrderAck:
+        """Submit the head order through the exchange boundary."""
         price = resolve_head_price(pair, market)
         quantity = resolve_quantity(pair)
         return self.exchange.place_order(
@@ -195,191 +217,160 @@ class PairCycleRunner:
         events: list[PairCycleEvent],
         message: str,
     ) -> PairCycleResult:
+        """Return a standardized pair-cycle result payload."""
         events.append(PairCycleEvent(state.pair.name, state, message))
         return PairCycleResult(state=state, events=tuple(events))
 
 
-def pair_window_is_active(pair: OrderPairSpec) -> bool:
-    """Return true when the relative launch window can run now.
-
-    TSV windows are expressed relative to launch time. During a one-shot cycle,
-    any window containing minute zero is active.
-    """
-    return pair.window.start_minutes <= 0 <= pair.window.end_minutes
-# > the above is not clear.  does the window.start_minutes update regularly so that if in the tsv it the windo
-# > is set for eg at [60,120] the pair.window.start_minutes will be under 0 ?
-
 def step_pair(
     state: PairCycleState,
-    event: RuntimeEvent,
+    move: EggMove,
 ) -> tuple[PairCycleState, tuple[RuntimeCommand, ...]]:
-    """Pure reducer for one pair/head/tail transition."""
-    # > increase the documentation
-    # > recall functional def of 'reducer'
-    if event.note == PAIR_EVENT_HEAD_HOOKED:
+    """Pure reducer for one pair transition.
+
+    A reducer maps current immutable state plus one typed move to next immutable
+    state and emitted commands, with no side effects.
+    """
+    if state.head_state in {HeadState.FAILED, HeadState.CLOSED}:
+        return state, ()
+
+    if move.kind == EggMoveKind.HEAD_HOOKED:
+        if state.head_state != HeadState.LATENT:
+            return state, ()
         next_state = replace(state, head_state=HeadState.HOOKED)
-        return next_state, (
-            RuntimeCommand(
-                kind=RuntimeCommandKind.PLACE,
-                symbol=event.symbol,
-                order=head_order_dict(next_state.pair),
-                reason=OrderRole.PRIMARY.value,
-            ),
+        command = RuntimeCommand(
+            kind=RuntimeCommandKind.PLACE,
+            symbol=cast(Symbol, move.symbol),
+            order=head_order_dict(next_state.pair),
+            reason=OrderRole.PRIMARY.value,
         )
-    if event.note == PAIR_EVENT_HEAD_SUBMITTED:
+        return next_state, (command,)
+
+    if move.kind == EggMoveKind.HEAD_SUBMITTED:
         next_state = replace(
             state,
             head_state=HeadState.SUBMITTED,
-            head_identity=head_identity_from_event(state, event),
+            head_identity=head_identity_from_move(state, move),
         )
         return next_state, ()
-    if event.note == PAIR_EVENT_HEAD_FAILED:
-        return (
-            replace(
-                state,
-                head_state=HeadState.FAILED,
-                head_identity=head_identity_from_event(state, event),
-                tail_mode=TailState.LATENT,
-                played_quantity=played_quantity_from_event(state, event),
-            ),
-            (),
-        )
-    if event.note == PAIR_EVENT_HEAD_CANCELED:
-        played_quantity = played_quantity_from_event(state, event)
-        if played_quantity > 0:
-            next_state = replace(
-                state,
-                head_state=HeadState.CLOSED,
-                head_identity=head_identity_from_event(state, event),
-                tail_mode=TailState.FLYING,
-                played_quantity=played_quantity,
-            )
-            return next_state, (tail_command(next_state, event, RuntimeCommandKind.PLACE),)
+
+    if move.kind == EggMoveKind.HEAD_FAILED:
         next_state = replace(
             state,
             head_state=HeadState.FAILED,
-            head_identity=head_identity_from_event(state, event),
+            head_identity=head_identity_from_move(state, move),
             tail_mode=TailState.LATENT,
-            played_quantity=0.0,
+            played_quantity=played_quantity_from_move(state, move),
         )
         return next_state, ()
-    if event.note == PAIR_EVENT_HEAD_PLAYED:
-        played_quantity = played_quantity_from_event(state, event)
-        next_state = replace(
-            state,
-            head_state=HeadState.LIVING,
-            head_identity=head_identity_from_event(state, event),
-            tail_mode=TailState.HOOKED,
-            played_quantity=played_quantity,
-        )
-        return next_state, (tail_command(next_state, event, RuntimeCommandKind.PLACE),)
-    if event.note == PAIR_EVENT_HEAD_PARTIAL_FILL:
-        played_quantity = played_quantity_from_event(state, event)
-        next_state = replace(
-            state,
-            head_state=HeadState.LIVING,
-            head_identity=head_identity_from_event(state, event),
-            tail_mode=TailState.FLAPPING,
-            played_quantity=played_quantity,
-        )
-        command_kind = (
-            RuntimeCommandKind.AMEND
-            if state.tail_identity is not None
-            else RuntimeCommandKind.PLACE
-        )
-        return next_state, (tail_command(next_state, event, command_kind),)
-    if event.note == PAIR_EVENT_HEAD_CLOSED:
-        played_quantity = played_quantity_from_event(state, event)
+
+    if move.kind == EggMoveKind.HEAD_CANCELED_ZERO_FILL:
+        if state.tail_mode is not None:
+            return state, ()
         next_state = replace(
             state,
             head_state=HeadState.CLOSED,
-            head_identity=head_identity_from_event(state, event),
+            head_identity=head_identity_from_move(state, move),
+            tail_mode=TailState.HOOKED,
+            played_quantity=played_quantity_from_move(state, move),
+        )
+        return next_state, (
+            tail_command(
+                next_state,
+                symbol=cast(Symbol, move.symbol),
+                kind=RuntimeCommandKind.PLACE,
+            ),
+        )
+
+    if move.kind == EggMoveKind.HEAD_CANCELED_AFTER_FILL:
+        played_quantity = played_quantity_from_move(state, move)
+        if (
+            state.head_state == HeadState.CLOSED
+            and state.played_quantity == played_quantity
+            and state.tail_mode in {TailState.FLYING, TailState.SUBMITTED}
+        ):
+            return state, ()
+        next_state = replace(
+            state,
+            head_state=HeadState.CLOSED,
+            head_identity=head_identity_from_move(state, move),
             tail_mode=TailState.FLYING,
             played_quantity=played_quantity,
         )
-        return next_state, (tail_command(next_state, event, RuntimeCommandKind.PLACE),)
+        return next_state, (_tail_command_for_state(next_state, move),)
+
+    if move.kind == EggMoveKind.HEAD_FILLED:
+        played_quantity = played_quantity_from_move(state, move)
+        if (
+            state.head_state == HeadState.LIVING
+            and state.played_quantity == played_quantity
+            and state.tail_mode in {TailState.HOOKED, TailState.SUBMITTED, TailState.FLYING}
+        ):
+            return state, ()
+        next_state = replace(
+            state,
+            head_state=HeadState.LIVING,
+            head_identity=head_identity_from_move(state, move),
+            tail_mode=TailState.HOOKED,
+            played_quantity=played_quantity,
+        )
+        return next_state, (_tail_command_for_state(next_state, move),)
+
+    if move.kind == EggMoveKind.HEAD_PARTIAL_FILL:
+        played_quantity = played_quantity_from_move(state, move)
+        if (
+            state.head_state == HeadState.LIVING
+            and state.played_quantity == played_quantity
+            and state.tail_mode == TailState.FLAPPING
+        ):
+            return state, ()
+        next_state = replace(
+            state,
+            head_state=HeadState.LIVING,
+            head_identity=head_identity_from_move(state, move),
+            tail_mode=TailState.FLAPPING,
+            played_quantity=played_quantity,
+        )
+        return next_state, (_tail_command_for_state(next_state, move),)
+
+    if move.kind == EggMoveKind.HEAD_CLOSED:
+        next_state = replace(
+            state,
+            head_state=HeadState.CLOSED,
+            head_identity=head_identity_from_move(state, move),
+            tail_mode=TailState.FLYING,
+            played_quantity=played_quantity_from_move(state, move),
+        )
+        return next_state, (_tail_command_for_state(next_state, move),)
+
     return state, ()
 
 
+def _tail_command_for_state(state: PairCycleState, move: EggMove) -> RuntimeCommand:
+    """Emit place/amend for tail based on existing runtime tail lifecycle."""
+    command_kind = RuntimeCommandKind.PLACE
+    if state.tail_identity is not None or state.tail_mode in {
+        TailState.HOOKED,
+        TailState.SUBMITTED,
+        TailState.FLAPPING,
+        TailState.FLYING,
+    }:
+        command_kind = RuntimeCommandKind.AMEND
+    if state.tail_identity is None and state.tail_mode in {TailState.HOOKED, TailState.FLYING}:
+        command_kind = RuntimeCommandKind.PLACE
+    return tail_command(
+        state,
+        symbol=cast(Symbol, move.symbol),
+        kind=command_kind,
+    )
+
+
 def resolve_quantity(pair: OrderPairSpec) -> float:
+    """Resolve and validate head quantity for exchange submission."""
     quantity = pair.head.quantity
     if quantity is None or quantity <= 0:
         raise ValueError(f"Order pair '{pair.name}' needs a positive head quantity")
-    return decimal_to_float(quantity)
-# > not do we use float here and not Decimal ?
-
-def resolve_head_price(pair: OrderPairSpec, market: PublicMarketState) -> float | None:
-    order_type = pair.head.order_type.replace("_", "").replace("-", "").lower()
-    if order_type in {"m", "market"}:
-        return None
-    reference = to_decimal(reference_price(pair.head.side, market))
-    lower, upper = pair.head.price_interval
-    if "pA" in pair.amount_type:
-        return decimal_to_float(lower if pair.head.side == Side.BUY else upper)
-    if "p%" in pair.amount_type:
-        offset = to_decimal(lower if pair.head.side == Side.BUY else upper)
-        return decimal_to_float(reference * (Decimal("1") + offset / Decimal("100")))
-    offset = to_decimal(lower if pair.head.side == Side.BUY else upper)
-    return decimal_to_float(reference + offset)
-
-
-def reference_price(side: Side, market: PublicMarketState) -> float:
-    if side == Side.BUY:
-        return market.best_bid or market.mid_price or 0.0
-    return market.best_ask or market.mid_price or 0.0
-
-# > those function about price quantities id do not seem well placed in this file
-
-def head_client_order_id(pair: OrderPairSpec) -> str:
-    safe_name = "".join(ch for ch in pair.name if ch.isalnum() or ch in {"_", "-"})
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    return f"kolabi-{safe_name}-head-{stamp}"[:64]
-
-
-def opposite_side(side: Side) -> Side:
-    if side == Side.BUY:
-        return Side.SELL
-    return Side.BUY
-
-
-def head_order_dict(pair: OrderPairSpec, *, client_order_id: str | None = None) -> OrderDict:
-    order: OrderDict = {
-        "side": pair.head.side.value,
-        "ordType": pair.head.order_type,
-    }
-    if pair.head.quantity is not None:
-        order["orderQty"] = cast(OrderQty, to_decimal(pair.head.quantity))
-    if client_order_id is not None:
-        order["clOrdID"] = client_order_id
-    return order
-
-
-def tail_order_dict(pair: OrderPairSpec) -> OrderDict:
-    order: OrderDict = {
-        "side": opposite_side(pair.head.side).value,
-        "ordType": pair.tail.order_type,
-    }
-    if pair.head.quantity is not None:
-        order["orderQty"] = cast(OrderQty, to_decimal(pair.head.quantity))
-    if pair.tail.price is not None:
-        order["stopPx"] = cast(StopPrice, to_decimal(pair.tail.price))
-    if pair.tail.delta is not None:
-        order["oDelta"] = cast(PriceOffset, to_decimal(pair.tail.delta))
-    return order
-
-# > need to add a least one line of documenation per function.
-
-def tail_command(
-    state: PairCycleState,
-    event: RuntimeEvent,
-    kind: RuntimeCommandKind,
-) -> RuntimeCommand:
-    return RuntimeCommand(
-        kind=kind,
-        symbol=event.symbol,
-        order=tail_order_dict(state.pair),
-        reason=OrderRole.TAIL.value,
-    )
+    return float(to_decimal(quantity))
 
 
 def broker_reply_from_ack(
@@ -387,6 +378,7 @@ def broker_reply_from_ack(
     *,
     client_order_id: str | None = None,
 ) -> BrokerReply:
+    """Normalize exchange acknowledgement into a broker-reply shaped mapping."""
     reply: BrokerReply = {
         "orderID": ack.order_id,
         "ordStatus": ack.status,
@@ -398,18 +390,19 @@ def broker_reply_from_ack(
     if ack.price is not None:
         reply["price"] = ack.price
     if ack.executed_qty is not None:
-        reply["cumQty"] = ack.executed_qty  # type: ignore[typeddict-unknown-key]
+        reply["cumQty"] = float(to_decimal(ack.executed_qty))  # type: ignore[typeddict-unknown-key]
     if ack.orig_qty is not None:
-        reply["orderQty"] = ack.orig_qty  # type: ignore[typeddict-unknown-key]
+        reply["orderQty"] = float(to_decimal(ack.orig_qty))  # type: ignore[typeddict-unknown-key]
     return reply
 
 
-def head_identity_from_event(
+def head_identity_from_move(
     state: PairCycleState,
-    event: RuntimeEvent,
+    move: EggMove,
 ) -> OrderIdentity | None:
-    reply = event.reply or {}
-    order = event.order or {}
+    """Extract head order identity from a typed move payload."""
+    reply = move.reply or {}
+    order = move.order or {}
     order_id = reply.get("orderID")
     client_order_id = reply.get("clOrdID") or order.get("clOrdID")
     if order_id is None and client_order_id is None:
@@ -422,84 +415,52 @@ def head_identity_from_event(
     )
 
 
-def played_quantity_from_event(
-    state: PairCycleState,
-    event: RuntimeEvent,
-) -> float:
-    reply = event.reply or {}
+def played_quantity_from_move(state: PairCycleState, move: EggMove) -> float:
+    """Read played quantity from move payload and fall back to existing state."""
+    reply = move.reply or {}
     for key in ("cumQty", "executedQty", "filledQty", "filled_quantity"):
-        value = reply.get(key)  # type: ignore[arg-type]
-        if isinstance(value, (int, float)):
-            return float(value)
+        value = reply.get(key)
+        if isinstance(value, (int, float, Decimal, str)):
+            return max(float(to_decimal(value)), 0.0)
     return state.played_quantity
 
 
-def runtime_event_from_confirmed_head(
+def egg_move_from_confirmed_head(
     pair: OrderPairSpec,
     head: ConfirmedOrder,
     *,
-    symbol: Symbol,
-) -> RuntimeEvent:
-    note = PAIR_EVENT_HEAD_ACKNOWLEDGED
+    symbol: str,
+) -> EggMove:
+    """Convert private confirmation facts into a typed reducer move."""
+    kind = EggMoveKind.HEAD_ACKNOWLEDGED
     if head.state == HeadState.FAILED:
-        note = PAIR_EVENT_HEAD_FAILED
+        kind = EggMoveKind.HEAD_FAILED
     elif head.state == HeadState.CLOSED and head.filled_quantity > 0:
-        note = PAIR_EVENT_HEAD_CLOSED
+        kind = EggMoveKind.HEAD_CANCELED_AFTER_FILL
     elif head.state == HeadState.CLOSED:
-        note = PAIR_EVENT_HEAD_CANCELED
+        kind = EggMoveKind.HEAD_CANCELED_ZERO_FILL
     elif head.reason == OrderReason.PARTIAL_FILL:
-        note = PAIR_EVENT_HEAD_PARTIAL_FILL
+        kind = EggMoveKind.HEAD_PARTIAL_FILL
     elif head.is_played:
-        note = PAIR_EVENT_HEAD_PLAYED
-    return RuntimeEvent(
-        kind=RuntimeEventKind.ORDER_VALIDATED,
-        at=datetime.now(timezone.utc),
+        kind = EggMoveKind.HEAD_FILLED
+
+    return EggMove(
+        kind=kind,
+        occurred_at=datetime.now(timezone.utc),
         symbol=symbol,
         reply={
             "orderID": head.identity.exchange_order_id or "",
             "clOrdID": head.identity.client_order_id or "",
             "ordStatus": head.state.value,
             "execType": head.reason.value,
-            "cumQty": head.filled_quantity,  # type: ignore[typeddict-unknown-key]
-            "orderQty": head.total_quantity,  # type: ignore[typeddict-unknown-key]
+            "cumQty": head.filled_quantity,
+            "orderQty": head.total_quantity,
         },
-        note=note,
-    )
-
-
-def confirmed_from_ack(pair: OrderPairSpec, ack: OrderAck) -> ConfirmedOrder:
-    reason = reason_from_status(ack.status)
-    status = ack.status.strip().lower()
-    played = reason in {
-        OrderReason.FULL_FILL,
-        OrderReason.PARTIAL_FILL,
-        OrderReason.STOP_ORDER_TRIGGERED,
-    } or bool(ack.executed_qty and ack.executed_qty > 0)
-    canceled = status in {"canceled", "cancelled", "filled"}
-    if canceled and played:
-        outcome = ExecutionOutcome.CANCELED_PLAYED
-    elif canceled and not played:
-        outcome = ExecutionOutcome.CANCELED_UNPLAYED
-    elif played:
-        outcome = ExecutionOutcome.PLAYED
-    else:
-        outcome = ExecutionOutcome.NEW
-    state = classify_confirmed_state(outcome)
-    return ConfirmedOrder(
-        identity=OrderIdentity(
-            pair_name=pair.name,
-            role="head",
-            client_order_id=None,
-            exchange_order_id=ack.order_id,
-        ),
-        state=state,
-        reason=reason,
-        filled_quantity=decimal_to_float(ack.executed_qty or 0.0),
-        total_quantity=decimal_to_float(ack.orig_qty or pair.head.quantity or 0.0),
     )
 
 
 def reason_from_status(status: str) -> OrderReason:
+    """Normalize acknowledgement status text into a typed order reason."""
     normalized = status.replace(" ", "_").replace("-", "_").lower()
     if normalized in {"partiallyfilled", "partial_fill"}:
         return OrderReason.PARTIAL_FILL

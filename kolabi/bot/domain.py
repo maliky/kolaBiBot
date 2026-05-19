@@ -1,20 +1,21 @@
 """Bot domain model and tagged state vocabulary.
 
-Purpose: define pure domain enums/dataclasses for head/tail lifecycle, reasons,
-pair specifications, and confirmation outcome classification.
+Purpose: define pure domain enums/dataclasses for pair lifecycle, strategy
+state, and reducer events used by the active pair-cycle runtime.
 Inputs: normalized side/order/reason strings and strategy fields.
 Outputs: typed domain records and pure classification helpers.
 Side effects: none.
-Important types: `HeadState`, `TailState`, `OrderReason`,
-`ExecutionOutcome`, `OrderPairSpec`, `ConfirmedOrder`.
+Important types: `HeadState`, `TailState`, `OrderReason`, `ExecutionOutcome`,
+`OrderPairSpec`, `PairCycleState`, `EggMove`, `StrategyState`.
 Role: pure logic.
 Transitional: yes, includes compatibility aliases (`OrderState`, `TailMode`).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import Mapping, Protocol
 
 NumberPair = tuple[float, float]
 
@@ -73,6 +74,18 @@ class ExecutionOutcome(StrEnum):
     PLAYED = "played"
     CANCELED_UNPLAYED = "canceled_unplayed"
     CANCELED_PLAYED = "canceled_played"
+
+
+class EggMoveKind(StrEnum):
+    HEAD_HOOKED = "head_hooked"
+    HEAD_SUBMITTED = "head_submitted"
+    HEAD_FAILED = "head_failed"
+    HEAD_CANCELED_ZERO_FILL = "head_canceled_zero_fill"
+    HEAD_CANCELED_AFTER_FILL = "head_canceled_after_fill"
+    HEAD_PARTIAL_FILL = "head_partial_fill"
+    HEAD_FILLED = "head_filled"
+    HEAD_CLOSED = "head_closed"
+    HEAD_ACKNOWLEDGED = "head_acknowledged"
 
 
 PLAYED_REASONS = frozenset(
@@ -208,6 +221,29 @@ class PairCycleState:
     head_identity: OrderIdentity | None = None
     tail_identity: OrderIdentity | None = None
     played_quantity: float = 0.0
+
+
+@dataclass(frozen=True)
+class EggMove:
+    """Typed reducer input for one pair transition step.
+
+    This replaces note-string dispatch in the pair reducer.
+    """
+
+    kind: EggMoveKind
+    occurred_at: datetime
+    symbol: str
+    order: Mapping[str, object] | None = None
+    reply: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class StrategyState:
+    """Persistent strategy memory owned by the Chronos supervisor layer."""
+
+    launched_at: datetime
+    pairs: dict[str, PairCycleState]
+    last_event_id: str | None = None
 
 
 @dataclass(frozen=True)
