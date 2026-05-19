@@ -1,18 +1,30 @@
 # -*- coding: utf-8 -*-
-# a tester
+"""Legacy runtime price tracker with stop/flex tail state.
+
+Purpose: maintain evolving price/tail dataframe used by trail-stop logic and
+derive stop/flex/reference tail values.
+Inputs: streamed market price and reference price samples.
+Outputs: updated tail values and variation/scaling metrics.
+Side effects: mutable pandas dataframe state and logging.
+Important types: `priceT`, `sideT`, `symbT`, pandas `DataFrame`/`Series`.
+Role: interpreter shell with embedded logic.
+Transitional: yes, core tail derivation is partially extracted to pure helpers.
+"""
 from collections import OrderedDict
 from typing import Iterable, Iterator, Optional
 
 import numpy as np
-from kolabi.runtime.legacy.kola.kolatypes import priceT, sideT, symbT
-from kolabi.runtime.legacy.kola.utils.constantes import (
+from pandas import DataFrame, Index, Series, Timedelta, concat, isna, to_datetime
+
+from kolabi.runtime.kola.kolatypes import priceT, sideT, symbT
+from kolabi.runtime.kola.pure_runtime import ref_tail_from_reference
+from kolabi.runtime.kola.utils.constantes import (
     MAX_PRICE_VARIATION,
     PRICE_PRECISION,
 )
-from kolabi.runtime.legacy.kola.utils.datefunc import now
-from kolabi.runtime.legacy.kola.utils.general import contains, round_sprice
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
-from pandas import DataFrame, Index, Series, Timedelta, concat, isna, to_datetime
+from kolabi.runtime.kola.utils.datefunc import now
+from kolabi.runtime.kola.utils.general import contains, round_sprice
+from kolabi.runtime.kola.utils.logfunc import get_logger
 
 PRICE_COLUMNS = [
     "date",
@@ -229,12 +241,14 @@ class PriceObj:
         sera sortie du bois (ie assure une prise)
         """
         refPrice = self.get_refPrice(refPrice)
-
-        sens = 1 if self.head.lower() == "buy" else -1
-        epaisseur = refPrice * self.tail_perct_init / 100
-        ofs = -sens * epaisseur
-
-        refTail = round_sprice(refPrice + ofs, self.symbol)
+        refTail = round_sprice(
+            ref_tail_from_reference(
+                ref_price=refPrice,
+                head=self.head,
+                tail_percent=self.tail_perct_init,
+            ),
+            self.symbol,
+        )
 
         return refTail
 

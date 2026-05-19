@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from kolabi.runtime.legacy.kola.orders.condition import Condition
-from kolabi.runtime.legacy.kola.price import PriceObj
+from kolabi.runtime.kola.orders.condition import Condition
+from kolabi.runtime.kola.price import PriceObj
 
 
 @dataclass

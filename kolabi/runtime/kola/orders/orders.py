@@ -3,15 +3,15 @@
 import logging
 from time import sleep
 
-from kolabi.runtime.legacy.kola.bargain import LegacyBargain
+from kolabi.runtime.kola.bargain import KolaBargain
 
-# from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
-from kolabi.runtime.legacy.kola.settings import API_ERROR_INTERVAL, LOGNAME
-from kolabi.runtime.legacy.kola.utils.constantes import PRICE_PRECISION
-from kolabi.runtime.legacy.kola.utils.datefunc import now
-from kolabi.runtime.legacy.kola.utils.exceptions import InvalidOrdStatus
-from kolabi.runtime.legacy.kola.utils.general import round_sprice, trim_dic
-from kolabi.runtime.legacy.kola.utils.pricefunc import setdef_stopPrice
+# from kolabi.runtime.kola.utils.logfunc import get_logger
+from kolabi.runtime.kola.settings import API_ERROR_INTERVAL, LOGNAME
+from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
+from kolabi.runtime.kola.utils.datefunc import now
+from kolabi.runtime.kola.utils.exceptions import InvalidOrdStatus
+from kolabi.runtime.kola.utils.general import round_sprice, trim_dic
+from kolabi.runtime.kola.utils.pricefunc import setdef_stopPrice
 
 mlogger = logging.getLogger("")
 mlogger.name = f"{LOGNAME}.{__name__}"
@@ -275,7 +275,7 @@ def amend_stop_price(brg, orderID, newStopPx):
         raise (e)
 
 
-def amend_trailstop(brg: LegacyBargain, order: str, newPegOffsetValue: float):
+def amend_trailstop(brg: KolaBargain, order: str, newPegOffsetValue: float):
     """Amend la pegOffsetValue.
 
     (le delta de la sécurité (hook, crochet) par rapport au prix du marché).
@@ -310,7 +310,7 @@ def cancel_all_orders(brg):
     return True
 
 
-def cancel_order(brg: LegacyBargain, order):
+def cancel_order(brg: KolaBargain, order):
     """Cancel the Bargain order."""
     while True:
         try:

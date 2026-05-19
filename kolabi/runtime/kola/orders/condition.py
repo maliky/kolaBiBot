@@ -1,14 +1,26 @@
 # -*- Codingn: Utf-8 -*-
-"""Conditions pour les ordres."""
+"""Legacy order condition evaluator.
+
+Purpose: represent and evaluate price/time/hook conditions for runtime orders.
+Inputs: condition rows plus market/broker state accessed through `BargainLike`.
+Outputs: boolean condition truth values and updated condition frames.
+Side effects: logging and mutable dataframe state updates.
+Important types: `BargainLike`, pandas `DataFrame`/`Series`, hook/order status
+literals.
+Role: interpreter shell with embedded logic.
+Transitional: yes, pure comparison helpers are extracted but dataframe-based
+state remains.
+"""
 from collections.abc import Sequence
 from typing import List, Optional, Set, Tuple, Union
 
-from kolabi.runtime.legacy.kola.kolatypes import ordStatusL
-from kolabi.runtime.legacy.kola.orders.orders import get_execPrice
-from kolabi.runtime.legacy.kola.utils.constantes import PRICELIST_DFT
-from kolabi.runtime.legacy.kola.utils.datefunc import now
-from kolabi.runtime.legacy.kola.utils.general import compteur
-from kolabi.runtime.legacy.kola.utils.logfunc import (
+from kolabi.runtime.kola.kolatypes import ordStatusL
+from kolabi.runtime.kola.orders.orders import get_execPrice
+from kolabi.runtime.kola.pure_runtime import evaluate_comparison
+from kolabi.runtime.kola.utils.constantes import PRICELIST_DFT
+from kolabi.runtime.kola.utils.datefunc import now
+from kolabi.runtime.kola.utils.general import compteur
+from kolabi.runtime.kola.utils.logfunc import (
     get_logfunc,
     get_logger,
     throttled_log,
@@ -249,8 +261,8 @@ class Condition:
 
     def evalue(self, a, op: str, b) -> bool:
         """Retourne <bool> a op b où op est un operateur de type string."""
-        assert op in ["<", ">"], f"op={op}, a,b={a,b}"
-        return bool(a < b) if op == "<" else bool(a > b)
+        assert op in ["<", ">", "==", "!="], f"op={op}, a,b={a,b}"
+        return evaluate_comparison(a, op, b)
 
     def is_hooked(self) -> bool:
         """

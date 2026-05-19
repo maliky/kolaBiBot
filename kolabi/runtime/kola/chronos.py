@@ -1,45 +1,59 @@
 # -*- coding: utf-8 -*-
+# mypy: ignore-errors
+"""Legacy Chronos order interpreter shell.
+
+Purpose: consume order loads from queues, submit/amend/cancel through exchange
+helpers, and confirm execution transitions.
+Inputs: `OrderLoad` messages, broker runtime state, validation conditions.
+Outputs: broker replies and validation payloads pushed to queues.
+Side effects: thread lifecycle, blocking queue IO, exchange calls, logging.
+Important types: `OrderLoad`, `RuntimeCommand`, `ValidationCondition`,
+`BrokerReply`.
+Role: interpreter shell.
+Transitional: yes, public method names are migrated but legacy class shape
+remains for compatibility.
+"""
 import pickle
 import threading
 from queue import Empty, Queue
 from time import sleep
 from typing import Any, Dict, Optional
 
-import kolabi.runtime.legacy.kola.utils.exceptions as ke
-
-# from kolabi.runtime.legacy.kola.orders import orders
+# from kolabi.runtime.kola.orders import orders
 import pandas as pd
-from kolabi.runtime.legacy.kola.orders.orders import (
+
+import kolabi.runtime.kola.utils.exceptions as ke
+from kolabi.runtime.kola.orders.orders import (
     get_execPrice,
 )
-from kolabi.runtime.legacy.kola.orders.trailstop import TrailStop
-from kolabi.runtime.legacy.kola.utils.constantes import PRICE_PRECISION
-from kolabi.runtime.legacy.kola.utils.datefunc import now, setdef_timedelta
-from kolabi.runtime.legacy.kola.utils.general import (
+from kolabi.runtime.kola.orders.trailstop import TrailStop
+from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
+from kolabi.runtime.kola.utils.datefunc import now, setdef_timedelta
+from kolabi.runtime.kola.utils.general import (
     contains,
     opt_pop_if_in_,
     sort_dic_list,
     trim_dic,
 )
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
-from kolabi.runtime.legacy.kola.utils.orderfunc import (
+from kolabi.runtime.kola.utils.logfunc import get_logger
+from kolabi.runtime.kola.utils.orderfunc import (
     get_order_from,
     normalize_order_dict,
 )
-from kolabi.runtime.legacy.kola.utils.pricefunc import setdef_stopPrice
-from kolabi.shared.core.runtime_types import (
-    BargainLike,
-    BrokerReply,
-    OrderDict,
-    OrderLoad,
-    ValidationCondition,
-    RuntimeCommand,
-)
+from kolabi.runtime.kola.utils.pricefunc import setdef_stopPrice
 from kolabi.shared.core.runtime_commands import (
     execute_runtime_command,
     runtime_command_from_order,
     timeout_override_minutes_for,
     validation_conditions_for,
+)
+from kolabi.shared.core.runtime_types import (
+    BargainLike,
+    BrokerReply,
+    OrderDict,
+    OrderLoad,
+    RuntimeCommand,
+    ValidationCondition,
 )
 
 
@@ -51,6 +65,7 @@ class Chronos(threading.Thread):
         self,
         brg: BargainLike,
         recpt_queue: Queue,
+        confirmation_queue: Optional[Queue] = None,
         valid_queue: Optional[Queue] = None,
         logger=None,
         nameT: str = "chrsT",
@@ -61,18 +76,26 @@ class Chronos(threading.Thread):
         threading.Thread.__init__(self, name=nameT)
         self.brg: BargainLike = brg
         self.recpt_queue = recpt_queue
-        self.valid_queue = valid_queue
-        self.reply_queue: Queue = Queue()
+        self.confirmation_queue = confirmation_queue if confirmation_queue is not None else valid_queue
+        self.submission_ack_queue: Queue = Queue()
         self.stop = False
         self.logger = get_logger(logger, name=__name__, sLL="INFO")
 
         self.logger.info(f"Fini init {self}")
 
+    @property
+    def valid_queue(self) -> Optional[Queue]:
+        return self.confirmation_queue
+
+    @property
+    def reply_queue(self) -> Queue:
+        return self.submission_ack_queue
+
     def __repr__(self) -> str:
         queues = {
             "reception": self.recpt_queue,
-            "validation": self.valid_queue,
-            "reply": self.reply_queue,
+            "validation": self.confirmation_queue,
+            "reply": self.submission_ack_queue,
         }
         rep = f"Chronos thread, using queues {queues}"
         return rep
@@ -104,8 +127,8 @@ class Chronos(threading.Thread):
             except (ke.InvalidOrdStatus, ke.InvalidOrderID) as e:
                 if ordType.startswith("amend"):
                     self.logger.error("Amending failed.  No validation!")
-                    assert self.valid_queue is not None, "valid_queue doit etre definie"
-                    self.valid_queue.put(
+                    assert self.confirmation_queue is not None, "confirmation_queue doit etre definie"
+                    self.confirmation_queue.put(
                         {
                             "brokerReply": False,
                             "exgLoad": rcvLoad,
@@ -117,8 +140,8 @@ class Chronos(threading.Thread):
 
             except ke.InvalidOrderQty:
                 self.logger.error("Canceling order and closing the essai.")
-                assert self.valid_queue is not None, "valid_queue doit etre definie"
-                self.valid_queue.put(
+                assert self.confirmation_queue is not None, "confirmation_queue doit etre definie"
+                self.confirmation_queue.put(
                     {"brokerReply": False, "exgLoad": rcvLoad, "execValidation": False}
                 )
 
@@ -133,8 +156,8 @@ class Chronos(threading.Thread):
                 reducedQty = round(overQty * 0.8)
                 if reducedQty < 31:
                     self.logger.exception("Canceling order.  Closing the essai?")
-                    assert self.valid_queue is not None, "valid_queue doit etre definie"
-                    self.valid_queue.put(
+                    assert self.confirmation_queue is not None, "confirmation_queue doit etre definie"
+                    self.confirmation_queue.put(
                         {
                             "brokerReply": False,
                             "exgLoad": rcvLoad,
@@ -178,7 +201,7 @@ class Chronos(threading.Thread):
         if minutes_override is not None:
             timeOut = pd.Timedelta(minutes_override, unit="m")
 
-        self.reply_queue.put(
+        self.submission_ack_queue.put(
             execute_runtime_command(
                 self.brg,
                 command,
@@ -198,7 +221,7 @@ class Chronos(threading.Thread):
         threadName = f'VT-{rcvLoad["order"]["clOrdID"].replace("mlk_", "")[:10]}'
         self.logger.info(f"{threadName} check validation avec {kwargs}")
         threading.Thread(
-            target=self.wait_for_change,
+            target=self.confirm_pair_transition,
             name=threadName,
             kwargs=kwargs,
         ).start()
@@ -248,15 +271,15 @@ class Chronos(threading.Thread):
 
     def log_reply(self, absMsg: str = "No reply available") -> None:
         """Log the reply if available"""
-        reply = self.wait_for_reply(block=False)
+        reply = self.await_submission_ack(block=False)
         if reply is None:
             self.logger.error(absMsg)
         else:
             self.logger.error(f"Reply={trim_dic(reply, trimid=12)}")
-            self.reply_queue.put(reply)
+            self.submission_ack_queue.put(reply)
 
     # @log_args(level='DEBUG')
-    def wait_for_reply(
+    def await_submission_ack(
         self,
         block: bool = True,
         timeout: Optional[float] = None,
@@ -265,7 +288,7 @@ class Chronos(threading.Thread):
         reply: Optional[BrokerReply] = None
         try:
             # if block is false and nothing in queue raise queue.Empty
-            reply = self.reply_queue.get(block, timeout)
+            reply = self.submission_ack_queue.get(block, timeout)
             if block and timeout <= 0:
                 self.logger.debug(
                     f"timeout={bool(timeout)} and block={block} while "
@@ -287,7 +310,7 @@ class Chronos(threading.Thread):
             )
             return None
 
-    def get_ID_from(self, rcvOrder, idType: str = "clOrdID") -> str | None:
+    def extract_client_or_exchange_id(self, rcvOrder, idType: str = "clOrdID") -> str | None:
         """Return the ID from the rcvOrder (a dict containing an order)."""
         assert rcvOrder is not None, f"rcvOrder={rcvOrder} should not be None."
         try:
@@ -296,7 +319,7 @@ class Chronos(threading.Thread):
             self.logger.error(f"rcvOrder, idType={rcvOrder, idType}")
             raise (e)
 
-    def wait_for_change(
+    def confirm_pair_transition(
         self,
         valconditions: Optional[list[ValidationCondition]] = None,
         rcvload: Optional[OrderLoad] = None,
@@ -325,7 +348,7 @@ class Chronos(threading.Thread):
         clOrdID = (
             self.brg.crypto_api.dummyID
             if self.brg.crypto_api.dummy
-            else self.get_ID_from(rcvload, "clOrdID")
+            else self.extract_client_or_exchange_id(rcvload, "clOrdID")
         )
 
         startTime = now()
@@ -344,10 +367,10 @@ class Chronos(threading.Thread):
 
         timeLeft = update_timeleft()
 
-        while timeLeft > 0 and not self.is_changed_(
+        while timeLeft > 0 and not self.matches_confirmation_rule(
             clOrdID, conds, validateCancel=False
         ):
-            # #### is_changed_ important !
+            # #### matches_confirmation_rule important !
             # validating cancel enable resubminting orders ?
 
             sleep(waitstep)
@@ -358,7 +381,7 @@ class Chronos(threading.Thread):
                 sleep(1)  # avoid too much logging and throwtlle the system
 
         # block until next reply
-        reply = self.wait_for_reply(block=True, timeout=timeLeft)
+        reply = self.await_submission_ack(block=True, timeout=timeLeft)
 
         # problème avec les reply None
 
@@ -369,7 +392,7 @@ class Chronos(threading.Thread):
             # mais si ce n'est pas la bonne reply ? on va tester après
             replyID = rcvload["order"]["clOrdID"]
         else:
-            replyID = self.get_ID_from(reply, "clOrdID")
+            replyID = self.extract_client_or_exchange_id(reply, "clOrdID")
 
         seenReplyIDs: Dict[Any, Any] = {}
 
@@ -386,13 +409,13 @@ class Chronos(threading.Thread):
                 )
             if reply:
                 # to be sure not to put Nones back in the loop
-                self.reply_queue.put(reply)
+                self.submission_ack_queue.put(reply)
 
             try:
                 # can get None here, not good... if timeout..
-                reply = self.wait_for_reply(timeout=timeLeft)
+                reply = self.await_submission_ack(timeout=timeLeft)
                 replyID = (
-                    clOrdID if reply is None else self.get_ID_from(reply, "clOrdID")
+                    clOrdID if reply is None else self.extract_client_or_exchange_id(reply, "clOrdID")
                 )
             except Exception as e:
                 self.logger.error(
@@ -420,12 +443,12 @@ class Chronos(threading.Thread):
         )
         # self.logger.debug(f"Détail validation {validation} et reply")
 
-        assert self.valid_queue is not None, "valid_queue doit etre definie"
-        self.valid_queue.put(
+        assert self.confirmation_queue is not None, "confirmation_queue doit etre definie"
+        self.confirmation_queue.put(
             {"brokerReply": reply, "exgLoad": rcvload, "execValidation": validation}
         )
 
-    def is_changed_(
+    def matches_confirmation_rule(
         self,
         ID,
         valconditions: Optional[list[ValidationCondition]] = None,
@@ -444,14 +467,14 @@ class Chronos(threading.Thread):
         )
         for dic in conds:
             exectype, orderstatus = dic["exectype"], dic["orderstatus"]
-            statusType[f"is_{exectype}-{orderstatus}"] = self.ID_type_status_exec(
+            statusType[f"is_{exectype}-{orderstatus}"] = self.latest_execution_for_status(
                 ID, exectype, orderstatus
             )
 
         # #### by default we handle cancel orders ####
         if validateCancel:
             # #### so cancel will act as condition validated
-            statusType["is_canceled"] = self.ID_type_status_exec(
+            statusType["is_canceled"] = self.latest_execution_for_status(
                 ID, "Canceled", "Canceled"
             )
 
@@ -460,7 +483,7 @@ class Chronos(threading.Thread):
         return any(statusType.values())
 
     #    @log_args(LOGNAME)
-    def ID_type_status_exec(
+    def latest_execution_for_status(
         self,
         ID,
         exectype: str = "New",
@@ -558,3 +581,33 @@ class Chronos(threading.Thread):
             )
 
         return stopPx
+
+    # Backward-compatible aliases for legacy call sites.
+    def wait_for_change(self, *args: Any, **kwargs: Any) -> None:
+        self.confirm_pair_transition(*args, **kwargs)
+
+    def wait_for_reply(
+        self,
+        block: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Optional[BrokerReply]:
+        return self.await_submission_ack(block=block, timeout=timeout)
+
+    def get_ID_from(self, rcvOrder: object, idType: str = "clOrdID") -> str | None:
+        return self.extract_client_or_exchange_id(rcvOrder, idType=idType)
+
+    def is_changed_(
+        self,
+        ID: object,
+        valconditions: Optional[list[ValidationCondition]] = None,
+        validateCancel: bool = True,
+    ) -> bool:
+        return self.matches_confirmation_rule(ID, valconditions, validateCancel)
+
+    def ID_type_status_exec(
+        self,
+        ID: object,
+        exectype: str = "New",
+        orderstatus: str = "New",
+    ) -> object:
+        return self.latest_execution_for_status(ID, exectype, orderstatus)

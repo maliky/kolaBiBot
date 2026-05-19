@@ -1,13 +1,24 @@
 # -*- coding: utf-8 -*-
-"""Hooked Order"""
+"""Legacy hooked-order interpreter.
+
+Purpose: extend `OrderConditionned` with hook source/status gating and relative
+price/time updates after hook activation.
+Inputs: hook identifiers/status, condition frame, and order payload.
+Outputs: broker validation reply for the hooked order.
+Side effects: mutable order and condition frame updates, queue submission, logs.
+Important types: `OrderConditionned`, `OrderDict`, `BargainLike`.
+Role: interpreter shell.
+Transitional: yes, uses pure update helper but keeps legacy object mutation.
+"""
 from itertools import product
 from queue import Queue
 from time import sleep
 from typing import Optional, Set
 
-from kolabi.runtime.legacy.kola.orders.ordercond import OrderConditionned
-from kolabi.runtime.legacy.kola.utils.datefunc import now
-from kolabi.runtime.legacy.kola.utils.general import trim_dic
+from kolabi.runtime.kola.orders.ordercond import OrderConditionned
+from kolabi.runtime.kola.pure_runtime import derive_hooked_order_update
+from kolabi.runtime.kola.utils.datefunc import now
+from kolabi.runtime.kola.utils.general import trim_dic
 from kolabi.shared.core.runtime_types import BargainLike, OrderDict
 from pandas import DataFrame
 
@@ -168,18 +179,17 @@ class HookOrder(OrderConditionned):
 
         cond_h_price = self.get_new_cond_values("price", "<")
         cond_l_price = self.get_new_cond_values("price", ">")
-
-        decl_price = {"buy": cond_l_price, "sell": cond_h_price}[_side]
-
-        if _old_price is not None:
-            self.order["price"] = decl_price
-
-        if _old_stopPx is not None:
-            if _old_price is not None:
-                price_delta = _old_price - _old_stopPx
-                self.order["stopPx"] = decl_price - price_delta
-            else:
-                self.order["stopPx"] = decl_price
+        update = derive_hooked_order_update(
+            side=_side,
+            old_price=_old_price,
+            old_stop_px=_old_stopPx,
+            condition_high_price=cond_h_price,
+            condition_low_price=cond_l_price,
+        )
+        if update.price is not None:
+            self.order["price"] = update.price
+        if update.stop_px is not None:
+            self.order["stopPx"] = update.stop_px
 
         self.logger.info(f"*updated order*\nold={_old_order},\nnew={self.order}")
 

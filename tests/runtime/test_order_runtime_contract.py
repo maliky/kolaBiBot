@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from queue import Empty, Queue
 
-from kolabi.runtime.legacy.kola.orders.condition import Condition
-from kolabi.runtime.legacy.kola.orders.ordercond import OrderConditionned
-from kolabi.runtime.legacy.kola.orders.trailstop import TrailStop
+from kolabi.runtime.kola.orders.condition import Condition
+from kolabi.runtime.kola.orders.ordercond import OrderConditionned
+from kolabi.runtime.kola.orders.trailstop import TrailStop
 
 
 @dataclass

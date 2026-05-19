@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kolabi.runtime.legacy.kola.utils.orderfunc import (
+from kolabi.runtime.kola.utils.orderfunc import (
     create_order,
     get_order_from,
     normalize_order_dict,

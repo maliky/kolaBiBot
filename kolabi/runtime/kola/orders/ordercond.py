@@ -1,19 +1,30 @@
 # -*- coding: utf-8 -*-
+"""Legacy conditioned-order interpreter.
+
+Purpose: run one conditioned order thread, wait for condition truth, submit to
+Chronos, and route broker validation replies back to the order owner.
+Inputs: send/validation queues, `Condition`, and `OrderDict` payload.
+Outputs: broker validation reply (`BrokerReply | bool`) and lifecycle logs.
+Side effects: thread lifecycle, queue blocking IO, mutable order state.
+Important types: `OrderDict`, `OrderLoad`, `ValidationLoad`, `BrokerReply`.
+Role: interpreter shell.
+Transitional: yes, queue protocol is legacy and intentionally preserved.
+"""
 from queue import Queue
 from threading import Thread
 from time import sleep
 from typing import Optional
 
 import pandas as pd
-from kolabi.runtime.legacy.kola.orders.condition import Condition
-from kolabi.runtime.legacy.kola.utils.datefunc import now, setdef_timedelta
-from kolabi.runtime.legacy.kola.utils.general import compteur, trim_dic
-from kolabi.runtime.legacy.kola.utils.logfunc import (
+from kolabi.runtime.kola.orders.condition import Condition
+from kolabi.runtime.kola.utils.datefunc import now, setdef_timedelta
+from kolabi.runtime.kola.utils.general import compteur, trim_dic
+from kolabi.runtime.kola.utils.logfunc import (
     get_logfunc,
     get_logger,
     throttled_log,
 )
-from kolabi.runtime.legacy.kola.utils.orderfunc import (
+from kolabi.runtime.kola.utils.orderfunc import (
     get_order_from,
     newClID,
     remove_execInst,

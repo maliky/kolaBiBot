@@ -1,13 +1,24 @@
 # -*- coding: utf-8 -*-
+"""Runtime order payload and option utilities.
+
+Purpose: normalize/toggle/validate legacy order mappings and construct runtime
+order payloads consumed by interpreter shells.
+Inputs: legacy order dicts, order-type keys, side/price/quantity parameters.
+Outputs: normalized `OrderDict` payloads and helper scalar transformations.
+Side effects: none beyond in-place dict normalization in documented helpers.
+Important types: `OrderDict`, `Quantity`.
+Role: pure logic plus utility boundary helpers.
+Transitional: yes, payload construction now delegates to extracted pure module.
+"""
 import re
 from base64 import b64encode
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, cast
 from uuid import uuid4
 
-from kolabi.runtime.legacy.kola.settings import LOGNAME, ORDERID_PREFIX
-from kolabi.runtime.legacy.kola.utils.general import contains, opt_add_to_
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
-from kolabi.runtime.legacy.kola.utils.pricefunc import get_prix_decl, setdef_stopPrice
+from kolabi.runtime.kola.pure_runtime import build_order_payload
+from kolabi.runtime.kola.settings import LOGNAME, ORDERID_PREFIX
+from kolabi.runtime.kola.utils.general import contains, opt_add_to_
+from kolabi.runtime.kola.utils.logfunc import get_logger
 from kolabi.shared.core.runtime_types import OrderDict, Quantity
 
 mlogger = get_logger(name=f"{LOGNAME}.{__name__}")
@@ -124,23 +135,16 @@ def create_order(
         )
         raise Exception(msg)
 
-    # création de l'ordre principal
-    order: OrderDict = {"side": side, "orderQty": _q}
-
-    if ordtype == "Limit":
-        order["price"] = get_prix_decl(prices, side, ordtype)
-    elif ordtype in ["Stop", "MarketIfTouched"]:
-        order["stopPx"] = get_prix_decl(prices, side, ordtype)
-    elif ordtype in ["StopLimit", "LimitIfTouched"]:
-        _price = get_prix_decl(prices, side, ordtype)
-        order["price"] = _price
-        order["stopPx"] = setdef_stopPrice(_price, side, ordtype, absdelta)
-    else:
-        # cad ou ordType == 'Market'
-        # par défault le prix sera celui du marché lorsque la condition sera validé
-        pass
-
-    order["ordType"] = ordtype
+    order = build_order_payload(
+        side=side,
+        quantity=_q,
+        op_type=opType,
+        ord_type=ordtype,
+        exec_inst="",
+        prices=prices,
+        absdelta=absdelta,
+        text=text,
+    )
 
     # on traduit le nom lastMidPrice en un nom de prix reconnu par Bitmex.
     # lastMidPrice nous sert pour définir correctement le stop price (il me semble)
@@ -181,7 +185,7 @@ def get_order_from(
     if not ret:
         raise Exception(f'Problème dans le format du rcvLoad "{rcvLoad}" so ret={ret}')
 
-    return ret
+    return cast(OrderDict | dict[str, Any] | list[object] | bool, ret)
 
 
 # @log_args(logopt=__name__)
@@ -260,7 +264,7 @@ def set_price_type(pricekey: str | None, side: str | None) -> str:
         "l": "lastMidPrice",
         "m": "markPrice",
     }
-    priceType = PT.get(pricekey, defaultPriceType)
+    priceType = defaultPriceType if pricekey is None else PT.get(pricekey)
 
     if priceType is None:
         raise Exception(f"priceType={priceType} is not in PT={PT}")

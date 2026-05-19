@@ -1,3 +1,16 @@
+# mypy: ignore-errors
+"""Async Chronos interpreter shell over typed runtime commands.
+
+Purpose: async variant of Chronos that keeps legacy payload semantics while
+driving command execution and confirmation via async queues.
+Inputs: `OrderLoad` queue messages and runtime command metadata.
+Outputs: runtime events and validation payloads on async queues.
+Side effects: async task scheduling, queue IO, exchange calls through
+`asyncio.to_thread`.
+Important types: `OrderLoad`, `RuntimeCommand`, `RuntimeEvent`, `ValidationLoad`.
+Role: interpreter shell.
+Transitional: yes, compatibility aliases remain to support existing callers.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -7,13 +20,13 @@ from typing import Any
 
 import pandas as pd
 
-from kolabi.runtime.legacy.kola.chronos import Chronos
-from kolabi.runtime.legacy.kola.orders.trailstop import TrailStop
-from kolabi.runtime.legacy.kola.utils.constantes import PRICE_PRECISION
-from kolabi.runtime.legacy.kola.utils.datefunc import now, setdef_timedelta
-from kolabi.runtime.legacy.kola.utils.general import opt_pop_if_in_
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
-from kolabi.runtime.legacy.kola.utils.orderfunc import get_order_from, normalize_order_dict
+from kolabi.runtime.kola.chronos import Chronos
+from kolabi.runtime.kola.orders.trailstop import TrailStop
+from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
+from kolabi.runtime.kola.utils.datefunc import now, setdef_timedelta
+from kolabi.runtime.kola.utils.general import opt_pop_if_in_
+from kolabi.runtime.kola.utils.logfunc import get_logger
+from kolabi.runtime.kola.utils.orderfunc import get_order_from, normalize_order_dict
 from kolabi.shared.core.runtime_commands import (
     execute_runtime_command,
     runtime_command_from_order,
@@ -45,6 +58,7 @@ class AsyncChronos:
         self,
         brg: object,
         recpt_queue: asyncio.Queue[OrderLoad | None],
+        confirmation_queue: asyncio.Queue[ValidationLoad] | None = None,
         valid_queue: asyncio.Queue[ValidationLoad] | None = None,
         *,
         event_queue: asyncio.Queue[RuntimeEvent] | None = None,
@@ -53,9 +67,10 @@ class AsyncChronos:
     ) -> None:
         self.brg = brg
         self.recpt_queue = recpt_queue
-        self.valid_queue = valid_queue if valid_queue is not None else asyncio.Queue()
+        selected_confirmation_queue = confirmation_queue if confirmation_queue is not None else valid_queue
+        self.confirmation_queue = selected_confirmation_queue if selected_confirmation_queue is not None else asyncio.Queue()
         self.event_queue = event_queue if event_queue is not None else asyncio.Queue()
-        self.reply_queue: asyncio.Queue[Any] = asyncio.Queue()
+        self.submission_ack_queue: asyncio.Queue[Any] = asyncio.Queue()
         self.name = nameT
         self._stop_requested = False
         self._validation_tasks: set[asyncio.Task[None]] = set()
@@ -63,11 +78,19 @@ class AsyncChronos:
 
         self.logger.info(f"Fini init {self}")
 
+    @property
+    def valid_queue(self) -> asyncio.Queue[ValidationLoad]:
+        return self.confirmation_queue
+
+    @property
+    def reply_queue(self) -> asyncio.Queue[Any]:
+        return self.submission_ack_queue
+
     def __repr__(self) -> str:
         queues = {
             "reception": self.recpt_queue,
-            "validation": self.valid_queue,
-            "reply": self.reply_queue,
+            "validation": self.confirmation_queue,
+            "reply": self.submission_ack_queue,
             "events": self.event_queue,
         }
         return f"AsyncChronos interpreter, using queues {queues}"
@@ -100,7 +123,7 @@ class AsyncChronos:
                 )
                 self.logger.exception(f"Unknown exception. RcvOrder={rcvOrder}")
                 if ordType.startswith("amend"):
-                    await self.valid_queue.put(
+                    await self.confirmation_queue.put(
                         {
                             "brokerReply": False,
                             "exgLoad": rcvLoad,
@@ -139,7 +162,7 @@ class AsyncChronos:
             command,
             amend_absdelta=PRICE_PRECISION.get(symbol, 1),
         )
-        await self.reply_queue.put(reply)
+        await self.submission_ack_queue.put(reply)
         await self.emit_event(
             RuntimeEventKind.ORDER_ACK,
             symbol=symbol,
@@ -153,7 +176,7 @@ class AsyncChronos:
             trailstop_sender=isinstance(sender, TrailStop),
         )
         task = asyncio.create_task(
-            self.wait_for_change(
+            self.confirm_pair_transition(
                 valconditions=valconditions,
                 rcvload=rcvLoad,
                 timeout=timeout,
@@ -163,7 +186,7 @@ class AsyncChronos:
         self._validation_tasks.add(task)
         task.add_done_callback(self._validation_tasks.discard)
 
-    async def wait_for_reply(
+    async def await_submission_ack(
         self,
         *,
         block: bool = True,
@@ -171,19 +194,19 @@ class AsyncChronos:
     ) -> Any:
         try:
             if not block:
-                return self.reply_queue.get_nowait()
+                return self.submission_ack_queue.get_nowait()
             if timeout is None:
-                return await self.reply_queue.get()
+                return await self.submission_ack_queue.get()
             if timeout <= 0:
                 return None
-            return await asyncio.wait_for(self.reply_queue.get(), timeout)
+            return await asyncio.wait_for(self.submission_ack_queue.get(), timeout)
         except asyncio.QueueEmpty:
             return None
         except asyncio.TimeoutError:
             self.logger.error("reply timeout=%s block=%s", timeout, block)
             return None
 
-    async def wait_for_change(
+    async def confirm_pair_transition(
         self,
         *,
         valconditions: tuple[ValidationCondition, ...] | None = None,
@@ -193,7 +216,7 @@ class AsyncChronos:
     ) -> None:
         self.logger.debug("Async validation task started.")
         timeOut = setdef_timedelta(timeout, default=pd.Timedelta(60, unit="m"))
-        clOrdID = self.get_ID_from(rcvload, "clOrdID")
+        clOrdID = self.extract_client_or_exchange_id(rcvload, "clOrdID")
         startTime = now()
 
         def update_timeleft(
@@ -206,7 +229,7 @@ class AsyncChronos:
         timeLeft = update_timeleft()
         while timeLeft > 0:
             changed = await asyncio.to_thread(
-                self.is_changed_,
+                self.matches_confirmation_rule,
                 clOrdID,
                 valconditions,
                 False,
@@ -216,22 +239,22 @@ class AsyncChronos:
             await asyncio.sleep(waitstep)
             timeLeft = update_timeleft()
 
-        reply = await self.wait_for_reply(timeout=timeLeft)
+        reply = await self.await_submission_ack(timeout=timeLeft)
         if rcvload["order"]["ordType"].lower() == "cancel":
             replyID = rcvload["order"]["clOrdID"]
         elif reply is None:
             replyID = rcvload["order"]["clOrdID"]
         else:
-            replyID = self.get_ID_from(reply, "clOrdID")
+            replyID = self.extract_client_or_exchange_id(reply, "clOrdID")
 
         seenReplyIDs: dict[Any, int] = {}
         while replyID != clOrdID and timeLeft > 0:
             if replyID is not None:
                 seenReplyIDs[replyID] = seenReplyIDs.get(replyID, 0) + 1
             if reply:
-                await self.reply_queue.put(reply)
-            reply = await self.wait_for_reply(timeout=timeLeft)
-            replyID = clOrdID if reply is None else self.get_ID_from(reply, "clOrdID")
+                await self.submission_ack_queue.put(reply)
+            reply = await self.await_submission_ack(timeout=timeLeft)
+            replyID = clOrdID if reply is None else self.extract_client_or_exchange_id(reply, "clOrdID")
             timeLeft = update_timeleft()
 
         if timeLeft and reply is not None and not reply.get("error", False):
@@ -244,7 +267,7 @@ class AsyncChronos:
             "exgLoad": rcvload,
             "execValidation": validation,
         }
-        await self.valid_queue.put(payload)
+        await self.confirmation_queue.put(payload)
         await self.emit_event(
             RuntimeEventKind.ORDER_VALIDATED,
             symbol=rcvload["symbol"],
@@ -306,11 +329,11 @@ class AsyncChronos:
 
         return runtime_command_from_order(symbol=symbol, order=prepared)
 
-    def get_ID_from(self, rcvOrder: object, idType: str = "clOrdID") -> Any:
+    def extract_client_or_exchange_id(self, rcvOrder: object, idType: str = "clOrdID") -> Any:
         assert rcvOrder is not None, f"rcvOrder={rcvOrder} should not be None."
         return get_order_from(rcvOrder).get(idType)
 
-    def is_changed_(
+    def matches_confirmation_rule(
         self,
         ID: object,
         valconditions: tuple[ValidationCondition, ...] | None = None,
@@ -321,20 +344,20 @@ class AsyncChronos:
         for dic in conditions:
             exectype = dic["exectype"]
             orderstatus = dic["orderstatus"]
-            statusType[f"is_{exectype}-{orderstatus}"] = self.ID_type_status_exec(
+            statusType[f"is_{exectype}-{orderstatus}"] = self.latest_execution_for_status(
                 ID,
                 exectype,
                 orderstatus,
             )
         if validateCancel:
-            statusType["is_canceled"] = self.ID_type_status_exec(
+            statusType["is_canceled"] = self.latest_execution_for_status(
                 ID,
                 "Canceled",
                 "Canceled",
             )
         return any(statusType.values())
 
-    def ID_type_status_exec(
+    def latest_execution_for_status(
         self,
         ID: object,
         exectype: str = "New",
@@ -384,6 +407,36 @@ class AsyncChronos:
         symbol: str | None = None,
     ) -> Any:
         return Chronos.pop_stopPx_from_(self, rcvOrder, price, side, ordtype, symbol)
+
+    async def wait_for_change(self, **kwargs: object) -> None:
+        await self.confirm_pair_transition(**kwargs)
+
+    async def wait_for_reply(
+        self,
+        *,
+        block: bool = True,
+        timeout: float | None = None,
+    ) -> Any:
+        return await self.await_submission_ack(block=block, timeout=timeout)
+
+    def get_ID_from(self, rcvOrder: object, idType: str = "clOrdID") -> Any:
+        return self.extract_client_or_exchange_id(rcvOrder, idType)
+
+    def is_changed_(
+        self,
+        ID: object,
+        valconditions: tuple[ValidationCondition, ...] | None = None,
+        validateCancel: bool = True,
+    ) -> bool:
+        return self.matches_confirmation_rule(ID, valconditions, validateCancel)
+
+    def ID_type_status_exec(
+        self,
+        ID: object,
+        exectype: str = "New",
+        orderstatus: str = "New",
+    ) -> dict[str, Any]:
+        return self.latest_execution_for_status(ID, exectype, orderstatus)
 
 
 __all__ = ["AsyncChronos"]

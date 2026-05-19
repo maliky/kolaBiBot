@@ -1,20 +1,33 @@
 # -*- Coding: utf-8 -*-
-"""Trail stops"""
+"""Legacy trail-stop interpreter.
+
+Purpose: orchestrate tail stop placement and amend loops after head-order
+execution using runtime price tracking.
+Inputs: parent conditioned order, broker context, tail strategy parameters.
+Outputs: placed/amended tail order replies and final lifecycle status.
+Side effects: thread coordination, queue submission, mutable tail order fields,
+network calls via broker.
+Important types: `OrderConditionned`, `Condition`, `PriceObj`, `BargainLike`.
+Role: interpreter shell.
+Transitional: yes, amend naming logic is pure-extracted but runtime loop stays
+imperative.
+"""
 from time import sleep
 from typing import Optional
 
 import numpy.random as rnd
-from kolabi.runtime.legacy.kola.orders.condition import Condition
-from kolabi.runtime.legacy.kola.orders.ordercond import OrderConditionned
-from kolabi.runtime.legacy.kola.price import PriceObj
-from kolabi.runtime.legacy.kola.settings import API_ERROR_INTERVAL
-from kolabi.runtime.legacy.kola.utils.constantes import PRICE_PRECISION
-from kolabi.runtime.legacy.kola.utils.orderfunc import (
+from kolabi.runtime.kola.orders.condition import Condition
+from kolabi.runtime.kola.orders.ordercond import OrderConditionned
+from kolabi.runtime.kola.price import PriceObj
+from kolabi.runtime.kola.pure_runtime import normalize_amend_order_type
+from kolabi.runtime.kola.settings import API_ERROR_INTERVAL
+from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
+from kolabi.runtime.kola.utils.orderfunc import (
     get_order_from,
     opt_add_to_,
     toggle_sides,
 )
-from kolabi.runtime.legacy.kola.utils.pricefunc import setdef_stopPrice
+from kolabi.runtime.kola.utils.pricefunc import setdef_stopPrice
 from kolabi.shared.core.runtime_types import BargainLike
 
 
@@ -311,7 +324,7 @@ class TrailStop(OrderConditionned):
 
     def amend_order_type(self, ordertype: str) -> str:
         """Add amend prefix to ordtype if not already there"""
-        return ordertype if ordertype.startswith("amend") else f"amend{ordertype}"
+        return normalize_amend_order_type(ordertype)
 
     def set_tail_strategy(self) -> float:
         """Définie la longueur de la trace en pourcentage.

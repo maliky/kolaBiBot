@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from pathlib import Path
 
 import pandas as pd
-
-from kolabi.runtime.legacy.kola.async_chronos import AsyncChronos
+from kolabi.runtime.kola.async_chronos import AsyncChronos
 from kolabi.shared.core.runtime_types import RuntimeEventKind
 
 
@@ -65,7 +64,7 @@ def test_async_chronos_handle_load_emits_request_and_ack(monkeypatch) -> None:
             event_queue=event_queue,
         )
 
-        async def fake_wait_for_change(**kwargs: object) -> None:
+        async def fake_confirm_pair_transition(**kwargs: object) -> None:
             del kwargs
 
         def fake_execute(
@@ -80,13 +79,13 @@ def test_async_chronos_handle_load_emits_request_and_ack(monkeypatch) -> None:
         async def immediate_to_thread(func: object, *args: object, **kwargs: object) -> object:
             return func(*args, **kwargs)  # type: ignore[misc]
 
-        monkeypatch.setattr(chronos, "wait_for_change", fake_wait_for_change)
+        monkeypatch.setattr(chronos, "confirm_pair_transition", fake_confirm_pair_transition)
         monkeypatch.setattr(
-            "kolabi.runtime.legacy.kola.async_chronos.execute_runtime_command",
+            "kolabi.runtime.kola.async_chronos.execute_runtime_command",
             fake_execute,
         )
         monkeypatch.setattr(
-            "kolabi.runtime.legacy.kola.async_chronos.asyncio.to_thread",
+            "kolabi.runtime.kola.async_chronos.asyncio.to_thread",
             immediate_to_thread,
         )
 
@@ -131,15 +130,15 @@ def test_async_chronos_wait_for_change_emits_validation_event(monkeypatch) -> No
             del args, kwargs
             return True
 
-        chronos.is_changed_ = _sync_changed  # type: ignore[method-assign]
+        chronos.matches_confirmation_rule = _sync_changed  # type: ignore[method-assign]
         async def immediate_to_thread(func: object, *args: object, **kwargs: object) -> object:
             return func(*args, **kwargs)  # type: ignore[misc]
 
         monkeypatch.setattr(
-            "kolabi.runtime.legacy.kola.async_chronos.asyncio.to_thread",
+            "kolabi.runtime.kola.async_chronos.asyncio.to_thread",
             immediate_to_thread,
         )
-        await chronos.wait_for_change(
+        await chronos.confirm_pair_transition(
             valconditions=({"exectype": "Trade", "orderstatus": "Filled"},),
             rcvload=sample_load(),  # type: ignore[arg-type]
             timeout=pd.Timedelta(1, unit="m"),
@@ -154,3 +153,21 @@ def test_async_chronos_wait_for_change_emits_validation_event(monkeypatch) -> No
         assert event.reply["ordStatus"] == "Filled"
 
     asyncio.run(scenario())
+
+
+def test_active_runtime_uses_domain_literal_chronos_api_names() -> None:
+    active_paths = (
+        Path("kolabi/runtime/kola/chronos.py"),
+        Path("kolabi/runtime/kola/async_chronos.py"),
+    )
+    removed_surface = (
+        "target=self.wait_for_change",
+        "self.wait_for_reply(timeout=",
+        "self.is_changed_",
+        "self.ID_type_status_exec(",
+        "self.get_ID_from(",
+    )
+    for path in active_paths:
+        content = path.read_text()
+        for marker in removed_surface:
+            assert marker not in content
