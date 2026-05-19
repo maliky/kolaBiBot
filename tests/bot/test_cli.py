@@ -120,7 +120,7 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
     monkeypatch.setattr("kolabi.bot.__main__.read_strategy_file", lambda _path: [spec])
 
     run_args = argparse.Namespace(
-        strategy="Orders/demo_ada.tsv",
+        strategy="orders/demo_ada.tsv",
         dry_run=False,
         sync=True,
     )

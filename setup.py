@@ -18,7 +18,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/x-rst",
     author="Malik Koné",
-    author_email="malikykone@gmail.com",
+    author_email="malik.kone@pm.me",
     url="https://github.com/maliky/kolabi",
     packages=find_packages(exclude="secrets.py"),
     zip_safe=False,
@@ -62,5 +62,5 @@ setup(
         "Topic :: Utilities",
         "Topic :: System :: Monitoring",
     ],
-    package_data={"Doc": ["Doc/*"], "demo_Orders": ["Orders/*demo*.tsv"]},
+    package_data={"Doc": ["Doc/*"], "demo_Orders": ["orders/*demo*.tsv"]},
 )

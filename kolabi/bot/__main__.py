@@ -267,7 +267,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--strategy",
         "-s",
         required=True,
-        help="Path to TSV strategy file (e.g. Orders/demo_ada.tsv)",
+        help="Path to TSV strategy file (e.g. orders/demo_ada.tsv)",
     )
     add_runtime_options(run_parser)
 

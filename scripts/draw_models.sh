@@ -13,7 +13,7 @@ EOF
 }
 
 exclude_file="scripts/models_to_exclude.txt"
-output_png="Diagrams/kolabi_models.png"
+output_png="Docs/kolabibot_models.png"
 
 while getopts ":e:o:h" opt; do
   case "$opt" in

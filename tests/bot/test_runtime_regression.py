@@ -24,7 +24,7 @@ class RecordingAuditor:
 
 
 def test_demo_ada_orders_parsed_and_dispatched(tmp_path: Path) -> None:
-    specs = read_strategy_file(Path("Orders/demo_ada.tsv"))
+    specs = read_strategy_file(Path("orders/demo_ada.tsv"))
     assert len(specs) >= 2
 
     auditor = RecordingAuditor()
@@ -70,7 +70,7 @@ def test_kraken_run_orders_rejects_too_small_absolute_quantity(monkeypatch) -> N
         def instrument_rules(self, symbol: str):
             return {"symbol": symbol, "minQuantity": 30.0}
 
-    specs = read_strategy_file(Path("Orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
+    specs = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
     auditor = RecordingAuditor()
     service = BotService(
         BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False),

@@ -1,13 +1,10 @@
 """Pair-cycle runtime reducer and execution bridge.
 
-Purpose: run one head/tail pair cycle against runtime state and exchange
-gateway, with pure transition decisions in `step_pair`.
-Inputs: `OrderPairSpec`, runtime market state, exchange acknowledgements,
-runtime events.
+Purpose: run one head/tail pair cycle against runtime state and exchange gateway, with pure transition decisions in `step_pair`.
+Inputs: `OrderPairSpec`, runtime market state, exchange acknowledgements,runtime events.
 Outputs: `PairCycleResult`, transition commands, and normalized broker replies.
 Side effects: exchange submission in runner methods and threaded IO bridging.
-Important types: `PairCycleState`, `RuntimeEvent`, `RuntimeCommand`,
-`OrderAck`, `ExecutionOutcome`.
+Important types: `PairCycleState`, `RuntimeEvent`, `RuntimeCommand`,`OrderAck`, `ExecutionOutcome`.
 Role: interpreter shell plus pure reducer core.
 Transitional: yes, bridges legacy vocabulary while moving to typed commands.
 """
@@ -85,6 +82,7 @@ class PairCycleResult:
 
 class PairCycleRunner:
     """Runs one typed pair/head/tail cycle against DB state and an exchange."""
+# > define  a typed cycle...
 
     def __init__(
         self,
@@ -116,6 +114,8 @@ class PairCycleRunner:
         if market is None or not market.ready:
             return self._result(state, events, "public market state is not ready")
 
+        # > But where do I evaluate the other conditions other than time to hook the order?
+        # > eg, price conditions ?
         symbol = Symbol(self.symbol)
         hooked, _ = step_pair(
             state,
@@ -206,13 +206,16 @@ def pair_window_is_active(pair: OrderPairSpec) -> bool:
     any window containing minute zero is active.
     """
     return pair.window.start_minutes <= 0 <= pair.window.end_minutes
-
+# > the above is not clear.  does the window.start_minutes update regularly so that if in the tsv it the windo
+# > is set for eg at [60,120] the pair.window.start_minutes will be under 0 ?
 
 def step_pair(
     state: PairCycleState,
     event: RuntimeEvent,
 ) -> tuple[PairCycleState, tuple[RuntimeCommand, ...]]:
     """Pure reducer for one pair/head/tail transition."""
+    # > increase the documentation
+    # > recall functional def of 'reducer'
     if event.note == PAIR_EVENT_HEAD_HOOKED:
         next_state = replace(state, head_state=HeadState.HOOKED)
         return next_state, (
@@ -303,7 +306,7 @@ def resolve_quantity(pair: OrderPairSpec) -> float:
     if quantity is None or quantity <= 0:
         raise ValueError(f"Order pair '{pair.name}' needs a positive head quantity")
     return decimal_to_float(quantity)
-
+# > not do we use float here and not Decimal ?
 
 def resolve_head_price(pair: OrderPairSpec, market: PublicMarketState) -> float | None:
     order_type = pair.head.order_type.replace("_", "").replace("-", "").lower()
@@ -325,6 +328,7 @@ def reference_price(side: Side, market: PublicMarketState) -> float:
         return market.best_bid or market.mid_price or 0.0
     return market.best_ask or market.mid_price or 0.0
 
+# > those function about price quantities id do not seem well placed in this file
 
 def head_client_order_id(pair: OrderPairSpec) -> str:
     safe_name = "".join(ch for ch in pair.name if ch.isalnum() or ch in {"_", "-"})
@@ -363,6 +367,7 @@ def tail_order_dict(pair: OrderPairSpec) -> OrderDict:
         order["oDelta"] = cast(PriceOffset, to_decimal(pair.tail.delta))
     return order
 
+# > need to add a least one line of documenation per function.
 
 def tail_command(
     state: PairCycleState,
