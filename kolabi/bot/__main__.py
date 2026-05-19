@@ -74,7 +74,7 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
 
 
 def add_single_order_options(parser: argparse.ArgumentParser) -> None:
-    """Expose the legacy one-order vocabulary on the new kolabi.bot CLI."""
+    """Expose the compatibility one-order vocabulary on the active kolabi.bot CLI."""
     parser.add_argument(
         "--tps_run",
         "-t",
@@ -135,7 +135,7 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=2.0,
         help=(
-            "Tail thickness using the legacy aType semantics. "
+            "Tail thickness using the compatibility aType semantics. "
             "Default interpretation is percent unless aType contains tA or tD."
         ),
     )
@@ -166,7 +166,7 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         type=str,
         default="M",
         help=(
-            "Main order type in the legacy vocabulary. "
+            "Main order type in the compatibility vocabulary. "
             "Examples: M = Market, L = Limit, S = Stop, SL = StopLimit, "
             "MT = MarketIfTouched, LT = LimitIfTouched."
         ),
@@ -177,7 +177,7 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         type=str,
         default="Si-",
         help=(
-            "Tail order type in the legacy vocabulary. "
+            "Tail order type in the compatibility vocabulary. "
             "Examples: S- = reduce-only Stop on lastMidPrice, "
             "Sf- = reduce-only Stop on fairPrice, "
             "SL- = reduce-only StopLimit."
@@ -196,7 +196,7 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         type=str,
         default="p%q%t%",
         help=(
-            "Legacy interpretation of prix, quantity, and tailPrice. "
+            "Compatibility interpretation of prix, quantity, and tailPrice. "
             "Use pD/p%%/pA for price, q%%/qA for quantity, t%%/tD/tA for tail. "
             "Example: qAt%%pD means absolute quantity, percent tail, differential prices."
         ),
@@ -234,7 +234,7 @@ def build_service(args: argparse.Namespace) -> BotService:
 
 
 def build_single_order_spec(args: argparse.Namespace) -> OrderSpec:
-    """Translate legacy CLI vocabulary into one in-memory OrderSpec."""
+    """Translate compatibility CLI vocabulary into one in-memory OrderSpec."""
     return OrderSpec(
         name=args.name,
         tps_run=(float(args.tps_run[0]), float(args.tps_run[1])),
@@ -273,9 +273,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_once_parser = subparsers.add_parser(
         "run-once",
-        help="Run one strategy-defined order pair from the command line using legacy vocabulary",
+        help="Run one strategy-defined order pair from the command line using compatibility vocabulary",
         description=(
-            "Run one order pair through kolabi.bot while keeping the legacy "
+            "Run one order pair through kolabi.bot while keeping the compatibility "
             "multi_kola vocabulary. The key point is that --prix is always a "
             "two-bound ordered interval, interpreted by --aType."
         ),
@@ -372,7 +372,7 @@ def run_command(args: argparse.Namespace) -> int:
 
 
 def run_once_command(args: argparse.Namespace) -> int:
-    """Run one command-line strategy row using the legacy parameter names."""
+    """Run one command-line strategy row using the compatibility parameter names."""
     spec = build_single_order_spec(args)
 
     if args.dry_run:

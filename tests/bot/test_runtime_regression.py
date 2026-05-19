@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import List
 
 from kolabi.bot.indicators import DummyIndicatorClient
+from kolabi.bot.runtime.auditor import MarketAuditor
 from kolabi.bot.service import BotConfig, BotService
 from kolabi.bot.tsv import read_strategy_file
+from kolabi.runtime.kola.multi_kola import KolaMarketAuditor
 from kolabi.shared.config import ExchangeConfig
 
 
@@ -90,3 +92,7 @@ def test_kraken_run_orders_rejects_too_small_absolute_quantity(monkeypatch) -> N
         assert "below the minimum quantity 30" in str(exc)
     else:
         raise AssertionError("Expected quantity validation to fail before dispatch")
+
+
+def test_active_market_auditor_no_longer_subclasses_multi_kola() -> None:
+    assert KolaMarketAuditor not in MarketAuditor.__mro__

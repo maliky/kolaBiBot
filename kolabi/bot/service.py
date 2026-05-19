@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Any, Iterable, Optional, TypedDict
+from typing import Any, Iterable, Optional, Protocol, TypedDict, cast
 
 from kolabi.bot.indicators import (
     DummyIndicatorClient,
@@ -10,7 +10,7 @@ from kolabi.bot.indicators import (
     KrakenDbIndicatorClient,
 )
 from kolabi.bot.persistence import OrderRecorder, PersistenceConfig
-from kolabi.bot.runtime.auditor import MarketAuditeur
+from kolabi.bot.runtime.auditor import MarketAuditor
 from kolabi.bot.tsv import OrderSpec
 from kolabi.shared.config import load_exchange_config
 from kolabi.shared.exchanges import get_adapter
@@ -45,6 +45,10 @@ class AuditorGoKwargs(TypedDict):
     hook: str | None
 
 
+class InstrumentRulesExchange(Protocol):
+    def instrument_rules(self, symbol: str | None = None) -> dict[str, object]: ...
+
+
 @dataclass
 class BotConfig:
     """Runtime configuration for kolaBiBot."""
@@ -68,12 +72,12 @@ class BotConfig:
 
 
 class BotService:
-    """High-level orchestrator that reuses the legacy execution engine."""
+    """High-level orchestrator for the single active `kolabi.bot` strategy path."""
 
     def __init__(
         self,
         config: BotConfig,
-        auditor: MarketAuditeur | None = None,
+        auditor: MarketAuditor | None = None,
         indicators: IndicatorClient | None = None,
     ) -> None:
         self.config = config
@@ -101,7 +105,7 @@ class BotService:
                 self.exchange_config.adapter_kwargs.setdefault(
                     "account_db_url", account_db_url
                 )
-        self.auditor = auditor or MarketAuditeur(
+        self.auditor = auditor or MarketAuditor(
             exchange=config.exchange,
             symbol=config.symbol,
             live=False,
@@ -266,15 +270,23 @@ class BotService:
         if self.config.exchange.lower() != "kraken" or self.exchange_config is None:
             return
         adapter_cls = get_adapter("kraken")
-        adapter = adapter_cls(
+        adapter = cast(
+            InstrumentRulesExchange,
+            adapter_cls(
             api_key=self.exchange_config.api_key,
             api_secret=self.exchange_config.api_secret,
             base_url=self.exchange_config.base_url,
             symbol=self.exchange_config.symbol,
             **self.exchange_config.adapter_kwargs,
+            ),
         )
         rules = adapter.instrument_rules(self.config.symbol)
-        min_qty = float(rules.get("minQuantity") or 1.0)
+        raw_min_qty = rules.get("minQuantity")
+        min_qty = (
+            float(raw_min_qty)
+            if isinstance(raw_min_qty, (int, float, str)) and raw_min_qty
+            else 1.0
+        )
         for spec in specs:
             if "qA" in spec.atype and spec.q is not None and float(spec.q) < min_qty:
                 raise ValueError(
@@ -283,14 +295,14 @@ class BotService:
                 )
 
     def _spec_to_kwargs(self, spec: OrderSpec) -> AuditorGoKwargs:
-        """Translate OrderSpec into kwargs accepted by MarketAuditeur.go."""
+        """Translate OrderSpec into kwargs accepted by MarketAuditor.go."""
         return {
             "tps_run": spec.tps_run,
             "prix": spec.prix,
-            "essais": spec.essais,
+            "essais": 1 if spec.essais is None else spec.essais,
             "side": spec.side,
             "q": spec.q,
-            "tp": spec.tp,
+            "tp": 0.0 if spec.tp is None else spec.tp,
             "atype": spec.atype,
             "oType": spec.oType,
             "nameT": spec.name,
