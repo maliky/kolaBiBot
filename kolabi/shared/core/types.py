@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Optional
 
 from .models import OrderAck, Position
+from .runtime_types import OrderID, OrderQty, Price, StopPrice
 
 
 class ExchangeABC(ABC):
@@ -19,20 +20,20 @@ class ExchangeABC(ABC):
     def place_order(
         self,
         side: str,
-        orderQty: float,
-        price: Optional[float] = None,
-        stopPx: Optional[float] = None,
+        orderQty: OrderQty | float,
+        price: Optional[Price | float] = None,
+        stopPx: Optional[StopPrice | float] = None,
         type_: str = "LIMIT",
         **params: Any,
     ) -> OrderAck:
         """Place a new order and return an acknowledgement."""
 
     @abstractmethod
-    def amend_order(self, order_id: str, **params: float) -> OrderAck:
+    def amend_order(self, order_id: OrderID | str, **params: float) -> OrderAck:
         """Modify an existing order and return an acknowledgement."""
 
     @abstractmethod
-    def cancel_order(self, order_id: str) -> OrderAck:
+    def cancel_order(self, order_id: OrderID | str) -> OrderAck:
         """Cancel an order and return an acknowledgement."""
 
     @abstractmethod

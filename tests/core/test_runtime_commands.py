@@ -4,15 +4,15 @@ from queue import Queue
 from typing import Any
 
 import pandas as pd
-
-from kolabi.runtime.legacy.kola.chronos import Chronos
+from kolabi.runtime.kola.chronos import Chronos
 from kolabi.shared.core.runtime_commands import (
+    command_payload_for_role,
     execute_runtime_command,
     runtime_command_from_order,
     timeout_override_minutes_for,
     validation_conditions_for,
 )
-from kolabi.shared.core.runtime_types import RuntimeCommandKind
+from kolabi.shared.core.runtime_types import OrderRole, RuntimeCommandKind
 
 
 class _FakeBargain:
@@ -106,8 +106,8 @@ def test_chronos_handle_load_dispatches_through_runtime_command_layer(monkeypatc
         def start(self) -> None:
             captured["thread_started"] = True
 
-    monkeypatch.setattr("kolabi.runtime.legacy.kola.chronos.execute_runtime_command", fake_execute)
-    monkeypatch.setattr("kolabi.runtime.legacy.kola.chronos.threading.Thread", _FakeThread)
+    monkeypatch.setattr("kolabi.runtime.kola.chronos.execute_runtime_command", fake_execute)
+    monkeypatch.setattr("kolabi.runtime.kola.chronos.threading.Thread", _FakeThread)
 
     chronos = Chronos(_FakeBargain(), Queue(), valid_queue=Queue())
     load = {
@@ -132,3 +132,26 @@ def test_chronos_handle_load_dispatches_through_runtime_command_layer(monkeypatc
     assert captured["absdelta"] == 0.5
     assert reply["orderID"] == "OID-1"
     assert captured["thread_started"] is True
+
+
+def test_command_payload_for_role_maps_new_amend_cancel_requests() -> None:
+    head_place = runtime_command_from_order(
+        symbol="PI_XBTUSD",
+        order={"ordType": "Limit", "side": "buy", "orderQty": 2, "price": 100.0},
+    )
+    tail_amend = runtime_command_from_order(
+        symbol="PI_XBTUSD",
+        order={"ordType": "amendStop", "side": "sell", "orderID": "OID-2", "newPrice": 98.5},
+    )
+    cancel = runtime_command_from_order(
+        symbol="PI_XBTUSD",
+        order={"ordType": "cancel", "clOrdID": "CID-9"},
+    )
+
+    head_payload = command_payload_for_role(head_place, role=OrderRole.PRIMARY)
+    tail_payload = command_payload_for_role(tail_amend, role=OrderRole.TAIL)
+    cancel_payload = command_payload_for_role(cancel, role=OrderRole.PRIMARY)
+
+    assert head_payload["request"]["ordType"] == "Limit"
+    assert tail_payload["request"]["orderID"] == "OID-2"
+    assert cancel_payload["request"]["clOrdID"] == "CID-9"

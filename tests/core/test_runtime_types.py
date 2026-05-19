@@ -2,14 +2,26 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from kolabi.bot.domain import HeadState, OrderState, TailMode, TailState
+from kolabi.bot.domain import (
+    ExecutionOutcome,
+    HeadState,
+    OrderState,
+    TailMode,
+    TailState,
+    classify_confirmed_state,
+)
 from kolabi.shared.core.runtime_types import (
+    AmendReason,
+    EnvironmentName,
+    ExchangeName,
     OrderRole,
+    OrderStatus,
     RuntimeCommand,
     RuntimeCommandKind,
     RuntimeEvent,
     RuntimeEventKind,
     Symbol,
+    TriggerKind,
 )
 
 
@@ -37,3 +49,12 @@ def test_runtime_event_and_command_types_are_typed_values() -> None:
     assert event.kind == RuntimeEventKind.ORDER_REQUESTED
     assert command.kind == RuntimeCommandKind.PLACE
     assert command.reason == "primary"
+
+
+def test_extended_enums_and_tagged_outcome_state() -> None:
+    assert TriggerKind.STOP.value == "stop"
+    assert AmendReason.TRAILING_UPDATE.value == "trailing_update"
+    assert ExchangeName.KRAKEN.value == "kraken"
+    assert EnvironmentName.DEMO.value == "demo"
+    assert OrderStatus.FILLED.value == "Filled"
+    assert classify_confirmed_state(ExecutionOutcome.PLAYED) == HeadState.LIVING

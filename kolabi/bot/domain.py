@@ -1,9 +1,20 @@
+"""Bot domain model and tagged state vocabulary.
+
+Purpose: define pure domain enums/dataclasses for head/tail lifecycle, reasons,
+pair specifications, and confirmation outcome classification.
+Inputs: normalized side/order/reason strings and strategy fields.
+Outputs: typed domain records and pure classification helpers.
+Side effects: none.
+Important types: `HeadState`, `TailState`, `OrderReason`,
+`ExecutionOutcome`, `OrderPairSpec`, `ConfirmedOrder`.
+Role: pure logic.
+Transitional: yes, includes compatibility aliases (`OrderState`, `TailMode`).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
-
 
 NumberPair = tuple[float, float]
 
@@ -55,6 +66,13 @@ class OrderReason(StrEnum):
     WOULD_EXECUTE_SELF = "would_execute_self"
     WOULD_NOT_REDUCE_POSITION = "would_not_reduce_position"
     UNKNOWN = "unknown"
+
+
+class ExecutionOutcome(StrEnum):
+    NEW = "new"
+    PLAYED = "played"
+    CANCELED_UNPLAYED = "canceled_unplayed"
+    CANCELED_PLAYED = "canceled_played"
 
 
 PLAYED_REASONS = frozenset(
@@ -227,12 +245,12 @@ def normalize_reason(raw: str | None) -> OrderReason:
     return OrderReason.UNKNOWN
 
 
-def classify_confirmed_state(*, is_played: bool, is_canceled: bool) -> HeadState:
-    if is_played and is_canceled:
+def classify_confirmed_state(outcome: ExecutionOutcome) -> HeadState:
+    if outcome == ExecutionOutcome.CANCELED_PLAYED:
         return HeadState.CLOSED
-    if is_played and not is_canceled:
+    if outcome == ExecutionOutcome.PLAYED:
         return HeadState.LIVING
-    if not is_played and is_canceled:
+    if outcome == ExecutionOutcome.CANCELED_UNPLAYED:
         return HeadState.FAILED
     return HeadState.NEW
 

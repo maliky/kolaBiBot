@@ -1,23 +1,38 @@
+"""Runtime command translation and dispatch boundary.
+
+Purpose: translate legacy order dict payloads into typed runtime commands,
+derive validation/timeout rules, and dispatch command execution.
+Inputs: `OrderDict` payloads and `RuntimeCommand` instances.
+Outputs: normalized commands, role payloads, and broker call replies.
+Side effects: executes exchange-facing order functions when dispatching.
+Important types: `RuntimeCommand`, `RuntimeCommandKind`, `OrderDict`,
+`HeadCommandPayload`, `TailCommandPayload`.
+Role: boundary adapter.
+Transitional: yes, still bridges legacy order function signatures.
+"""
 from __future__ import annotations
 
-from typing import Any
+from decimal import Decimal
+from typing import Any, cast
 
-from kolabi.runtime.legacy.kola.orders.orders import (
+from kolabi.runtime.kola.orders.orders import (
     amend_prices,
     cancel_order,
     place,
+    place_at_market,
     place_LIT,
     place_MIT,
     place_SL,
-    place_at_market,
     place_stop,
 )
 from kolabi.shared.core.runtime_types import (
+    HeadCommandPayload,
     OrderDict,
     OrderRole,
     RuntimeCommand,
     RuntimeCommandKind,
     Symbol,
+    TailCommandPayload,
     ValidationCondition,
 )
 
@@ -28,7 +43,7 @@ def runtime_command_from_order(
     order: OrderDict,
     reason: str | None = None,
 ) -> RuntimeCommand:
-    normalized = dict(order)
+    normalized = cast(OrderDict, dict(order))
     ord_type = str(normalized.get("ordType", ""))
     if ord_type == "cancel":
         kind = RuntimeCommandKind.CANCEL
@@ -77,17 +92,17 @@ def execute_runtime_command(
     *,
     amend_absdelta: float,
 ) -> Any:
-    order = dict(command.order or {})
+    order = cast(OrderDict, dict(command.order or {}))
     ord_type = command_order_type(command)
     order.pop("ordType", None)
 
     if command.kind == RuntimeCommandKind.CANCEL:
         cl_ord_id = str(order["clOrdID"])
-        return cancel_order(brg, {"clOrdID": cl_ord_id})
+        return cancel_order(cast(Any, brg), {"clOrdID": cl_ord_id})
 
     if command.kind == RuntimeCommandKind.AMEND:
         order_id = str(order["orderID"])
-        new_price = float(order["newPrice"])
+        new_price = _as_float_price(order["newPrice"])
         side = str(order["side"])
         text = str(order.get("text", ""))
         return amend_prices(
@@ -103,37 +118,94 @@ def execute_runtime_command(
     side = str(order.pop("side"))
     order_qty = _quantity_from_order(order)
 
+    opts = cast(dict[str, Any], order)
+
     if ord_type == "Market":
-        return place_at_market(brg, order_qty, side, **order)
+        return place_at_market(cast(Any, brg), order_qty, side, **opts)
     if ord_type == "Limit":
-        return place(brg, side, order_qty, float(order.pop("price")), **order)
+        price = _as_float_price(order.pop("price"))
+        return place(cast(Any, brg), side, order_qty, price, **opts)
     if ord_type == "Stop":
-        return place_stop(brg, side, order_qty, float(order.pop("stopPx")), **order)
+        stop_px = _as_float_price(order.pop("stopPx"))
+        return place_stop(cast(Any, brg), side, order_qty, stop_px, **opts)
     if ord_type == "StopLimit":
+        stop_px = _as_float_price(order.pop("stopPx"))
+        price = _as_float_price(order.pop("price"))
         return place_SL(
-            brg,
+            cast(Any, brg),
             side,
             order_qty,
-            float(order.pop("stopPx")),
-            float(order.pop("price")),
-            **order,
+            stop_px,
+            price,
+            **opts,
         )
     if ord_type == "MarketIfTouched":
-        return place_MIT(brg, side, order_qty, float(order.pop("stopPx")), **order)
+        stop_px = _as_float_price(order.pop("stopPx"))
+        return place_MIT(cast(Any, brg), side, order_qty, stop_px, **opts)
     if ord_type == "LimitIfTouched":
+        stop_px = _as_float_price(order.pop("stopPx"))
+        price = _as_float_price(order.pop("price"))
         return place_LIT(
-            brg,
+            cast(Any, brg),
             side,
             order_qty,
-            float(order.pop("stopPx")),
-            float(order.pop("price")),
-            **order,
+            stop_px,
+            price,
+            **opts,
         )
     raise ValueError(f"Action type '{ord_type}' pas prise en compte")
 
 
 def command_order_type(command: RuntimeCommand) -> str:
     return str((command.order or {}).get("ordType", ""))
+
+
+def command_payload_for_role(
+    command: RuntimeCommand,
+    *,
+    role: OrderRole,
+) -> HeadCommandPayload | TailCommandPayload:
+    order = cast(OrderDict, dict(command.order or {}))
+    if command.kind == RuntimeCommandKind.CANCEL:
+        request: dict[str, object] = {
+            "ordType": "cancel",
+            "clOrdID": str(order["clOrdID"]),
+        }
+    elif command.kind == RuntimeCommandKind.AMEND:
+        amend_request: dict[str, object] = {
+            "ordType": str(order["ordType"]),
+            "side": str(order["side"]),
+            "orderID": str(order["orderID"]),
+            "newPrice": _as_float_price(order["newPrice"]),
+            "text": str(order.get("text", "")),
+        }
+        request = amend_request
+    else:
+        request = _new_order_request_from(command)
+    payload = {
+        "role": role.value,
+        "command": command.kind,
+        "request": request,
+    }
+    if role == OrderRole.TAIL:
+        return cast(TailCommandPayload, payload)
+    return cast(HeadCommandPayload, payload)
+
+
+def _new_order_request_from(command: RuntimeCommand) -> dict[str, object]:
+    order = cast(OrderDict, dict(command.order or {}))
+    request: dict[str, object] = {
+        "ordType": str(order["ordType"]),
+        "side": str(order["side"]),
+    }
+    if "orderQty" in order:
+        request["orderQty"] = order["orderQty"]
+    if "quantity" in order:
+        request["quantity"] = order["quantity"]
+    for key in ("price", "stopPx", "execInst", "clOrdID", "text", "oDelta"):
+        if key in order:
+            request[key] = order[key]
+    return request
 
 
 def _quantity_from_order(order: OrderDict) -> Any:
@@ -144,7 +216,16 @@ def _quantity_from_order(order: OrderDict) -> Any:
     raise KeyError("orderQty")
 
 
+def _as_float_price(value: object) -> float:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (int, float, str)):
+        return float(Decimal(str(value)))
+    raise TypeError(f"Unsupported price value type: {type(value)!r}")
+
+
 __all__ = [
+    "command_payload_for_role",
     "execute_runtime_command",
     "runtime_command_from_order",
     "timeout_override_minutes_for",

@@ -1,15 +1,61 @@
+"""Canonical runtime scalar, enum, payload, and protocol types.
+
+Purpose: define typed boundaries and shared runtime vocabulary across bot,
+shared adapters, and legacy runtime migration layers.
+Inputs: none (type declarations only).
+Outputs: exported `NewType`s, enums, typed dicts, dataclasses, and protocols.
+Side effects: none.
+Important types: scalar families (`Price`, `OrderQty`, IDs, times), command and
+event enums, `RuntimeCommand`, `RuntimeEvent`, `OrderDict`.
+Role: pure logic (type contract module).
+Transitional: yes, includes compatibility aliases while legacy surfaces migrate.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Iterable, NewType, Protocol, TypedDict
 
+DecimalLike = Decimal | int | float | str
+
 Symbol = NewType("Symbol", str)
-ClientOrderId = NewType("ClientOrderId", str)
-ExchangeOrderId = NewType("ExchangeOrderId", str)
-Price = NewType("Price", float)
-Quantity = float | int
+ClOrdID = NewType("ClOrdID", str)
+OrderID = NewType("OrderID", str)
+ExecID = NewType("ExecID", str)
+PairID = NewType("PairID", str)
+
+Price = NewType("Price", Decimal)
+TriggerPrice = NewType("TriggerPrice", Decimal)
+LimitPrice = NewType("LimitPrice", Decimal)
+StopPrice = NewType("StopPrice", Decimal)
+PriceOffset = NewType("PriceOffset", Decimal)
+TickSize = NewType("TickSize", Decimal)
+
+OrderQty = NewType("OrderQty", Decimal)
+FilledQty = NewType("FilledQty", Decimal)
+RemainingQty = NewType("RemainingQty", Decimal)
+ContractSize = NewType("ContractSize", Decimal)
+MinQty = NewType("MinQty", Decimal)
+
+ExchangeTime = NewType("ExchangeTime", datetime)
+DecisionTime = NewType("DecisionTime", datetime)
+SubmissionTime = NewType("SubmissionTime", datetime)
+
+ClientOrderId = ClOrdID
+ExchangeOrderId = OrderID
+Quantity = OrderQty | FilledQty | RemainingQty | ContractSize | MinQty | float | int
+
+
+def to_decimal(value: DecimalLike) -> Decimal:
+    """Convert runtime numeric input to Decimal at the pure-logic boundary."""
+    return value if isinstance(value, Decimal) else Decimal(str(value))
+
+
+def decimal_to_float(value: DecimalLike) -> float:
+    """Convert Decimal-backed runtime math to float at the exchange boundary."""
+    return float(to_decimal(value))
 
 
 class Side(StrEnum):
@@ -32,6 +78,34 @@ class OrderStatus(StrEnum):
     TRIGGERED = "Triggered"
     REPLACED = "Replaced"
     PARTIALLY_FILLED = "PartiallyFilled"
+
+
+class TriggerKind(StrEnum):
+    PRICE_BAND = "price_band"
+    STOP = "stop"
+    TIME_WINDOW = "time_window"
+    HOOK = "hook"
+    MANUAL = "manual"
+
+
+class AmendReason(StrEnum):
+    PRICE_REQUOTE = "price_requote"
+    PARTIAL_FILL_REBALANCE = "partial_fill_rebalance"
+    TRAILING_UPDATE = "trailing_update"
+    RISK_REDUCTION = "risk_reduction"
+    OPERATOR_REQUEST = "operator_request"
+
+
+class ExchangeName(StrEnum):
+    KRAKEN = "kraken"
+    BITMEX = "bitmex"
+    BINANCE = "binance"
+
+
+class EnvironmentName(StrEnum):
+    DEMO = "demo"
+    TESTNET = "testnet"
+    LIVE = "live"
 
 
 class ExecType(StrEnum):
@@ -64,19 +138,48 @@ class OrderDict(TypedDict, total=False):
     action: str
     orderQty: Quantity
     quantity: Quantity
-    price: float
-    stopPx: float
-    stopPrice: float
+    price: Price | float
+    stopPx: StopPrice | float
+    stopPrice: StopPrice | float
     ordType: str
     execInst: str
     clOrdID: str
     orderID: str
-    newPrice: float
+    newPrice: LimitPrice | float
     text: str | None
-    oDelta: float
-    cumQty: float
-    executedQty: float
-    filledQty: float
+    oDelta: PriceOffset | float
+    cumQty: FilledQty | float
+    executedQty: FilledQty | float
+    filledQty: FilledQty | float
+
+
+class NewOrderRequest(TypedDict, total=False):
+    side: str
+    ordType: str
+    orderQty: Quantity
+    quantity: Quantity
+    price: Price | float
+    stopPx: StopPrice | float
+    execInst: str
+    clOrdID: str
+    text: str | None
+    oDelta: PriceOffset | float
+
+
+class AmendOrderRequest(TypedDict, total=False):
+    ordType: str
+    side: str
+    orderID: str
+    newPrice: LimitPrice | float
+    text: str | None
+
+
+class CancelOrderRequest(TypedDict):
+    ordType: str
+    clOrdID: str
+
+
+OrderRequest = NewOrderRequest | AmendOrderRequest | CancelOrderRequest
 
 
 class OrderLoad(TypedDict):
@@ -87,19 +190,57 @@ class OrderLoad(TypedDict):
 
 
 class BrokerReply(TypedDict, total=False):
-    orderID: str
-    clOrdID: str
+    orderID: OrderID | str
+    clOrdID: ClOrdID | str
     ordStatus: str
     execType: str
     side: str
     error: object
-    transactTime: str
-    price: float
-    stopPx: float
+    transactTime: ExchangeTime | str
+    price: Price | float
+    stopPx: StopPrice | float
     orderQty: Quantity
     cumQty: Quantity
     executedQty: Quantity
     filledQty: Quantity
+
+
+class SubmissionAck(TypedDict, total=False):
+    orderID: OrderID | str
+    clOrdID: ClOrdID | str
+    ordStatus: str
+    execType: str
+    error: object
+
+
+class ExecutionUpdate(TypedDict, total=False):
+    orderID: OrderID | str
+    clOrdID: ClOrdID | str
+    ordStatus: str
+    execType: str
+    cumQty: Quantity
+    executedQty: Quantity
+    filledQty: Quantity
+    transactTime: ExchangeTime | str
+
+
+class PositionUpdate(TypedDict, total=False):
+    symbol: str
+    size: ContractSize | float
+    entry_price: Price | float
+    updated_at: ExchangeTime | str
+
+
+class HeadCommandPayload(TypedDict):
+    role: str
+    command: RuntimeCommandKind
+    request: NewOrderRequest | AmendOrderRequest | CancelOrderRequest
+
+
+class TailCommandPayload(TypedDict):
+    role: str
+    command: RuntimeCommandKind
+    request: NewOrderRequest | AmendOrderRequest | CancelOrderRequest
 
 
 class ValidationCondition(TypedDict):
@@ -113,6 +254,46 @@ class ValidationLoad(TypedDict):
     execValidation: BrokerReply | bool
 
 
+@dataclass(frozen=True)
+class PublicBookRecord:
+    symbol: str
+    best_bid: float | None
+    best_ask: float | None
+    mid_price: float | None
+    spread: float | None
+    imbalance: float | None
+    avg_bid: float | None
+    avg_ask: float | None
+    recorded_at: str | None
+    source_timestamp: str | None
+
+
+@dataclass(frozen=True)
+class PublicIndicatorRecord:
+    symbol: str
+    name: str
+    value: float
+    recorded_at: str | None
+
+
+@dataclass(frozen=True)
+class PrivateOrderRecord:
+    symbol: str
+    status: str
+
+
+@dataclass(frozen=True)
+class PrivateFillRecord:
+    symbol: str
+
+
+@dataclass(frozen=True)
+class PrivatePositionRecord:
+    symbol: str
+    size: float | None
+    entry_price: float | None
+
+
 class CryptoApiLike(Protocol):
     dummy: bool
     dummyID: str
@@ -121,22 +302,6 @@ class CryptoApiLike(Protocol):
 
 
 class BargainLike(Protocol):
-    """Contrat minimal attendu par le runtime de trading.
-
-    Cette abstraction sert de surface commune pour les objets "bargain" ou
-    "broker context" utilises par le runtime legacy. Les classes qui
-    l'implementent doivent fournir les acces utilises pour:
-    - lire les prix de marche et les contraintes de taille minimale,
-    - lire l'etat de compte et d'execution,
-    - retrouver les ordres lies a un hook ou a une validation,
-    - verifier si un ordre a atteint un statut attendu.
-
-    Ce n'est pas une implementation concrete. C'est un contrat de typage
-    structurel: tout objet qui expose les attributs et methodes attendus est
-    accepte par le type-checker, meme s'il n'herite pas explicitement de cette
-    classe.
-    """
-
     symbol: str
     crypto_api: CryptoApiLike
 

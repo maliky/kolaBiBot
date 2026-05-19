@@ -1,3 +1,15 @@
+"""Runtime DB state reader for strategy readiness and market/account snapshots.
+
+Purpose: provide typed public/private state snapshots used by bot runtime
+preflight and pair-cycle execution.
+Inputs: SQLite URLs, exchange/environment/symbol filters.
+Outputs: `PublicMarketState`, `PrivateFeedState`, `StrategyRuntimeState`.
+Side effects: database reads and polling sleeps in wait loops.
+Important types: typed DB records (`PublicBookRecord`, `PrivateOrderRecord`,
+`PrivatePositionRecord`) and state dataclasses.
+Role: boundary adapter.
+Transitional: yes, typed row adapters are incremental over existing ORM models.
+"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -8,6 +20,13 @@ from typing import Any
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from kolabi.shared.core.runtime_types import (
+    PrivateFillRecord,
+    PrivateOrderRecord,
+    PrivatePositionRecord,
+    PublicBookRecord,
+    PublicIndicatorRecord,
+)
 from kolabi.shared.persistence import AccountPosition, ExchangeFill, ExchangeOrder
 from kolabi.tree.account import AccountStreamConfig, latest_connection
 from kolabi.tree.kraken import latest_indicator_values, latest_snapshot
@@ -155,6 +174,8 @@ class KrakenRuntimeStateClient:
                 self.environment,
                 self.market_type,
             )
+            public_book = _public_book_record_from_snapshot(snapshot, target_symbol)
+            public_indicators = _public_indicator_records(indicators, target_symbol)
             freshest_local_time = _latest_public_timestamp(
                 snapshot.local_timestamp,
                 indicators,
@@ -165,22 +186,18 @@ class KrakenRuntimeStateClient:
             reason = None if ready else "public market data is stale"
             return PublicMarketState(
                 symbol=target_symbol,
-                best_bid=snapshot.best_bid,
-                best_ask=snapshot.best_ask,
-                mid_price=snapshot.mid_price,
-                spread=snapshot.spread,
-                imbalance=snapshot.imbalance,
-                avg_bid=snapshot.avg_bid,
-                avg_ask=snapshot.avg_ask,
-                recorded_at=snapshot.local_timestamp.isoformat(),
-                source_timestamp=snapshot.source_timestamp.isoformat()
-                if snapshot.source_timestamp
-                else None,
+                best_bid=public_book.best_bid,
+                best_ask=public_book.best_ask,
+                mid_price=public_book.mid_price,
+                spread=public_book.spread,
+                imbalance=public_book.imbalance,
+                avg_bid=public_book.avg_bid,
+                avg_ask=public_book.avg_ask,
+                recorded_at=public_book.recorded_at,
+                source_timestamp=public_book.source_timestamp,
                 age_seconds=age_seconds,
                 source_age_seconds=source_age_seconds,
-                indicators={
-                    name: indicator.value for name, indicator in indicators.items()
-                },
+                indicators={record.name: record.value for record in public_indicators},
                 ready=ready,
                 reason=reason,
             )
@@ -333,9 +350,10 @@ class KrakenRuntimeStateClient:
             .all()
         )
         open_statuses = {"new", "open", "partiallyfilled", "partialfill"}
+        order_records = [_private_order_record(row) for row in rows]
         return sum(
             1
-            for row in rows
+            for row in order_records
             if row.status.replace(" ", "").replace("_", "").lower() in open_statuses
         )
 
@@ -355,9 +373,10 @@ class KrakenRuntimeStateClient:
             .scalars()
             .all()
         )
-        return len(rows)
+        fill_records = [_private_fill_record(symbol) for _ in rows]
+        return len(fill_records)
 
-    def _latest_position(self, session: Session, symbol: str) -> AccountPosition | None:
+    def _latest_position(self, session: Session, symbol: str) -> PrivatePositionRecord | None:
         """Read the latest position row for one symbol."""
         stmt = (
             select(AccountPosition)
@@ -370,7 +389,8 @@ class KrakenRuntimeStateClient:
             )
             .order_by(AccountPosition.local_timestamp.desc(), AccountPosition.id.desc())
         )
-        return session.execute(stmt).scalars().first()
+        row = session.execute(stmt).scalars().first()
+        return None if row is None else _private_position_record(row)
 
 
 def _age_seconds(value: datetime | None, current_time: datetime) -> float | None:
@@ -405,3 +425,54 @@ def _latest_public_timestamp(
         if computed_at > snapshot_tz:
             latest_time = computed_at
     return latest_time
+
+
+def _public_book_record_from_snapshot(snapshot: Any, symbol: str) -> PublicBookRecord:
+    return PublicBookRecord(
+        symbol=symbol,
+        best_bid=snapshot.best_bid,
+        best_ask=snapshot.best_ask,
+        mid_price=snapshot.mid_price,
+        spread=snapshot.spread,
+        imbalance=snapshot.imbalance,
+        avg_bid=snapshot.avg_bid,
+        avg_ask=snapshot.avg_ask,
+        recorded_at=snapshot.local_timestamp.isoformat(),
+        source_timestamp=snapshot.source_timestamp.isoformat()
+        if snapshot.source_timestamp
+        else None,
+    )
+
+
+def _public_indicator_records(
+    indicators: dict[str, Any],
+    symbol: str,
+) -> tuple[PublicIndicatorRecord, ...]:
+    records: list[PublicIndicatorRecord] = []
+    for name, indicator in indicators.items():
+        computed_at = getattr(indicator, "computed_at", None)
+        records.append(
+            PublicIndicatorRecord(
+                symbol=symbol,
+                name=name,
+                value=float(indicator.value),
+                recorded_at=computed_at.isoformat() if computed_at is not None else None,
+            )
+        )
+    return tuple(records)
+
+
+def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
+    return PrivateOrderRecord(symbol=row.symbol, status=row.status)
+
+
+def _private_fill_record(symbol: str) -> PrivateFillRecord:
+    return PrivateFillRecord(symbol=symbol)
+
+
+def _private_position_record(row: AccountPosition) -> PrivatePositionRecord:
+    return PrivatePositionRecord(
+        symbol=row.symbol,
+        size=row.size,
+        entry_price=row.entry_price,
+    )

@@ -1,17 +1,31 @@
+"""Pair-cycle runtime reducer and execution bridge.
+
+Purpose: run one head/tail pair cycle against runtime state and exchange
+gateway, with pure transition decisions in `step_pair`.
+Inputs: `OrderPairSpec`, runtime market state, exchange acknowledgements,
+runtime events.
+Outputs: `PairCycleResult`, transition commands, and normalized broker replies.
+Side effects: exchange submission in runner methods and threaded IO bridging.
+Important types: `PairCycleState`, `RuntimeEvent`, `RuntimeCommand`,
+`OrderAck`, `ExecutionOutcome`.
+Role: interpreter shell plus pure reducer core.
+Transitional: yes, bridges legacy vocabulary while moving to typed commands.
+"""
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Protocol
+from decimal import Decimal
+from typing import Protocol, cast
 
 from kolabi.bot.domain import (
     ConfirmedOrder,
+    ExecutionOutcome,
     HeadState,
     OrderIdentity,
     OrderPairSpec,
     OrderReason,
-    OrderState,
     PairCycleEvent,
     PairCycleState,
     Side,
@@ -22,15 +36,20 @@ from kolabi.bot.domain import (
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     BrokerReply,
+    OrderDict,
+    OrderQty,
     OrderRole,
+    PriceOffset,
     RuntimeCommand,
     RuntimeCommandKind,
     RuntimeEvent,
     RuntimeEventKind,
+    StopPrice,
     Symbol,
+    decimal_to_float,
+    to_decimal,
 )
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, PublicMarketState
-
 
 PAIR_EVENT_HEAD_HOOKED = "head_hooked"
 PAIR_EVENT_HEAD_SUBMITTED = "head_submitted"
@@ -112,7 +131,7 @@ class PairCycleRunner:
             return self._result(hooked, events, "dry run stopped before submission")
 
         client_order_id = head_client_order_id(pair)
-        head_ack = await asyncio.to_thread(
+        submission_ack = await asyncio.to_thread(
             self._submit_head,
             pair,
             market,
@@ -125,13 +144,13 @@ class PairCycleRunner:
                 at=datetime.now(timezone.utc),
                 symbol=symbol,
                 order=head_order_dict(pair, client_order_id=client_order_id),
-                reply=broker_reply_from_ack(head_ack, client_order_id=client_order_id),
+                reply=broker_reply_from_ack(submission_ack, client_order_id=client_order_id),
                 note=PAIR_EVENT_HEAD_SUBMITTED,
             ),
         )
         events.append(PairCycleEvent(pair.name, submitted, "head submitted"))
 
-        confirmed_head = confirmed_from_ack(pair, head_ack)
+        confirmed_head = confirmed_from_ack(pair, submission_ack)
         advanced, commands = step_pair(
             submitted,
             runtime_event_from_confirmed_head(
@@ -143,6 +162,7 @@ class PairCycleRunner:
         if advanced.tail_mode in {None, TailState.LATENT}:
             return self._result(advanced, events, "tail not eligible yet")
         del commands
+        assert advanced.tail_mode is not None
         events.append(
             PairCycleEvent(pair.name, advanced, f"tail mode {advanced.tail_mode.value}")
         )
@@ -282,22 +302,22 @@ def resolve_quantity(pair: OrderPairSpec) -> float:
     quantity = pair.head.quantity
     if quantity is None or quantity <= 0:
         raise ValueError(f"Order pair '{pair.name}' needs a positive head quantity")
-    return float(quantity)
+    return decimal_to_float(quantity)
 
 
 def resolve_head_price(pair: OrderPairSpec, market: PublicMarketState) -> float | None:
     order_type = pair.head.order_type.replace("_", "").replace("-", "").lower()
     if order_type in {"m", "market"}:
         return None
-    reference = reference_price(pair.head.side, market)
+    reference = to_decimal(reference_price(pair.head.side, market))
     lower, upper = pair.head.price_interval
     if "pA" in pair.amount_type:
-        return lower if pair.head.side == Side.BUY else upper
+        return decimal_to_float(lower if pair.head.side == Side.BUY else upper)
     if "p%" in pair.amount_type:
-        offset = lower if pair.head.side == Side.BUY else upper
-        return reference * (1.0 + offset / 100.0)
-    offset = lower if pair.head.side == Side.BUY else upper
-    return reference + offset
+        offset = to_decimal(lower if pair.head.side == Side.BUY else upper)
+        return decimal_to_float(reference * (Decimal("1") + offset / Decimal("100")))
+    offset = to_decimal(lower if pair.head.side == Side.BUY else upper)
+    return decimal_to_float(reference + offset)
 
 
 def reference_price(side: Side, market: PublicMarketState) -> float:
@@ -318,29 +338,29 @@ def opposite_side(side: Side) -> Side:
     return Side.BUY
 
 
-def head_order_dict(pair: OrderPairSpec, *, client_order_id: str | None = None) -> dict[str, object]:
-    order: dict[str, object] = {
+def head_order_dict(pair: OrderPairSpec, *, client_order_id: str | None = None) -> OrderDict:
+    order: OrderDict = {
         "side": pair.head.side.value,
         "ordType": pair.head.order_type,
     }
     if pair.head.quantity is not None:
-        order["orderQty"] = float(pair.head.quantity)
+        order["orderQty"] = cast(OrderQty, to_decimal(pair.head.quantity))
     if client_order_id is not None:
         order["clOrdID"] = client_order_id
     return order
 
 
-def tail_order_dict(pair: OrderPairSpec) -> dict[str, object]:
-    order: dict[str, object] = {
+def tail_order_dict(pair: OrderPairSpec) -> OrderDict:
+    order: OrderDict = {
         "side": opposite_side(pair.head.side).value,
         "ordType": pair.tail.order_type,
     }
     if pair.head.quantity is not None:
-        order["orderQty"] = float(pair.head.quantity)
+        order["orderQty"] = cast(OrderQty, to_decimal(pair.head.quantity))
     if pair.tail.price is not None:
-        order["stopPx"] = float(pair.tail.price)
+        order["stopPx"] = cast(StopPrice, to_decimal(pair.tail.price))
     if pair.tail.delta is not None:
-        order["oDelta"] = float(pair.tail.delta)
+        order["oDelta"] = cast(PriceOffset, to_decimal(pair.tail.delta))
     return order
 
 
@@ -444,13 +464,22 @@ def runtime_event_from_confirmed_head(
 
 def confirmed_from_ack(pair: OrderPairSpec, ack: OrderAck) -> ConfirmedOrder:
     reason = reason_from_status(ack.status)
+    status = ack.status.strip().lower()
     played = reason in {
         OrderReason.FULL_FILL,
         OrderReason.PARTIAL_FILL,
         OrderReason.STOP_ORDER_TRIGGERED,
     } or bool(ack.executed_qty and ack.executed_qty > 0)
-    canceled = ack.status.strip().lower() in {"canceled", "cancelled", "filled"}
-    state = classify_confirmed_state(is_played=played, is_canceled=canceled)
+    canceled = status in {"canceled", "cancelled", "filled"}
+    if canceled and played:
+        outcome = ExecutionOutcome.CANCELED_PLAYED
+    elif canceled and not played:
+        outcome = ExecutionOutcome.CANCELED_UNPLAYED
+    elif played:
+        outcome = ExecutionOutcome.PLAYED
+    else:
+        outcome = ExecutionOutcome.NEW
+    state = classify_confirmed_state(outcome)
     return ConfirmedOrder(
         identity=OrderIdentity(
             pair_name=pair.name,
@@ -460,8 +489,8 @@ def confirmed_from_ack(pair: OrderPairSpec, ack: OrderAck) -> ConfirmedOrder:
         ),
         state=state,
         reason=reason,
-        filled_quantity=float(ack.executed_qty or 0.0),
-        total_quantity=float(ack.orig_qty or pair.head.quantity or 0.0),
+        filled_quantity=decimal_to_float(ack.executed_qty or 0.0),
+        total_quantity=decimal_to_float(ack.orig_qty or pair.head.quantity or 0.0),
     )
 
 
