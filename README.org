@@ -106,6 +106,22 @@ That been published, THIS CODE IS LICENCE FREE. No Gnu, no MIT, no GitHub©, no 
 ~~~~~~~~~~~~~~~~~~
 The active code base is now organised around =kolabi/=.
 
+* Vocabulary Translation
+----------------------
+Canonical runtime naming keeps literal typed names in code and uses metaphors
+as operator-facing aliases.
+
+| Literal role/type | Metaphor alias |
+|-------------------+----------------|
+| =StrategySpec=    | =Dragon=       |
+| =OrderPairSpec=   | =DragonPollen= |
+| =PairCycleState=  | =DragonEgg=    |
+| =PairActor=       | =DragonFly=    |
+| =Chronos=         | =Chronos=      |
+| =RuntimeCommand=  | =OgunBang=     |
+| =CommandAck=      | =OgunAck=      |
+| =CommandExecutor= | =Ogun=         |
+
 #+begin_example
 kolabi/
 |- bargain/                     # direct exchange-facing operator tools
