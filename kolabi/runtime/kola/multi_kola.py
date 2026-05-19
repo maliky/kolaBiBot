@@ -1,5 +1,8 @@
 # -*- coding: utf-8; mode: Python; blacken-line-length: 83; -*-
-"""Script qui gère une paire d'ordre et leur relance."""
+"""Script qui gère une paire d'ordre et leur relance.
+
+Transition core: kept active while MarketAuditor still depends on this module.
+"""
 import logging
 import os
 import sys
@@ -12,30 +15,30 @@ from typing import Any, Optional, Set, Union
 import numpy as np
 import pandas as pd
 
-import kolabi.runtime.legacy.kola.utils.exceptions as ke
-from kolabi.runtime.legacy.kola.bargain import LegacyBargain
-from kolabi.runtime.legacy.kola.bitmex_api.dummy import DummyBitMEX
-from kolabi.runtime.legacy.kola.chronos import Chronos
-from kolabi.runtime.legacy.kola.orders.hookorder import HookOrder
-from kolabi.runtime.legacy.kola.orders.ordercond import OrderConditionned
-from kolabi.runtime.legacy.kola.orders.trailstop import TrailStop
-from kolabi.runtime.legacy.kola.settings import (
+import kolabi.runtime.kola.utils.exceptions as ke
+from kolabi.runtime.kola.bargain import KolaBargain
+from kolabi.runtime.kola.bitmex_api.dummy import DummyBitMEX
+from kolabi.runtime.kola.chronos import Chronos
+from kolabi.runtime.kola.orders.hookorder import HookOrder
+from kolabi.runtime.kola.orders.ordercond import OrderConditionned
+from kolabi.runtime.kola.orders.trailstop import TrailStop
+from kolabi.runtime.kola.settings import (
     HTTP_SIMPLE_RATE_LIMITE,
     LOGFMT,
     LOGNAME,
     SYMBOL,
     ordStatusTrans,
 )
-from kolabi.runtime.legacy.kola.utils.argfunc import (
+from kolabi.runtime.kola.utils.argfunc import (
     get_args,
     price_type_trad,
     set_order_args,
 )
-from kolabi.runtime.legacy.kola.utils.conditions import cHook, cVraiePrixDeA, cVraieTpsDeA
-from kolabi.runtime.legacy.kola.utils.constantes import PRICE_PRECISION
-from kolabi.runtime.legacy.kola.utils.datefunc import now
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger, setup_logging
-from kolabi.runtime.legacy.kola.utils.orderfunc import create_order
+from kolabi.runtime.kola.utils.conditions import cHook, cVraiePrixDeA, cVraieTpsDeA
+from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
+from kolabi.runtime.kola.utils.datefunc import now
+from kolabi.runtime.kola.utils.logfunc import get_logger, setup_logging
+from kolabi.runtime.kola.utils.orderfunc import create_order
 
 # harmonization de la timezone pour le script. Que ce passe-t-il au niveau du système?
 # os.environ["TZ"] = "GMT"
@@ -43,7 +46,7 @@ os.environ["TZ"] = "UTC"
 time.tzset()
 
 
-class LegacyMarketAuditeur:
+class KolaMarketAuditor:
     """Classe du Market Auditeur."""
 
     def __init__(
@@ -111,7 +114,7 @@ class LegacyMarketAuditeur:
         self.fileDeConfirmation: Queue = Queue()
 
         # connexion avec la plateforme d'échange
-        self.brg: LegacyBargain = LegacyBargain(
+        self.brg: KolaBargain = KolaBargain(
             live=self.live,
             logger=self.logger,
             dbo=self.dbo,
@@ -519,7 +522,7 @@ class LegacyMarketAuditeur:
             )
 
 
-def go_multi(ma: LegacyMarketAuditeur, arg_file=None, updatepause=None, logpause=None):
+def go_multi(ma: KolaMarketAuditor, arg_file=None, updatepause=None, logpause=None):
     """
     Charge le fichier orders arg_file, and starts market auditeur.
 
@@ -672,7 +675,7 @@ def main_prg():
         name=LOGNAME, sLL=args.logLevel, logFile=args.logFile, fmt_=LOGFMT
     )
     dbo = DummyBitMEX(up=0, logger=rlogger) if args.dummy else None
-    tma = LegacyMarketAuditeur(
+    tma = KolaMarketAuditor(
         live=args.liveRun,
         dbo=dbo,
         logger=rlogger,

@@ -1,7 +1,8 @@
 # AGENT – Codex Playbook
 
 ## 1. Quick Repository Map
-- `kolabi/runtime/legacy/kola/`: legacy BitMEX-first engine (threads + TSV grammar, mature order logic), kept only where the active runtime still depends on it.
+- `kolabi/runtime/kola/`: active runtime shell and transitional order-management logic that still drives the sacred head/tail path.
+- `archives/runtime/`: archived runners and historical entrypoints kept only for behavioural reference.
 - `kolabi/bargain/`: direct exchange CLI and smoke-test surface.
 - `Orders/*.tsv`: source of truth for scripted orders; grammar uses mixed French/English comments.
 - `tests/`: active regression suite for the current code path.
@@ -16,7 +17,7 @@
 - Python version is forced by `.python-version` (`kola`). If pyenv lacks it, either install via `pyenv install` or temporarily override with `PYENV_VERSION=system`. Document any change.
 - Required packages are split: legacy uses `setup.py`, new code needs the pinned deps in `requirements.txt` **plus** `python-binance`, `responses`, `sqlalchemy`, etc. Verify before running CI.
 - Tests: start with `pytest tests/exchanges -q` (new stack) to avoid long legacy suites. Legacy tests rely on BitMEX dummy objects and may assume data in `Orders/`.
-- `run.sh` only wires `.env`; it does **not** start services. Use `python -m kolabi.runtime.run_multi_kola` for the legacy TSV flow until the newer bot CLI fully replaces it.
+- `run.sh` only wires `.env`; it does **not** start services. Use `python -m kolabi.bot run ...` for TSV strategies and `python -m kolabi.bot run-once ...` for one compatibility-vocabulary order pair.
 
 ## 4. Security / Secrets
 - Real API keys live under `kolaBiBot/kola/secrets.py` in plain text. Rotate/remove before sharing builds. Favor env vars + `.env` (already referenced in `run.sh`).
@@ -25,7 +26,7 @@
 1. Implement a minimal engine in `kolabi/` that reads one TSV, drives price/time conditions, and submits orders through `ExchangeABC`.
 2. Use `DummyBitMEX` (ported or wrapped) so integration tests run offline.
 3. Record every tick/order event through SQLAlchemy models (start with SQLite file).
-4. Expose it via a simple CLI (`run_kola.py`) that loads config + adapter and executes one scenario end-to-end.
+4. Expose it via the active bot CLI (`python -m kolabi.bot run --strategy Orders/demo_ada.tsv ...`) so the strategy path stays single and obvious.
 
 ## 6. Style & Notes
 - Keep comments bilingual when touching legacy sections.
@@ -36,4 +37,11 @@
 - Avoid non-legally-safe glyphs (no arrows like  →, “, fancy quotes, en/em dashes, – etc.); stick to plain ASCII.
 - When unsure, inspect `notes.org` and `CODEX-CONTEX.org` for historical intent before deleting/refactoring logic.
 
+This codebase intentionally uses human-level metaphors. Do not mechanically replace them with literal names.
+
+Metaphors are allowed when they name a black box for human complexity, orchestration, market behavior, or strategic agency. Literal names are preferred for typed states, payloads, events, commands, and pure transition functions.
+
+Keep intentional metaphors: =Chronos= =Bargain= =Dragon= =head= =tail= =hook= =flying= =flapping= =market= =MarketAuditor=
+
 Welcome, let's Swing and Jazz  !
+

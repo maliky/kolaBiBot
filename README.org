@@ -117,9 +117,7 @@ kolabi/
 |  |- indicators.py               # reads indicator snapshots from the public DB
 |  |- persistence.py              # optional bot-run persistence
 |  |- runtime/
-|  |  |- auditor.py                 # active MarketAuditeur bridge used by kolabi.bot
-|  |  |- chronos.py                 # active lifecycle logic for place, validate, amend, cancel
-|  |  `- orders.py                  # active trail-stop helpers for the bot runtime
+|  |  `- auditor.py                 # active MarketAuditor shell used by kolabi.bot
 |  `- tsv/
 |     `- parser.py                # TSV parser and OrderSpec normalisation
 |- kraken_contract/
@@ -127,11 +125,11 @@ kolabi/
 |- openapi/
 |  `- kraken/
 |     `- README.org                 # scaffold for future OpenAPI or Swagger import
-|- runtime/                     # retained legacy naming around multi_kola
-|  |- multi_kola.py               # legacy vocabulary runner, still useful as behavioural reference
-|  |- run_multi_kola.py           # legacy CLI entrypoint preserved by name
-|  `- legacy/
-|     `- kola/                      # old engine internals kept while migration finishes
+|- runtime/
+|  |- kola/                       # active runtime shell and transitional order logic
+|  `- RUNTIME_LAYOUT.org          # active-vs-archive notes for runtime cleanup
+|- archives/
+|  `- runtime/                    # archived runners kept only for behavioural reference
 |- shared/                      # common exchange and persistence layer
 |  |- config.py                   # exchange config resolution and credentials
 |  |- kraken_futures.py           # demo/live Kraken Futures endpoint mapping
@@ -163,7 +161,7 @@ tests/                        # active regression suite
 |- bot/                         # bot CLI, parser, and runtime regression tests
 |- core/                        # Bargain and contract tests
 |- exchanges/                   # adapter tests
-|- runtime/                     # hardening tests around legacy runtime behaviour
+|- runtime/                     # hardening tests around transitional runtime behaviour
 `- tree/                        # public and private Kraken service tests
 #+end_example
 
@@ -173,7 +171,7 @@ Read order for the core code:
 - Read =kolabi/shared/exchanges/kraken_adapter.py= next to inspect real order placement, amend, cancel, and REST mapping.
 - Read =kolabi/bot/__main__.py= and =kolabi/bot/service.py= to see how =run=, =preflight=, and =run-once= enter the runtime.
 - Read =kolabi/bot/tsv/parser.py= if you want to map one TSV row to one normalized bot strategy.
-- Read =kolabi/runtime/legacy/kola/= only when you need the old thread-and-tail behaviour that still inspires the active path.
+- Read =kolabi/runtime/kola/= for the active strategy runtime and =archives/runtime/= only for historical reference.
 
 * Bot CLI usage
 -------------

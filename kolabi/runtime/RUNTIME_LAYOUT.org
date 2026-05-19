@@ -1,0 +1,44 @@
+* Runtime Layout (Active vs Archive)
+
+** Decision rule
+- A file is active if it is currently imported, contains unique domain logic, or is used by an active CLI command.
+- Otherwise it moves to archive.
+
+** Active runtime path
+- Primary execution path: `python -m kolabi.bot ...`
+- Active runtime namespace: `kolabi.runtime.kola`
+
+** Kept active
+- `kolabi/bot/domain.py`
+- `kolabi/bot/pair_cycle.py`
+- `kolabi/bot/runtime/auditor.py`
+- `kolabi/shared/core/runtime_types.py`
+- `kolabi/shared/core/runtime_commands.py`
+- `kolabi/shared/exchanges/`
+- `kolabi/runtime/kola/chronos.py`
+- `kolabi/runtime/kola/orders/`
+- `kolabi/runtime/kola/utils/orderfunc.py`
+- `kolabi/runtime/kola/price.py`
+Reason: active strategy path flows through `python -m kolabi.bot` and the local `MarketAuditor` shell.
+
+** Archived
+- `archives/runtime/run_multi_kola.py`
+Reason: superseded by `python -m kolabi.bot`.
+- `kolabi/runtime/kola/multi_kola.py`
+Reason: behavioural reference only; no active strategy import path depends on it.
+- `archives/getKrakenOrderBook/`
+Reason: historical tooling, not in active import path.
+
+** Utilities decision
+- `kolabi/runtime/kola/utils/` files are retained for now.
+Reason: they are still imported by active runtime modules; no safe duplicate can be removed yet without changing behaviour.
+
+** CLI entry points
+- Removed deprecated console scripts from `setup.py`:
+  - `run_multi_kola`
+  - `multi_kola`
+- Kept active CLI entries:
+  - `kolabi-kraken-tree`
+  - `kolabi-kraken-account`
+  - `kolabi-kraken`
+  - `kolabi-kraken-smoke`

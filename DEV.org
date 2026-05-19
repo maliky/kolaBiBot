@@ -2,11 +2,60 @@
 #+OPTIONS: toc:2 num:nil
 
 * <2026-05-19 mar. 11:05>
-We can remove the Legacy... names and merge / only keep one name
-We can remove dead code.
-We need to simplify the code base and document each touched file.
-Target lets: move out of the legacy aera. what needs to be done  for that?
-We need to tighen types in the legacy files.  create more types eg, price type should not just be float, idem for quantities. find other things whcih gain to be tighten
+** Proposed action plan
+11. Concrete success criteria.
+    - No active runtime import path contains =legacy=.
+    - One main execution path only.
+    - Minimal mypy noise in active runtime modules. (< 80)
+    - Price and quantity arithmetic no longer use bare =float= in core logic.
+    - Touched files have docstrings explaining role and typed boundaries.
+    - Tests cover head/tail cycle decisions plus exchange command construction.
+
+** Pass status
+
+*** 2026-05-19 runtime migration pass
+- Dead code removal completed with guards:
+  - removed unused bridge modules:
+    - =kolabi/bot/runtime/orders.py=
+    - =kolabi/runtime/kola/exchange.py=
+    - =kolabi/runtime/kola/exchanges/base.py=
+    - =kolabi/runtime/kola/exchanges/__init__.py=
+  - sacred paths preserved: order submission, amend logic, condition evaluation, head/tail activation.
+  - evidence and rationale tracked in =kolabi/runtime/DEAD_CODE_AUDIT.org=.
+
+- File-level documentation pass completed for touched modules:
+  - module docstrings now include:
+    - purpose
+    - inputs and outputs
+    - side effects
+    - important types
+    - role classification (=pure logic=, =boundary adapter=, =interpreter shell=)
+    - explicit transitional status when applicable.
+  - applied across touched files in:
+    - =kolabi/runtime/kola/=
+    - =kolabi/shared/core/=
+    - =kolabi/shared/runtime_state.py=
+    - =kolabi/bot/=
+    - runtime regression tests touched in this pass.
+
+- 2026-05-19 closure state:
+  - active strategy path now runs through =python -m kolabi.bot run= and =python -m kolabi.bot run-once= only.
+  - =kolabi/bot/runtime/auditor.py= no longer subclasses =KolaMarketAuditor=.
+  - =run_kola.py= removed as an extra execution surface.
+  - active-module mypy gate reduced to =66= lines for the tracked set.
+  - targeted regressions cover pair-cycle decisions, command construction, and the shared service path for =run= plus =run-once=.
+
+
+**** Architectural question
+ The migration order should optimize for cleanliness and runnable bot.
+
+ non-negotiable success :
+  - no active import path contains =legacy=
+  - one main execution path only
+  - minimal mypy noise (below 50 for all code base)
+  - no bare =float= in core price/quantity logic
+  - tests cover head/tail cycle decisions
+  - tests cover exchange command construction
 
 * <2026-05-17 dim. 07:37> rewrite and vocabulary
 1. A tail cannot be hooked after the failed head.
@@ -417,4 +466,3 @@ python -m pytest -q \
   tests/tree/test_account_state.py \
   tests/tree/test_kraken_tree.py
 #+end_src
-

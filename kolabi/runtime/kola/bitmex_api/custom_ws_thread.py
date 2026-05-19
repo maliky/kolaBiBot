@@ -7,12 +7,12 @@ import threading
 from time import sleep
 from urllib.parse import urlparse
 
-import kolabi.runtime.legacy.kola.utils.exceptions as ke
+import kolabi.runtime.kola.utils.exceptions as ke
 import websocket
-from kolabi.runtime.legacy.kola.bitmex_api.auth import generate_nonce, generate_signature
-from kolabi.runtime.legacy.kola.settings import ORDERID_PREFIX, SYMBOL, TEST_URL
-from kolabi.runtime.legacy.kola.utils.general import round_half_up, trim_dic
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
+from kolabi.runtime.kola.bitmex_api.auth import generate_nonce, generate_signature
+from kolabi.runtime.kola.settings import ORDERID_PREFIX, SYMBOL, TEST_URL
+from kolabi.runtime.kola.utils.general import round_half_up, trim_dic
+from kolabi.runtime.kola.utils.logfunc import get_logger
 from pandas import DataFrame
 from websocket import create_connection
 

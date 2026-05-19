@@ -3,10 +3,10 @@
 import argparse
 import sys
 
-from kolabi.runtime.legacy.kola.bitmex_api.dummy import DummyBitMEX
-from kolabi.runtime.legacy.kola.settings import LOGFMT, LOGNAME
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger, setup_logging
-from kolabi.runtime.multi_kola import LegacyMarketAuditeur
+from kolabi.runtime.kola.bitmex_api.dummy import DummyBitMEX
+from kolabi.runtime.kola.settings import LOGFMT, LOGNAME
+from kolabi.runtime.kola.utils.logfunc import get_logger, setup_logging
+from kolabi.runtime.kola.multi_kola import KolaMarketAuditor
 
 rlogger = setup_logging()
 
@@ -65,7 +65,7 @@ def main_prg():
 
     dbo = DummyBitMEX(up=0, logger=logger) if cmdArgs.dummy else None
 
-    tma = LegacyMarketAuditeur(
+    tma = KolaMarketAuditor(
         live=cmdArgs.liveRun,
         dbo=dbo,
         logger=logger,

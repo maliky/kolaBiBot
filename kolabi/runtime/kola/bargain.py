@@ -1,16 +1,27 @@
 # -*- coding: utf-8 -*-
-"""Tools to bargain."""
+"""Legacy Bargain runtime broker context.
+
+Purpose: aggregate exchange client interactions used by legacy runtime flows
+(price queries, balance/position reads, open-order views, submit/cancel calls).
+Inputs: exchange credentials/config plus runtime order/price requests.
+Outputs: exchange-shaped mappings and scalar market/account values.
+Side effects: network API calls, mutable local caches, logging.
+Important types: legacy order mappings, exchange instrument payloads.
+Role: boundary adapter.
+Transitional: yes, still bridges legacy runtime classes to shared exchange
+compat helpers while active migration continues.
+"""
 import os
 from copy import deepcopy
 from typing import Dict, List, Optional, Set
 
-from kolabi.runtime.legacy.kola.binance_api.client import Client as Binance
-from kolabi.runtime.legacy.kola.bitmex_api.custom_api import BitMEX
-from kolabi.runtime.legacy.kola.exchange import cancel_order, place_order
-from kolabi.runtime.legacy.kola.exchange import get_balance as exch_balance
-from kolabi.runtime.legacy.kola.exchange import get_prices as exch_prices
-from kolabi.runtime.legacy.kola.kolatypes import ordStatusT
-from kolabi.runtime.legacy.kola.settings import (
+from numpy.random import randint
+from pandas import DataFrame, Timedelta
+
+from kolabi.runtime.kola.binance_api.client import Client as Binance
+from kolabi.runtime.kola.bitmex_api.custom_api import BitMEX
+from kolabi.runtime.kola.kolatypes import ordStatusT
+from kolabi.runtime.kola.settings import (
     BINANCE_API_KEY,
     BINANCE_API_SECRET,
     BINANCE_TEST_API_KEY,
@@ -26,23 +37,24 @@ from kolabi.runtime.legacy.kola.settings import (
     TIMEOUT,
     XBTSATOSHI,
 )
-from kolabi.runtime.legacy.kola.utils.constantes import (
+from kolabi.runtime.kola.utils.constantes import (
     EXECOLS,
     INSTRUMENT_PRICES,
     PRICE_PRECISION,
     SETTLEMENTPRICES,
 )
-from kolabi.runtime.legacy.kola.utils.datefunc import now
-from kolabi.runtime.legacy.kola.utils.general import (
+from kolabi.runtime.kola.utils.datefunc import now
+from kolabi.runtime.kola.utils.general import (
     car,
     cdr,
     is_number,
     round_sprice,
     trim_dic,
 )
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
-from numpy.random import randint
-from pandas import DataFrame, Timedelta
+from kolabi.runtime.kola.utils.logfunc import get_logger
+from kolabi.shared.exchanges.runtime_compat import cancel_order, place_order
+from kolabi.shared.exchanges.runtime_compat import get_balance as exch_balance
+from kolabi.shared.exchanges.runtime_compat import get_prices as exch_prices
 
 LIVE_KEY = os.getenv("BITMEX_KEY", "")
 LIVE_SECRET = os.getenv("BITMEX_SECRET", "")
@@ -55,7 +67,7 @@ TEST_SECRET = os.getenv("BITMEX_TEST_SECRET", "")
 # ! important avoir un bargain pour un broker car, throtteling prices
 
 
-class LegacyBargain:
+class KolaBargain:
     """
     A class to group my function for trading in Bitmex.
 

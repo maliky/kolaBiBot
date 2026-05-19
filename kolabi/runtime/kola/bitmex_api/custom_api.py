@@ -6,21 +6,21 @@ import datetime as dt
 from json import dumps
 from time import sleep, time
 
-import kolabi.runtime.legacy.kola.utils.exceptions as ke
+import kolabi.runtime.kola.utils.exceptions as ke
 import pandas as pd
 import requests as rq
-from kolabi.runtime.legacy.kola.bitmex_api.auth import APIKeyAuthWithExpires
-from kolabi.runtime.legacy.kola.bitmex_api.custom_ws_thread import BitMEXWebsocket
-from kolabi.runtime.legacy.kola.settings import (
+from kolabi.runtime.kola.bitmex_api.auth import APIKeyAuthWithExpires
+from kolabi.runtime.kola.bitmex_api.custom_ws_thread import BitMEXWebsocket
+from kolabi.runtime.kola.settings import (
     HTTP_BULK_RATE_LIMITE,
     HTTP_SIMPLE_RATE_LIMITE,
     ORDERID_PREFIX,
 )
-from kolabi.runtime.legacy.kola.utils.constantes import PRICE_PRECISION
-from kolabi.runtime.legacy.kola.utils.datefunc import TC, multiply_time_unit, now
-from kolabi.runtime.legacy.kola.utils.general import round_sprice, trim_output
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
-from kolabi.runtime.legacy.kola.utils.orderfunc import (
+from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
+from kolabi.runtime.kola.utils.datefunc import TC, multiply_time_unit, now
+from kolabi.runtime.kola.utils.general import round_sprice, trim_output
+from kolabi.runtime.kola.utils.logfunc import get_logger
+from kolabi.runtime.kola.utils.orderfunc import (
     get_abbv_from_ID,
     newClID,
     split_ids,

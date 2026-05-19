@@ -3,16 +3,16 @@ import argparse
 import re
 
 import numpy as np
-from kolabi.runtime.legacy.kola.settings import LOGNAME
-from kolabi.runtime.legacy.kola.utils.constantes import PRICE_PRECISION
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
-from kolabi.runtime.legacy.kola.utils.orderfunc import (
+from kolabi.runtime.kola.settings import LOGNAME
+from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
+from kolabi.runtime.kola.utils.logfunc import get_logger
+from kolabi.runtime.kola.utils.orderfunc import (
     is_valid_order_options,
     set_exec_instructions,
     set_order_type,
     set_price_type,
 )
-from kolabi.runtime.legacy.kola.utils.pricefunc import get_prices, get_prix_decl
+from kolabi.runtime.kola.utils.pricefunc import get_prices, get_prix_decl
 
 mlogger = get_logger(name=f"{LOGNAME}.{__name__}")
 

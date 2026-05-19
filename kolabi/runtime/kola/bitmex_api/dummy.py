@@ -5,11 +5,11 @@ from time import sleep
 
 import numpy.random as rnd
 import pandas as pd
-from kolabi.runtime.legacy.kola.settings import XBTSATOSHI
-from kolabi.runtime.legacy.kola.utils.constantes import PRICE_PRECISION
-from kolabi.runtime.legacy.kola.utils.datefunc import now
-from kolabi.runtime.legacy.kola.utils.general import round_price
-from kolabi.runtime.legacy.kola.utils.logfunc import get_logger
+from kolabi.runtime.kola.settings import XBTSATOSHI
+from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
+from kolabi.runtime.kola.utils.datefunc import now
+from kolabi.runtime.kola.utils.general import round_price
+from kolabi.runtime.kola.utils.logfunc import get_logger
 
 
 class DummyBitMEX:

@@ -2,8 +2,8 @@
 import logging
 from typing import Tuple
 
-from kolabi.runtime.legacy.kola.kolatypes import bipriceT, ordTypeT, priceT, sideT
-from kolabi.runtime.legacy.kola.utils.general import round_sprice
+from kolabi.runtime.kola.kolatypes import bipriceT, ordTypeT, priceT, sideT
+from kolabi.runtime.kola.utils.general import round_sprice
 
 
 def set_new_price(base: priceT, per: float, symbol="XBTUSD") -> priceT:

@@ -3,9 +3,9 @@ import logging
 import time
 from logging import Logger, _nameToLevel
 
-from kolabi.runtime.legacy.kola.settings import LOGFMT, LOGLEVELS, LOGNAME, MAINLOGLEVEL
-from kolabi.runtime.legacy.kola.utils.datefunc import now
-from kolabi.runtime.legacy.kola.utils.general import confirm_path_existence_for
+from kolabi.runtime.kola.settings import LOGFMT, LOGLEVELS, LOGNAME, MAINLOGLEVEL
+from kolabi.runtime.kola.utils.datefunc import now
+from kolabi.runtime.kola.utils.general import confirm_path_existence_for
 
 
 def setup_logging():

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-from kolabi.runtime.legacy.kola.orders.condition import Condition
-from kolabi.runtime.legacy.kola.utils.datefunc import tpsDans
+from kolabi.runtime.kola.orders.condition import Condition
+from kolabi.runtime.kola.utils.datefunc import tpsDans
 from pandas import Timedelta, Timestamp
 
 

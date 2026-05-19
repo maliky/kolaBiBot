@@ -1,7 +1,7 @@
 """Runtime components orchestrating order execution."""
 
-from kolabi.runtime.legacy.kola.chronos import Chronos
+from kolabi.runtime.kola.chronos import Chronos
 
-from .auditor import MarketAuditeur
+from .auditor import MarketAuditor
 
-__all__ = ["MarketAuditeur", "Chronos"]
+__all__ = ["MarketAuditor", "Chronos"]

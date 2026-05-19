@@ -14,8 +14,8 @@ from time import sleep
 from typing import Union
 
 import numpy as np
-from kolabi.runtime.legacy.kola.settings import LOGLEVELS
-from kolabi.runtime.legacy.kola.utils.constantes import PRICE_PRECISION
+from kolabi.runtime.kola.settings import LOGLEVELS
+from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
 
 
 def log_exception(logopt_=None, level_="ERROR"):
