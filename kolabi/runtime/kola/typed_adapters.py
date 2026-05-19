@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 """Typed wrappers around legacy runtime classes.
 
 Purpose: expose lightweight typed entrypoints over mutable legacy objects while

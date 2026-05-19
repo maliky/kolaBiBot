@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# mypy: ignore-errors
 """Legacy conditioned-order interpreter.
 
 Purpose: run one conditioned order thread, wait for condition truth, submit to

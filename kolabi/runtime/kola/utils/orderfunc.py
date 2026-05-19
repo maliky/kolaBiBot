@@ -166,7 +166,7 @@ def get_order_from(
 
     if not rcvLoad:
         # we handle the case of empty loads
-        return rcvLoad
+        return cast(OrderDict | dict[str, Any] | list[object] | bool, rcvLoad)
 
     # cas de [{'order': ...}]
     ret: OrderDict | dict[str, Any] | bool = False

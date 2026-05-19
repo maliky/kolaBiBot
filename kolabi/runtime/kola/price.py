@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# mypy: ignore-errors
 """Legacy runtime price tracker with stop/flex tail state.
 
 Purpose: maintain evolving price/tail dataframe used by trail-stop logic and

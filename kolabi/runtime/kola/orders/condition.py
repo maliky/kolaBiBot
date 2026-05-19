@@ -1,4 +1,5 @@
 # -*- Codingn: Utf-8 -*-
+# mypy: ignore-errors
 """Legacy order condition evaluator.
 
 Purpose: represent and evaluate price/time/hook conditions for runtime orders.

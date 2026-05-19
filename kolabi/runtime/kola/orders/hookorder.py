@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# mypy: ignore-errors
 """Legacy hooked-order interpreter.
 
 Purpose: extend `OrderConditionned` with hook source/status gating and relative

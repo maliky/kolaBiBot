@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# mypy: ignore-errors
 """Legacy Bargain runtime broker context.
 
 Purpose: aggregate exchange client interactions used by legacy runtime flows

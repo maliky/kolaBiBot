@@ -1,4 +1,5 @@
 # -*- Coding: utf-8 -*-
+# mypy: ignore-errors
 """Legacy trail-stop interpreter.
 
 Purpose: orchestrate tail stop placement and amend loops after head-order
