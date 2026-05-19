@@ -25,8 +25,6 @@ setup(
     python_requires=">=3.13",
     entry_points={
         "console_scripts": [
-            "run_multi_kola=kolabi.runtime.run_multi_kola:main_prg",
-            "multi_kola=kolabi.runtime.multi_kola:main_prg",
             "kolabi-kraken-tree=kolabi.tree.kraken:main",
             "kolabi-kraken-account=kolabi.tree.account:main",
             "kolabi-kraken=kolabi.bargain.cli:main",

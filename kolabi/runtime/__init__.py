@@ -1,7 +1,6 @@
 """Active runtime namespace.
 
-This package now holds the active runtime-facing modules and the relocated
-legacy engine under `kolabi.runtime.legacy`.
+This package holds the active runtime-facing modules.
 """
 
 __all__ = []

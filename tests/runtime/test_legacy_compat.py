@@ -1,6 +1,6 @@
 import pandas as pd
-from kolabi.runtime.legacy.kola.utils.argfunc import price_type_trad
-from kolabi.runtime.legacy.kola.utils.orderfunc import create_order
+from kolabi.runtime.kola.utils.argfunc import price_type_trad
+from kolabi.runtime.kola.utils.orderfunc import create_order
 
 
 def test_price_type_trad_accepts_index_price_shorthand() -> None:

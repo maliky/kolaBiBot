@@ -1,0 +1,34 @@
+* Dead Code Audit
+
+** Scope
+- Sacred paths kept: order submission, amend logic, condition evaluation, head/tail activation.
+- Deletions in this pass are limited to thin wrappers and unused bridges outside that path.
+
+** Evidence
+- Import search used:
+  - `rg -n "bot\\.runtime\\.orders|runtime\\.kola\\.exchange\\b|runtime\\.kola\\.exchanges\\.base|runtime\\.kola\\.typed_adapters\\b" kolabi tests`
+- Regression coverage used:
+  - `tests/runtime/test_runtime_route_hardening.py`
+  - `tests/runtime/test_order_runtime_contract.py`
+  - `tests/runtime/test_orderfunc_runtime_contract.py`
+  - `tests/runtime/test_price_condition_runtime_contract.py`
+  - `tests/core/test_runtime_commands.py`
+
+** Deleted
+- `kolabi/bot/runtime/orders.py`
+  - import search found no importers
+  - only re-exported legacy classes; no unique logic
+- `kolabi/runtime/kola/exchange.py`
+  - was a compatibility re-export only
+  - `kolabi/runtime/kola/bargain.py` now imports the shared source of truth directly
+- `kolabi/runtime/kola/exchanges/base.py`
+  - import search found no importers
+  - no active tests referenced it
+- `kolabi/runtime/kola/exchanges/__init__.py`
+  - package marker for an otherwise unused package in the active graph
+
+** Kept
+- `kolabi/runtime/kola/typed_adapters.py`
+  - not yet imported by the active shell, but it is migration scaffolding introduced by the typed-runtime cut
+- `kolabi/runtime/kola/pure_runtime.py`
+  - active imports from condition, hookorder, trailstop, price, and utils/orderfunc

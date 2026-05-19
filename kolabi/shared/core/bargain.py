@@ -4,16 +4,16 @@ from typing import Any, cast
 
 from pandas import DataFrame
 
-from kolabi.runtime.legacy.kola.bargain import LegacyBargain
-from kolabi.runtime.legacy.kola.utils.constantes import EXECOLS
-from kolabi.runtime.legacy.kola.utils.general import round_sprice
+from kolabi.runtime.kola.bargain import KolaBargain
+from kolabi.runtime.kola.utils.constantes import EXECOLS
+from kolabi.runtime.kola.utils.general import round_sprice
 from kolabi.shared.config import ExchangeConfig, load_exchange_config
 from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient
 
 
-class Bargain(LegacyBargain):
-    """Legacy bargain surface backed by the new shared exchange adapters."""
+class Bargain(KolaBargain):
+    """Bargain surface backed by the shared exchange adapters."""
 
     # > Since we are using KrankenRuntime we should probably rename this class KrakenBargain
     def __init__(self, exchange: str, config: ExchangeConfig) -> None:
@@ -81,7 +81,7 @@ class Bargain(LegacyBargain):
     ) -> Any:
         """Return Kraken prices from the local market DB when available.
 
-        The legacy runtime drives conditions and trailing behaviour through this
+        The runtime drives conditions and trailing behaviour through this
         method. For Kraken Futures we prefer the local public DB so strategy
         triggers follow the same persisted market view as the rest of the stack.
         """

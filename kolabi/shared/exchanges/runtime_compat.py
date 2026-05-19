@@ -1,7 +1,7 @@
-"""Legacy runtime exchange helpers shared across exchange adapters.
+"""Kola runtime exchange helpers shared across exchange adapters.
 
 This module becomes the source of truth for the thin dispatch helpers that the
-legacy runtime expects. The historical ``kolabi.runtime.legacy.kola.exchange``
+kola runtime expects. The historical ``kolabi.runtime.kola.exchange``
 module now re-exports these names for compatibility.
 """
 
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol, cast
 
-from kolabi.runtime.legacy.kola.binance_api.client import Client as Binance
-from kolabi.runtime.legacy.kola.bitmex_api.custom_api import BitMEX
+from kolabi.runtime.kola.binance_api.client import Client as Binance
+from kolabi.runtime.kola.bitmex_api.custom_api import BitMEX
 from kolabi.shared.exchanges.kraken_adapter import KrakenFuturesAdapter
 
 

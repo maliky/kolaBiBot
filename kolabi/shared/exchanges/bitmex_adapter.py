@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Type
 
-from kolabi.runtime.legacy.kola.bitmex_api.custom_api import BitMEX
+from kolabi.runtime.kola.bitmex_api.custom_api import BitMEX
 from kolabi.shared.core.models import OrderAck, Position
 from kolabi.shared.core.types import ExchangeABC
 
