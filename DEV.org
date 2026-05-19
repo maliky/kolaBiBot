@@ -1,6 +1,22 @@
 #+TITLE: kolaBiBot
 #+OPTIONS: toc:2 num:nil
 
+* TODO
+** <2026-05-19 mar. 17:38>
+*** pair_cycle.py :  Pure reducer + runner bridge: step_pair(), PairCycleRunner.
+- [ ] strengthen terminal guards, idempotency, partial-fill quantity, private confirmation.
+
+ # > Explain / detail with example what you mean
+  
+*** runtime/auditor.py :  New MarketAuditor shell around old market-auditor behavior.
+- [ ] keep as interpreter/orchestrator, not as semantic owner.
+
+*** service.py :  Application service: config, preflight, TSV execution, runtime-state startup.
+- [ ] keep out of pure-domain import path.
+
+*** tsv/parser.py :  Strategy file parser.
+- [ ] map TSV rows into typed OrderPairSpec earlier.  
+
 * <2026-05-19 mar. 11:05>
 ** Proposed action plan
 11. Concrete success criteria.
