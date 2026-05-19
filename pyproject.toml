@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+addopts = "-p no:cacheprovider --assert=plain --strict-markers"
+python_files = ["tests.py", "test_*.py", "*_tests.py"]
+markers = [
+  "selenium: browser-facing end-to-end tests powered by Selenium",
+]
+
+[tool.black]
+line-length = 90
+target-version = ["py313"]
+
+[tool.flake8]
+per-file-ignores = ["__init__.py:F401"]
+exclude = "__pycache__,.git,migrations"
+max-complexity = 15
+max-line-length = 90
+# The old ignore list: C901,W605,E203,D401,W503,D101,D107,D103,E501
+ignore = [
+  "C901",  # 'func' is too complex
+  "D101",  # missing docstring in public class
+  "D103",  # missing docstring in public function/class
+  "D105",  # Missing docstring in magic method  
+  "D106",  # Missing docstring in public nested class
+  "D107",  # missing docstring in __init__
+  "D202",  # No blank lines allowed after function docstring
+  "D401",  # first line should be in imperative mood
+  "E203",  # whitespace before ':'
+  "E501",  # line too long
+  "E741",  # ambiguous variable name
+  "W503",  # line break before binary operator
+  "W605",  # invalid escape sequence
+]
+docstring-convention = "google"
+
+[tool.ruff]
+line-length = 90
+target-version = "py313"
+src = ["kolabi", "tests"]
+extend-exclude = ["build", "dist", ".pytest_cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+  "C901",
+  "D101",
+  "D103",
+  "D105",
+  "D106",
+  "D107",
+  "D202",
+  "D401",
+  "E203",
+  "E501",
+  "E741",
+  "W605",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]
+
+
+
+[tool.mypy]
+python_version = "3.13"
+check_untyped_defs = true
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+exclude = [ "^archives/"]
+
+[[tool.mypy.overrides]]
+module = ["requests"]
+ignore_missing_imports = true

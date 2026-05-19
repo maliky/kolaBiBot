@@ -3,15 +3,16 @@ name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	
 # #### vvvv
 
 # ####  vv
-#XBlH1	0 5440	1000	4	1	sell	LTm		Sm		qAtDpD	50000	9	- -11	XBlx1-S_F
+#XBlH1	0 5440	1000	4	1	sell	LTm		Sm		qAtDpD	150000	9	- -11	XBlx1-S_F
 XBlx1	0 5440	1000	4	1	buy	SLm		Sm		qAtDpD	5000	2	5 +
 # ####  ^^
 
 # ################ ################  market price  ####################  ################
 
 # #### vv
-XBrx1	0 5440	1000	4	1	sell	SLm		Sm		qAtDpD	5050	3	- -6
-#XBrH1	0 5440	1000	4	1	buy	LTm		Sm		qAtDpD	5050	10	10 +	XBrx1-S_F
+# XBrx1	0 5440	1000	4	1	sell	SLm		Sm		qAtDpD	5050	3	- -6
+#XBrH1	0 5440	1000	4	1	buy	LTm		Sm		qAtDpD	5050	10	10 +	
+XBrx1-S_F
 # #### ^^
 
 
