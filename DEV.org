@@ -1,0 +1,413 @@
+#+TITLE: kolaBiBot
+#+OPTIONS: toc:2 num:nil
+
+* <2026-05-17 dim. 07:37> rewrite and vocabulary
+1. A tail cannot be hooked after the failed head.
+2. A tail can only be hooked after a played head.
+3. Played order should not be amended.
+4. Failed and Closed are terminal states
+5. Tail is creation :
+   - Latent -- Hooked -- submitted tail when head is Played     
+   - Flapping when head is Living
+   - Flying when head is Closed
+6. In case of Flapping Tail we only have one tail, that is amended on the plateform as partial_fills comes in the private db.
+7. If a head is partially filled and then canceled, then it should live behind flying tail associated with the partialy filled amound.
+8. When an order is hooked the next automatic step is the submission.
+   
+** Vocabulary definition
+- Private DB :: source of truth for my orders, execution, confirmation, position, and balance.
+- Public DB :: source of truth for market conditions, price/index indicators, and trigger conditions.
+- Order pair :: one head and one tail.
+- Latent Order ::
+  - local order definition.
+  - not yet submitted to the exchange.
+- Hooked order ::
+  - =Latent order=
+  - conditions have been met based on =public db= and =private db=
+  - ready to submit.
+- Submitted order :: an order made from the =hooked order=, sent to the exchange but no yet confirmed by =private db=.
+- Confirmed order :: =submitted order=, with private db confirmation that =is_canceled= is either true or false.
+- Played order :: =confirmed order= with a reason among, full_fill, partial_fill, post_order_failed_because_it_would_filled, stop_order_triggered, would_execute_self, would_not_reduce_position,  ioc_order_failed_because_it_would_not_be_executed
+- Canceled order :: =confirmed order= with =is_cancel= true
+- Opened order ::
+  - =confirmed order= with =is_cancel= false
+  - order which can still change either localy (eg price adjustment) or on the market plateform (eg partial fill qty) because they hqve not reached their final stage (closed or failed)
+- New order ::  not =played= =opened order=, amended with my initiative
+- Living order :: =played= =opened order= , amended with plateform initiative
+- Failed order ::
+  - =Canceled order= and not a =played order=
+  - cannot continue the intended pair logic.
+- Closed order :: =canceled order= and a =played order=
+
+- Head ::
+  - the first order of the pair.
+  - created in latent state when the strategy is defined (cli args or file)
+  - Hooked by public market conditions.
+    
+- Tail ::
+  - The second order of the pair
+  - follows the same order life cycle as any order.
+- Latent Tail ::
+  - local tail order definition.
+  - created after the head becomes =played=.
+  - not yet formally verified against tail hook conditions.
+  - transient.
+- Hooked Tail ::
+  - =latent tail= after formal verification of hook conditions.
+  - ready for automatic submission.
+  - transient.
+- Submitted Tail ::
+  - order produced from the hooked tail.
+  - sent to the platform.
+  - not yet confirmed by the private DB.
+- Confirmed Tail ::
+  - submitted tail confirmed by the private DB.
+  - then classified as =New=, =Failed=, =Living=, or =Closed= like any other order.    
+- Flapping Tail ::
+  - a tail order associated with a =Living Head=.
+  - not a separate base order state.    
+  - may be amended on the platform as partial fills appear in the private DB.
+
+- Flying Tail ::
+  - a =confirmed tail order= associated with a =Closed Head=.
+  - not a separate base order state.    
+  - sized according to the final confirmed played quantity of the head.
+
+
+** Diagrams
+
+#+BEGIN_SRC plantuml :results file link :file ordercycle.png
+  @startuml
+  title Order life cycle (additive reading)
+  
+  hide empty description
+  skinparam shadowing false
+  skinparam state {
+    BackgroundColor white
+    BorderColor black
+  }
+  
+  [*] --> Latent
+  
+  Latent -->  Hooked
+  Hooked --> Submitted
+  Submitted --> New : limit order
+  Submitted -[#red,dashed]-> Failed : error
+  note on link
+   This transition is intentional,
+   but it violates the additive logic.
+  end note  
+  Submitted --> Living : partial_fill
+  Submitted --> Closed : strategic\nfullfillement
+  state  Confirmed {
+    state New 
+    state Failed
+  
+    state Played {
+      state Living
+      Living --> Living : market\nupdate
+      state Closed
+      }
+    New --> New : strategic\namendement
+    New --> Closed : strategic\nfullfillement
+    New --> Failed : error
+    New --> Living : partial_fill
+    Living --> Closed : is_canceled          
+    Living --> Failed : error
+  }
+  @enduml
+#+END_SRC
+
+#+RESULTS:
+[[file:ordercycle.png]]
+
+#+BEGIN_SRC plantuml :results file link :file tailcycle.png
+    @startuml
+    title Tail life cycle relative to the head
+  
+    hide empty description
+    skinparam shadowing false
+  
+    [*] -->  HooTail : head is\nplayed
+  
+    state "Hooked Tail" as HooTail {
+      state C <<choice>>
+      state "Flapping Tail" as FlaTail
+      state "Flying Tail" as FlyTail
+      C --> FlaTail : head is\nLiving
+      C --> FlyTail : head is\nClosed
+  
+      FlaTail --> FlaTail : head is\nnamended
+      FlaTail -[#red,dashed]-> FlyTail : Head has\nan error
+      FlaTail --> FlyTail : head is\nClosed
+  
+  }
+  
+    @enduml
+#+END_SRC
+
+#+RESULTS:
+[[file:tailcycle.png]]
+
+** <2026-05-17 dim. 11:22>
+
+| <10>       | <10>         | <30>                                              | <80>                                                                                                  |
+| is_played? | is_canceled? | reason                                            | detail                                                                                                |
+|------------+--------------+---------------------------------------------------+-------------------------------------------------------------------------------------------------------|
+| F          | F            | limit_order_from_stop                             | The system created a limit order because an existing stop order triggered                             |
+| F          | F            | new_placed_order_by_user                          | User placed a new order                                                                               |
+| F          | T            | cancelled_by_admin                                | The order removed by administrator's action                                                           |
+| F          | T            | cancelled_by_user                                 | The order cancelled by the user and removed                                                           |
+| F          | T            | contract_expired                                  | The order contract expired. All open orders of that contract removed                                  |
+| F          | T            | dead_man_switch                                   | The order removed because dead man's switch was triggered                                             |
+| F          | T            | liquidation                                       | User position liquidated. The order cancelled                                                         |
+| F          | T            | market_inactive                                   | The order removed because market became inactive                                                      |
+| F          | T            | not_enough_margin                                 | The order removed due to insufficient margin                                                          |
+| F          | T            | order_for_edit_not_found                          | The order edit was rejected as the order to be edited could not be found                              |
+| T          | F            | partial_fill                                      | The order filled partially                                                                            |
+| T          | T            | full_fill                                         | The order filled fully and removed                                                                    |
+| T          | T            | ioc_order_failed_because_it_would_not_be_executed | The immediate or cancel order was rejected due to insufficient liquidity                              |
+| T          | T            | post_order_failed_because_it_would_filled         | The post only order was rejected as it crosses the spread and would be immediately filled             |
+| T          | T            | stop_order_triggered                              | A stop order triggered. The system removed the stop order                                             |
+| T          | T            | would_execute_self                                | The order was rejected as it would execute against another order from the same account                |
+| T          | T            | would_not_reduce_position                         | The order was rejected as it the reduce-only option was selected and it would not reduce the position |
+
+| played? | canceled? | state  |
+|---------+-----------+--------|
+| F       | F         | New    |
+| F       | T         | Failed |
+| T       | F         | Living |
+| T       | T         | closed |
+
+
+* <2026-05-16 sam. 14:48> Fix the type architecture.
+
+2. Strengthen BargainLike until Chronos, Condition, HookOrder, TrailStop can use it.
+3. Split OrderDict into typed variants: NewOrderDict, AmendOrderDict, CancelOrderDict, BrokerReply.
+4. Make get_order_from return a narrower type, or add separate helpers for different payloads.
+5. Fix mypy errors in touched runtime files first, not the whole repository.
+6. Expand RuntimeState to model primary/tail/hook lifecycle explicitly.
+7. Keep all behavior and tests unchanged.  
+
+* <2026-05-16 sam. 12:14>
+  I see :: @@ -112,15 +113,15 @@ class PriceObj:
+ 
+     def get_current_prices(
+         self,
+-        price,
+-        refPrice,
+-        refTail=None,
+-        stopTail=None,
+-        flexTail=None,
+-        sOfsD=None,
+-        sOfsP=None,
+-        fOfsD=None,
+-        fScale=None,
++        price: float,
++        refPrice: Optional[float],
++        refTail: Optional[float] = None,
++        stopTail: Optional[float] = None,
++        flexTail: Optional[float] = None,
+
+refPrice seem mandatory bu Optional type?  
+
+* TODO 
+
+* OpenAPI Scaffold
+
+- =kolabi/openapi/kraken/= is now present as a scaffold.
+- It is not a generated client yet.
+- It exists to receive:
+  - official OpenAPI or Swagger artifacts if Kraken provides them
+  - generated client code
+  - schema extraction helpers
+  - translation glue between generated shapes and =kraken_contract=
+- Active trading code still uses:
+  - =kolabi/kraken_contract/= for verified wire contracts
+  - =kolabi/shared/exchanges/kraken_adapter.py= for the actual adapter
+
+* Environments
+
+| Environment | REST endpoint                                       | WebSocket endpoint                    |
+|-------------+-----------------------------------------------------+---------------------------------------|
+| Demo        | https://demo-futures.kraken.com/derivatives/api/v3 | wss://demo-futures.kraken.com/ws/v1  |
+| Live        | https://futures.kraken.com/derivatives/api/v3      | wss://futures.kraken.com/ws/v1       |
+
+Credentials:
+
+#+begin_example
+KRAKEN_FUTURE_DEMO_API_KEY
+KRAKEN_FUTURE_DEMO_API_SECRET
+
+KRAKEN_FUTURE_API_KEY
+KRAKEN_FUTURE_API_SECRET
+#+end_example
+
+* Installation
+
+#+begin_src bash
+python -m pip install -e .
+#+end_src
+
+Main entry points:
+
+#+begin_src bash
+python -m kolabi.tree.kraken --help
+python -m kolabi.tree.account --help
+python -m kolabi.bot run --help
+#+end_src
+
+Console scripts:
+
+#+begin_example
+kolabi-kraken-tree
+kolabi-kraken-account
+#+end_example
+
+* Databases
+
+Demo and live databases are separated. Public and private databases are also separated.
+
+| Purpose      | Demo DB                         | Live DB                         |
+|--------------+----------------------------------+----------------------------------|
+| Public book  | sqlite:///pub-futures-demo.sqlite | sqlite:///pub-futures-live.sqlite |
+| Private data | sqlite:///prv-futures-demo.sqlite | sqlite:///prv-futures-live.sqlite |
+
+The public service stores market-book snapshots.
+The private service stores orders, fills, balances, positions, margin fields, and connection health.
+
+Private account state is the source of truth for our own orders.
+
+Instrument rule cache:
+
+- Kraken instrument metadata is cached locally in the public DB.
+- Demo location:
+  - DB file: =pub-futures-demo.sqlite=
+  - table: =exchange_instruments=
+- Live location:
+  - DB file: =pub-futures-live.sqlite=
+  - table: =exchange_instruments=
+- Cached fields include:
+  - =symbol=
+  - =tick_size=
+  - =contract_size=
+  - =min_quantity=
+  - =instrument_type=
+  - =tradeable=
+  - =raw_payload=
+
+Local inspection commands:
+#+BEGIN_SRC bash  -i
+# list tables
+sqlite3 pub-futures-demo.sqlite '.tables'
+#+END_SRC
+
+#+RESULTS:
+| account_balances     | exchange_orders        | market_snapshots    |
+| account_positions    | kraken_orderbook       | order_events        |
+| exchange_connections | kraken_orderbook_level | order_runs          |
+| exchange_fills       | market_indicators      | raw_exchange_events |
+| exchange_instruments | market_levels          |                     |
+
+#+begin_src bash
+# inspect all cached instrument rules
+sqlite3 pub-futures-demo.sqlite \
+  "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments ORDER BY symbol;"
+#+end_src
+
+#+RESULTS:
+| PI_ADAUSD |   |   | 1.0 |   | 1 | 2026-05-14 | 12:48:25.591722 |
+| PI_XBTUSD |   |   | 1.0 |   | 1 | 2026-05-14 | 12:48:25.591722 |
+
+#+BEGIN_SRC bash  -i
+# inspect one instrument
+sqlite3 pub-futures-demo.sqlite \
+  "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments WHERE symbol = 'PI_XBTUSD';"
+#+END_SRC
+
+#+RESULTS:
+| PI_XBTUSD |   |   | 1.0 |   | 1 | 2026-05-14 12:48:25.591722 |
+
+* Useful Kraken Commands
+
+#+begin_src bash
+  # Start the public Kraken Futures book DB service:
+  python -m kolabi.tree.kraken run --pair PI_XBTUSD --environment demo
+  # Start the private account/order DB service:
+  python -m kolabi.tree.account run --environment demo
+  # Check strategy readiness against both DBs:
+  python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo
+  
+  # read the latest public book summary for one product id
+  python -m kolabi.tree.kraken status --pair PI_XBTUSD --environment demo
+  python -m kolabi.tree.account status --environment demo
+  
+  # read the current position for one product id
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo balance
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo position
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo open-orders
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo trigger-orders
+
+
+  # Check whether a symbol exists:
+  python -m kolabi.bargain.cli --symbol PI_ADAUSD --environment demo check-symbol
+  # List instruments containing ADA:
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo instruments --contains ADA
+  # see open position ?
+  
+  # Send a demo limit order:
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo limit --side buy --qty 2 --price 70000
+  # Send a demo market order:
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo market --side buy --qty 1
+  # Cancel an order:
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo cancel --order-id YOUR_ORDER_ID
+  # Amend an order price and/or quantity:
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo amend --order-id YOUR_ORDER_ID --price 80010 --qty 2
+  
+  #  Run a TSV strategy on demo:
+  python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+  #  Dry run:
+  python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment live --dry-run
+  
+  
+#+end_src
+
+** Tail Order Example
+
+The simplest reusable bot-tail example is stored in:
+
+#+begin_example
+Orders/pi_xbtusd_sell_plus1_tail_0p5.tsv
+#+end_example
+
+It describes:
+
+- one sell limit order
+- order price at current lower ask + 1.0
+- one bot-managed stop tail at 0.5 percent
+
+Run it with:
+
+#+begin_src bash
+python -m kolabi.bot run --strategy Orders/pi_xbtusd_sell_plus1_tail_0p5.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+#+end_src
+
+** Cost Commands
+
+ | Command             | Purpose                                                         |
+ |---------------------+-----------------------------------------------------------------|
+ | =spot-costs=        | get Kraken Spot maker/taker fee tier for one pair               |
+ | =spot-margin-costs= | get Spot pair leverage/margin metadata, plus margin-fee warning |
+ | =futures-costs=     | get Futures maker/taker schedule, funding, margin parameters    |
+ | =costs=             | compare Spot and Futures for one logical asset pair             |
+* Tests
+
+#+begin_src bash
+python -m pytest -q \
+  tests/exchanges \
+  tests/bot/test_runtime_regression.py \
+  tests/test_config.py \
+  tests/tree/test_account_state.py \
+  tests/tree/test_kraken_tree.py
+#+end_src
+

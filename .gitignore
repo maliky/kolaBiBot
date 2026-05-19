@@ -1,0 +1,15 @@
+*.png
+*.db
+*.sqlite*
+archives/
+FinancialNoise*
+.codex
+run.sh
+notes.org
+*cache*
+*egg*
+\#*
+*~
+secrets*
+.env*
+.python*

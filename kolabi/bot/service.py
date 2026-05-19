@@ -1,0 +1,322 @@
+from __future__ import annotations
+
+import threading
+from dataclasses import dataclass
+from typing import Any, Iterable, Optional, TypedDict
+
+from kolabi.bot.indicators import (
+    DummyIndicatorClient,
+    IndicatorClient,
+    KrakenDbIndicatorClient,
+)
+from kolabi.bot.persistence import OrderRecorder, PersistenceConfig
+from kolabi.bot.runtime.auditor import MarketAuditeur
+from kolabi.bot.tsv import OrderSpec
+from kolabi.shared.config import load_exchange_config
+from kolabi.shared.exchanges import get_adapter
+from kolabi.shared.kraken_futures import kraken_futures_environment
+from kolabi.shared.logging import setup_logging
+from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntimeState
+from kolabi.tree.account import (
+    AccountStateStore,
+    AccountStreamConfig,
+    KrakenFuturesPrivateStream,
+    credentials_from_env,
+)
+
+
+class AuditorGoKwargs(TypedDict):
+    tps_run: tuple[float, float]
+    prix: tuple[float, float]
+    essais: int
+    side: str
+    q: float | int | None
+    tp: float | int
+    atype: str
+    oType: str
+    nameT: str
+    updatepause: int
+    logpause: int
+    dr_pause: float | None
+    tType: str
+    timeout: int | None
+    oDelta: float | None
+    tDelta: float | None
+    hook: str | None
+
+
+@dataclass
+class BotConfig:
+    """Runtime configuration for kolaBiBot."""
+
+    exchange: str = "kraken"
+    symbol: str = "PI_XBTUSD"
+    environment: str = "demo"
+    updatepause: int = 10
+    logpause: int = 60
+    dummy: bool = False
+    log_level: str = "INFO"
+    db_url: Optional[str] = None
+    market_db_url: Optional[str] = None
+    account_db_url: Optional[str] = None
+    require_ready: bool = True
+    ready_timeout_seconds: float = 45.0
+    ready_poll_seconds: float = 1.0
+    max_public_age_seconds: float = 15.0
+    max_private_age_seconds: float = 30.0
+    max_reconcile_age_seconds: float = 300.0
+
+
+class BotService:
+    """High-level orchestrator that reuses the legacy execution engine."""
+
+    def __init__(
+        self,
+        config: BotConfig,
+        auditor: MarketAuditeur | None = None,
+        indicators: IndicatorClient | None = None,
+    ) -> None:
+        self.config = config
+        self.logger = setup_logging(config.log_level)
+        self._manage_runtime_services = auditor is None
+        self.exchange_config = (
+            load_exchange_config(
+                config.exchange,
+                symbol=config.symbol,
+                environment=config.environment,
+            )
+            if auditor is None
+            else None
+        )
+        market_db_url = config.market_db_url
+        account_db_url = config.account_db_url
+        if config.exchange.lower() == "kraken":
+            env_cfg = kraken_futures_environment(config.environment)
+            market_db_url = market_db_url or env_cfg.public_db_url
+            account_db_url = account_db_url or env_cfg.private_db_url
+            if self.exchange_config is not None:
+                self.exchange_config.adapter_kwargs.setdefault(
+                    "public_db_url", market_db_url
+                )
+                self.exchange_config.adapter_kwargs.setdefault(
+                    "account_db_url", account_db_url
+                )
+        self.auditor = auditor or MarketAuditeur(
+            exchange=config.exchange,
+            symbol=config.symbol,
+            live=False,
+            dbo=None,
+            logger=self.logger,
+            config=self.exchange_config,
+        )
+        self.indicators: IndicatorClient = indicators or (
+            KrakenDbIndicatorClient(
+                # > should probably use global constant here instead of string
+                db_url=market_db_url or "sqlite:///pub-futures-demo.sqlite",
+                environment=config.environment,
+                # > Same here for the moment we swith to spot
+                market_type="futures",
+            )
+            # > Note that kraken is not the only target for this bot.
+            if config.exchange.lower() == "kraken"
+            else DummyIndicatorClient()
+        )
+        self.recorder: OrderRecorder | None = (
+            OrderRecorder(PersistenceConfig(config.db_url))
+            if config.db_url
+            else None
+        )
+        self._server_started = False
+        self._account_thread: threading.Thread | None = None
+        self._account_db_url = account_db_url
+        self._market_db_url = market_db_url
+        self.runtime_state: KrakenRuntimeStateClient | None = None
+        if (
+            config.exchange.lower() == "kraken"
+            and market_db_url is not None
+            and account_db_url is not None
+        ):
+            self.runtime_state = KrakenRuntimeStateClient(
+                market_db_url=market_db_url,
+                account_db_url=account_db_url,
+                symbol=config.symbol,
+                exchange=config.exchange.lower(),
+                environment=config.environment,
+                market_type="futures",
+                max_public_age_seconds=config.max_public_age_seconds,
+                max_private_age_seconds=config.max_private_age_seconds,
+                max_reconcile_age_seconds=config.max_reconcile_age_seconds,
+            )
+
+    def start(self) -> None:
+        if not self._server_started:
+            self._start_kraken_private_stream()
+            self._wait_until_ready()
+            self.auditor.start_server()
+            self._server_started = True
+
+    def preflight(self) -> dict[str, object]:
+        """Return the current runtime readiness payload."""
+        if self.runtime_state is None:
+            return {
+                "exchange": self.config.exchange,
+                "symbol": self.config.symbol,
+                "ready": True,
+                "reasons": (),
+                "status": "not_applicable",
+            }
+        state = self.runtime_state.fetch_runtime_state()
+        payload = state.as_dict()
+        payload["status"] = "ok" if state.ready else "waiting"
+        return payload
+
+    def _start_kraken_private_stream(self) -> None:
+        if (
+            not self._manage_runtime_services
+            or self.config.exchange.lower() != "kraken"
+            or self._account_thread is not None
+        ):
+            return
+        env_cfg = kraken_futures_environment(self.config.environment)
+        stream_config = AccountStreamConfig(
+            db_url=self._account_db_url or env_cfg.private_db_url,
+            environment=self.config.environment,
+            market_type="futures",
+            ws_url=env_cfg.private_ws_url,
+            rest_url=env_cfg.rest_url,
+            api_key_env=env_cfg.api_key_env,
+            api_secret_env=env_cfg.api_secret_env,
+        )
+        store = AccountStateStore(stream_config)
+        credentials = credentials_from_env(stream_config)
+
+        def _run_stream() -> None:
+            store.record_connection_status("rest_reconciler", "starting")
+            asyncio.run(_run_private_stack(stream_config, store, credentials))
+
+        import asyncio
+
+        self._account_thread = threading.Thread(
+            target=_run_stream,
+            name="kraken-private-stream",
+            daemon=True,
+        )
+        self._account_thread.start()
+
+    def _wait_until_ready(self) -> None:
+        """Wait for fresh Kraken public/private state before starting the runtime."""
+        if (
+            self.runtime_state is None
+            or self.config.exchange.lower() != "kraken"
+            or not self.config.require_ready
+        ):
+            return
+        self.logger.info(
+            "kraken runtime preflight symbol=%s env=%s market_db=%s account_db=%s",
+            self.config.symbol,
+            self.config.environment,
+            self._market_db_url,
+            self._account_db_url,
+        )
+        state = self.runtime_state.wait_until_ready(
+            timeout_seconds=self.config.ready_timeout_seconds,
+            poll_seconds=self.config.ready_poll_seconds,
+        )
+        if not state.ready:
+            raise TimeoutError(self._format_wait_timeout(state))
+        self.logger.info(
+            "kraken runtime ready symbol=%s public_age=%.2fs private_age=%.2fs",
+            state.symbol,
+            state.public.age_seconds or 0.0,
+            state.private_ws.age_seconds or 0.0,
+        )
+
+    def _format_wait_timeout(self, state: StrategyRuntimeState) -> str:
+        """Format a short readiness timeout message for CLI users."""
+        reasons = ", ".join(state.reasons) if state.reasons else "unknown readiness failure"
+        return (
+            "Kraken runtime did not become ready within "
+            f"{self.config.ready_timeout_seconds:.0f}s: {reasons}"
+        )
+
+    def run_orders(self, specs: Iterable[OrderSpec], asynchronous: bool = True) -> None:
+        """Schedule the provided orders using the legacy `go` routine."""
+        spec_list = list(specs)
+        self._validate_specs(spec_list)
+        self.start()
+        for spec in spec_list:
+            kwargs = self._spec_to_kwargs(spec)
+            snapshot = self.indicators.fetch_snapshot(self.config.symbol)
+            run_id: Optional[int] = None
+            if self.recorder:
+                run = self.recorder.start_run(spec, snapshot)
+                run_id = run.id
+                self.logger.info(f"[{spec.name}] submitted run #{run_id}")
+            if asynchronous:
+                # > I was hoping of not using thread here but only async. comment on the difficulty to have a async rewrite
+                thread = threading.Thread(
+                    target=self.auditor.go, name=spec.name, kwargs=kwargs
+                )
+                thread.start()
+            else:
+                self.auditor.go(**kwargs)
+
+    def _validate_specs(self, specs: Iterable[OrderSpec]) -> None:
+        """Validate obvious Kraken instrument constraints before sending any order."""
+        if self.config.exchange.lower() != "kraken" or self.exchange_config is None:
+            return
+        adapter_cls = get_adapter("kraken")
+        adapter = adapter_cls(
+            api_key=self.exchange_config.api_key,
+            api_secret=self.exchange_config.api_secret,
+            base_url=self.exchange_config.base_url,
+            symbol=self.exchange_config.symbol,
+            **self.exchange_config.adapter_kwargs,
+        )
+        rules = adapter.instrument_rules(self.config.symbol)
+        min_qty = float(rules.get("minQuantity") or 1.0)
+        for spec in specs:
+            if "qA" in spec.atype and spec.q is not None and float(spec.q) < min_qty:
+                raise ValueError(
+                    f"Strategy '{spec.name}' quantity {spec.q} is below "
+                    f"the minimum quantity {min_qty:g} for {self.config.symbol}."
+                )
+
+    def _spec_to_kwargs(self, spec: OrderSpec) -> AuditorGoKwargs:
+        """Translate OrderSpec into kwargs accepted by MarketAuditeur.go."""
+        return {
+            "tps_run": spec.tps_run,
+            "prix": spec.prix,
+            "essais": spec.essais,
+            "side": spec.side,
+            "q": spec.q,
+            "tp": spec.tp,
+            "atype": spec.atype,
+            "oType": spec.oType,
+            "nameT": spec.name,
+            "updatepause": self.config.updatepause,
+            "logpause": self.config.logpause,
+            "dr_pause": spec.dr_pause,
+            "tType": spec.tType,
+            "timeout": spec.timeout,
+            "oDelta": spec.oDelta,
+            "tDelta": spec.tDelta,
+            "hook": spec.hook or None,
+        }
+
+
+async def _run_private_stack(
+    config: AccountStreamConfig,
+    store: AccountStateStore,
+    credentials: Any,
+) -> None:
+    """Start one reconcile pass, then keep the private websocket alive."""
+    from kolabi.tree.account import KrakenFuturesRestReconciler
+
+    reconciler = KrakenFuturesRestReconciler(config, store, credentials)
+    try:
+        reconciler.reconcile_once()
+    except Exception as exc:
+        store.record_connection_status("rest_reconciler", "error", last_error=str(exc))
+    stream = KrakenFuturesPrivateStream(config, store, credentials)
+    await stream.run()

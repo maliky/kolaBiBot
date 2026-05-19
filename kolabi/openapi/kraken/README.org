@@ -1,0 +1,26 @@
+#+TITLE: Kraken OpenAPI Scaffold
+#+OPTIONS: toc:1 num:nil
+
+* Purpose
+
+- Hold future machine-readable Kraken API integration work.
+- Keep it separate from =kraken_contract=.
+- Use this area only for:
+  - official OpenAPI or Swagger artifacts
+  - generated client code
+  - schema extraction helpers
+  - translation glue from generated shapes to repo contract shapes
+
+* Current State
+
+- Scaffold only.
+- No official Kraken Futures OpenAPI file is wired into the repo yet.
+- Active trading code still uses:
+  - =kolabi/kraken_contract/= for verified wire contracts
+  - =kolabi/shared/exchanges/kraken_adapter.py= for exchange integration
+
+* Expected Files Later
+
+- =specs/=: downloaded or curated OpenAPI sources
+- =generated/=: generated client code
+- =adapters/=: translation helpers from generated code to local contracts

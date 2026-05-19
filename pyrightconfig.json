@@ -1,0 +1,13 @@
+{
+  "include": ["kolabi", "tests"],
+  "venvPath": "/home/mlk/.pyenv/versions",
+  "venv": "kola",
+  "extraPaths": ["kolabi"],
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": true,
+  "reportUnusedImport": true,
+  "reportUndefinedVariable": true,
+  "useLibraryCodeForTypes": true
+}

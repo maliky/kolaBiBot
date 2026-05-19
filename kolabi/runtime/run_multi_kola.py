@@ -1,0 +1,134 @@
+# -*- coding: utf-8 -*-
+"""Lauch the program to run several order couple (main order and tail)."""
+import argparse
+import sys
+
+from kolabi.runtime.legacy.kola.bitmex_api.dummy import DummyBitMEX
+from kolabi.runtime.legacy.kola.settings import LOGFMT, LOGNAME
+from kolabi.runtime.legacy.kola.utils.logfunc import get_logger, setup_logging
+from kolabi.runtime.multi_kola import LegacyMarketAuditeur
+
+rlogger = setup_logging()
+
+
+class argsO:
+    def __init__(
+        self,
+        argfile="./morders.tsv",
+        loglevel="INFO",
+        logfile="./Logs/test.org",
+        liverun=False,
+        updatepause=10,
+        logpause=600,
+        dummy=False,
+        platform="bitmex",
+        **kwargs,
+    ):
+        """Simulate the args from command line"""
+        self.argFile = argfile
+        self.logLevel = loglevel
+        self.logFile = logfile
+        self.liveRun = liverun
+        self.dummy = False if liverun else dummy
+        self.updatePause = updatepause
+        self.logPause = logpause
+        self.platform = platform
+
+    def __repr__(self, long=False):
+        """Represent the program."""
+        # should find the commande to get all attributes of object
+        obj = {
+            "argFile": self.argFile,
+            "logLevel": self.logLevel,
+            "logFile": self.logFile,
+            "logPause": self.logPause,
+            "liveRun": self.liveRun,
+            "dummy": self.dummy,
+            "updatePause": self.updatePause,
+            "platform": self.platform,
+        }
+        return f"argsO {obj}"
+
+
+def main_prg():
+    """Load arguments and run main program."""
+    cmdArgs = get_cmd_args()
+    defaultArgs = argsO()
+
+    logger = get_logger(
+        logger=rlogger,
+        name=LOGNAME,
+        sLL=cmdArgs.logLevel,
+        logFile=defaultArgs.logFile,
+        fmt_=LOGFMT,
+    )
+
+    dbo = DummyBitMEX(up=0, logger=logger) if cmdArgs.dummy else None
+
+    tma = LegacyMarketAuditeur(
+        live=cmdArgs.liveRun,
+        dbo=dbo,
+        logger=logger,
+        symbol=cmdArgs.symbol,
+        platform=cmdArgs.platform,
+    )
+    tma.start_server()
+
+    raise RuntimeError(
+        "kolabi.runtime.run_multi_kola is deprecated. Use 'python -m kolabi.bot run ...' instead."
+    )
+
+
+def get_cmd_args():
+    """Parse the function's arguments."""
+    # default
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "--morders",
+        "-m",
+        type=str,
+        default="./Orders/xbt_test.tsv",
+        help=(
+            "Path to the 'tsv' file containing the market orders. usually one per symbol."
+        ),
+    )
+    parser.add_argument(
+        "--symbol",
+        "-S",
+        type=str,
+        default="XBTUSD",
+        help=(
+            "Market to listen too. could be XBTM20 XBTU20 ADAU20 BCHM20 ETHUSD LTCM20"
+        ),
+    )
+    parser.add_argument(
+        "--platform",
+        "-P",
+        type=str,
+        default="bitmex",
+        choices=["bitmex", "binance"],
+        help=("Trading platform to use."),
+    )
+
+
+    parser.add_argument(
+        "--logLevel", "-l", type=str, default="INFO", help=("Le log level")
+    )
+    parser.add_argument(
+        "--liveRun", action="store_true", help=("Si présent utilise live bitmex !")
+    )
+    parser.add_argument(
+        "--dummy",
+        "-D",
+        action="store_true",
+        help=("Si présent utilise un dummy bitmex"),
+    )
+
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    main_prg()
+    sys.exit()

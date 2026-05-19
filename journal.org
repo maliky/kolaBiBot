@@ -1,0 +1,119 @@
+
+* <2025-11-09 dim. 19:05>  Migration Plan: Legacy TSV Engine → kolabi/bot
+** 1. Extract TSV grammar + parsing
+  - Lift kolaBot/kola/utils/argfunc.py, orderfunc.py, and related helpers into kolabi/bot/tsv/*.py with no behavioral changes; wrap them in unit tests using Orders/demo_ada.tsv fixtures.
+  - Define a StrategySpec dataclass that represents one TSV row (primary + tail order config); parsing layer should output List[StrategySpec].
+
+** 2. Rebuild scheduler / state machine
+
+  - Port MarketAuditeur, Chronos, and order condition classes into kolabi/bot/runtime/ while swapping direct BitMEX/Binance calls for the shared adapter interface  (kolabi.shared.core.Bargain).
+  - Replace ad-hoc queues with a small orchestration service (e.g., BotService) that consumes StrategySpec objects and runs them against the shared indicator store.
+
+*** Summary
+
+  - Added a reusable runtime layer for kolabi/bot: the legacy scheduler pieces now
+    live under kolabi/bot/runtime, with chronos.py:1 copied from the old engine (and
+    wired to kolabi.bot.runtime.orders) plus a new adapter class in kolabi/bot/runtime/
+    auditor.py:1 that subclasses the legacy MarketAuditeur but instantiates shared
+    Bargain adapters (or the dummy engine) and the new Chronos queue.
+  - Wrapped the order-condition classes so future code can import them from the new
+    namespace (kolabi/bot/runtime/orders.py:1), keeping current behavior while we
+    continue the migration.
+  - Implemented a real BotService (kolabi/bot/service.py:1) that converts parsed
+    OrderSpec records into MarketAuditeur.go kwargs, starts the shared runtime, and can
+    run synchronously or asynchronously; added tests for both the TSV parser and the new    service (tests/bot/test_tsv_parser.py:1, tests/bot/test_service.py:1).
+  - All tests pass (pytest tests -q).
+
+  - Next Steps
+
+  1. Gradually migrate the remaining legacy dependencies (order utilities, indicator
+     access) into kolabi/bot/runtime so we can drop the thin wrappers.
+  2. Connect BotService to a real indicator store / kolaBiTree output instead of the
+     placeholder.
+
+** 3. Wire indicator access
+  - Abstract the indicator lookup currently done via direct price polling; introduce an IndicatorClient (initially backed by in-memory/dummy data) so the new bot reads signals from kolaBiTree via the DB/API contract.
+  - Provide fallbacks that mimic the legacy behavior (e.g., direct price fetch) until kolaBiTree is live.
+
+***  Summary
+
+  - Added an indicator abstraction (kolabi/bot/indicators.py:1) so the bot can fetch snapshots from kolaBiTree later; by default it uses DummyIndicatorClient returning an empty snapshot.
+  - Wired BotService to accept an IndicatorClient, fetch a snapshot per order batch, and pass it along to MarketAuditeur.go so strategies can react to computed metrics (kolabi/bot/service.py:1).
+  - Updated tests to cover the new dependency injection (tests/bot/test_service.py:1); full test suite still passes (pytest tests -q).
+
+** 4. Persistence + logging
+
+  - Centralize order lifecycle events (submitted, filled, chained) into the shared DB using SQLAlchemy models so runs are auditable and restartable.
+  - Port existing logging format (French/English mix, LOGFMT) to the new service, ensuring continuity of log semantics.
+
+*** - Summary
+  - Added a shared persistence layer (kolabi/shared/persistence/models.py:1, kolabi/shared/persistence/db.py:1) with SQLAlchemy models for OrderRun and OrderEvent, plus helpers to initialize engines/sessionmakers; the timestamps now use timezone-aware UTC datetimes.
+  - Introduced kolabi/bot/persistence.py:1 with a PersistenceConfig and OrderRecorder used by BotService to store each scheduled order (including indicator snapshot metadata) and future lifecycle events. The bot now sets up structured logging via kolabi/shared/logging.py:1, so we keep the bilingual LOGFMT while centralizing configuration.
+  - Updated BotService (kolabi/bot/service.py:1) to accept logging level/DB URL, fetch indicator snapshots, record OrderRun entries, and log submissions before invoking the legacy runtime. Added tests exercising both the TSV parser + new persistence flow (tests/bot/test_service.py:1), and the full suite passes (pytest tests -q).
+
+  - Next Steps
+
+  1. Extend OrderRecorder.record_event to be invoked by Chronos/reply queues so fills/cancels get persisted, and map these events back into logs.
+  2. Expose DB URL/log file knobs via CLI/env so operators can choose persistence targets.
+
+** 5. CLI + compatibility layer
+  - Expose a CLI (python -m kolabi.bot run --strategy Orders/demo_ada.tsv --exchange binance) that loads TSV strategies, instantiates the new runtime, and reports status.
+  - Maintain a compatibility shim where kolaBot.run_multi_kola delegates to the new CLI once feature parity is confirmed.
+***  Summary
+  - Added a full CLI entry point in kolabi/bot/__main__.py:1; python -m kolabi.bot run --strategy Orders/demo_ada.tsv ... now parses the TSV strategies, optionally  performs a dry run, and otherwise instantiates BotService with exchange/symbol/log/db settings before dispatching orders (sync or async).
+  - Documented the workflow in README.rst:320, showing how to dry-run or persist executions.
+  - Expanded bot tests with CLI coverage (tests/bot/test_cli.py:1) alongside the existing service/persistence specs; entire suite passes (pytest tests -q → 13 tests).
+
+  - Updated kolaBot/run_multi_kola.py:82-112 so the legacy entry point now tries to delegate to python -m kolabi.bot run … for the supplied TSV/exchange/symbol; on success it prints a compatibility note and exits, otherwise it falls back to the original legacy runtime. This gives you a gradual migration path while keeping the old behavior available.
+
+** 6. Testing + verification
+
+  - Create regression tests that replay demo_ada.tsv through the new runtime with Dummy  adapters, asserting identical order sequences to the legacy engine.
+  - Add integration tests that run the new bot against the DummyTree data source to validate the end-to-end kolaBiTree ↔ kolaBiBot flow.
+
+• - Added tests/bot/test_runtime_regression.py:1, which loads Orders/demo_ada.tsv,
+    feeds it through BotService using a dummy auditor/indicator combo, and asserts that
+    each TSV row is dispatched with matching parameters—giving us the first regression
+    harness for the new runtime.
+
+** 7. Decommission legacy code
+
+  - After parity is achieved, mark kolaBot modules as deprecated, update docs to point at kolabi/bot, and eventually prune unused files to reduce maintenance overhead.
+
+***  Summary
+
+  - Legacy kolaBot is now marked as deprecated: importing kolaBot emits a warning (kolaBot/__init__.py:1) and running kolaBot/run_multi_kola.py:95 immediately raises with guidance to use the new kolabi.bot CLI instead of silently continuing.
+  - README instructions now highlight the modern CLI (README.rst:40) and only mention the legacy command as deprecated.
+  - The legacy runner still attempts to delegate to the new CLI first; when credentials aren’t present it falls back to the runtime and logs the limitation, so this behavior is expected until env vars are set.
+** 8. next
+ok, so now, can my project connect to kraken to getdata and to binance to place and manage the orders if I do have the keys and secret in my env ?  
+Concretelym for example, here is a simple strategy I would like to be runned by my bot.  
+Compute the average price directly from the order book L2 taken from kraken.
+Have a pair of order buy stop loss 1.5% above the average price and a sell stop loss 1.6% below. This should be updated (not canceled) just updated every 6s to stay at this slightly skewed 3.1@ spread.  Then As soon as one of the order is touched, a trailing stop should be pegged at a distance of 1.6%.  the trailing stop distance should be updated every 6s, and reduced when the distance  increase. I think I have a good example of this in my previous bot and you should be able to get what I mean technically by reducing the distance betwee price and trailing stop by looking in the code.
+so maybe first identify where I have that rule fixing the price for the trailing stop and then check if the scenario is still feasible wiht the new bot ?
+
+* <2025-11-09 dim. 14:31> Architecture capture
+  The solution splits cleanly into two coordinated applications that talk via a shared DB contract.
+
+** 1. kolaBiTree – market data + indicators backend
+   - Pulls live data from any supported platform, enriches it (indicators, metrics), and writes everything into the database.
+   - Must expose a dummy generator so tests/dev can replay synthetic-yet-realistic series without exchange access.
+   - Responsible for keeping derived indicators synchronized with their raw source, and for providing a documented schema/API that downstream consumers (kolaBiBot, analytics) rely on.
+   - Implementation reminders:
+     - Treat DB drivers via SQLAlchemy for portability (SQLite → Postgres).
+     - Define versioned schemas/migrations so both real and dummy producers stay compatible.
+     - Provide a narrow IPC surface (e.g., stored procs/views or service endpoints) rather than direct table poking.
+
+** 2. kolaBiBot – market-agnostic execution layer
+   - Focuses on placing, following, and managing orders across exchanges, powered by the signals exposed by kolaBiTree.
+   - Reads indicators/metrics through the shared DB contract (or a thin service wrapper) and activates TSV-defined orders when conditions match.
+   - Retains the existing strengths: chainable orders, parallel execution, bilingual comments, adapter-driven exchange support.
+   - Near-term target: finish migrating the legacy kolaBot logic so this module is the authoritative client, while legacy files serve as regression references.
+
+** Dual-app approach – takeaways
+   - ✅ Clear separation of concerns: kolaBiTree can scale independently (async ingestion, ETL pipelines) while kolaBiBot stays lean and deterministic.
+   - ✅ Testing story improves: swap kolaBiTree with its dummy twin to drive kolaBiBot end-to-end without live markets.
+   - ⚠️ Requires disciplined schema/version management; breaking DB changes must be coordinated.
+   - ⚠️ Latency-sensitive strategies may need a low-latency path (e.g., in-memory cache or event bus) if DB polling proves too slow.
+   - Recommendation: keep two repos/modules but host shared contracts (ORM models, indicator definitions) in a small common package to avoid drift.
+

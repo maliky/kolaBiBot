@@ -1,0 +1,526 @@
+#+PROPERTY: header-args:python :session man :exports both :results output replace :cache no  
+#+TITLE: kolaBiBot Manual
+#+AUTHOR: M. Kone / Codex
+#+DATE: 2026-05-12
+#+OPTIONS: toc:2 num:nil
+
+
+* Overview
+
+- This file lists the main command-line entry points implemented in this repo.
+- Default focus is Kraken Futures.
+- Use =--environment demo= for the demo platform and =--environment live= for the live platform.
+- Active trade entry points now live under =kolabi.bargain/=.
+- If a command fails because of a symbol, first list instruments with:
+  - =python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo instruments=
+- Standard order intents currently covered by the Kraken contract:
+  - =Limit=
+  - =Market=
+  - =StopLoss= or trigger-entry market
+  - =StopLossLimit= or trigger-entry limit
+  - =TakeProfit= or market-if-touched
+  - =TakeProfitLimit= or limit-if-touched
+  - =TrailingStop= native Kraken trailing stop
+  - =TrailingStopLimit= native Kraken trailing stop limit
+- In this repo, order placement is currently done through Kraken Futures REST.
+- Websockets are currently used here for public market data and private account/order state, not for placing Futures orders.
+
+#+BEGIN_SRC bash  -i
+python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo instruments
+#+END_SRC
+
+#+RESULTS:
+| Synbol           | futures_inverse  |
+|------------------+------------------|
+| PI_XBTUSD        | futures_inverse  |
+| PI_ETHUSD        | futures_inverse  |
+| PI_XRPUSD        | futures_inverse  |
+| PI_LTCUSD        | futures_inverse  |
+| PI_BCHUSD        | futures_inverse  |
+| PF_XBTUSD        | flexible_futures |
+| PF_AVAXUSD       | flexible_futures |
+| PF_DOTUSD        | flexible_futures |
+| FF_XBTUSD_260626 | flexible_futures |
+| PF_ADAUSD        | flexible_futures |
+| FF_ETHUSD_260626 | flexible_futures |
+| PF_ATOMUSD       | flexible_futures |
+| PF_EOSUSD        | flexible_futures |
+| PF_SOLUSD        | flexible_futures |
+| PF_ETHUSD        | flexible_futures |
+| PF_BCHUSD        | flexible_futures |
+| PF_LINKUSD       | flexible_futures |
+| PF_UNIUSD        | flexible_futures |
+| PF_LTCUSD        | flexible_futures |
+| PF_XRPUSD        | flexible_futures |
+| PF_XMRUSD        | flexible_futures |
+| PF_DEFIUSD       | flexible_futures |
+| PF_FILUSD        | flexible_futures |
+| PF_MATICUSD      | flexible_futures |
+| PF_LUNA2USD      | flexible_futures |
+| PF_OPUSD         | flexible_futures |
+| PF_APEUSD        | flexible_futures |
+| PF_NEARUSD       | flexible_futures |
+| PF_WAVESUSD      | flexible_futures |
+| PF_AAVEUSD       | flexible_futures |
+| PF_CRVUSD        | flexible_futures |
+| PF_MANAUSD       | flexible_futures |
+| PF_ALGOUSD       | flexible_futures |
+| PF_SNXUSD        | flexible_futures |
+| PF_XLMUSD        | flexible_futures |
+| PF_XTZUSD        | flexible_futures |
+| PF_TRXUSD        | flexible_futures |
+| PF_FTMUSD        | flexible_futures |
+| PF_DOGEUSD       | flexible_futures |
+| PF_GMTUSD        | flexible_futures |
+| PF_YFIUSD        | flexible_futures |
+| PF_COMPUSD       | flexible_futures |
+| PF_ENJUSD        | flexible_futures |
+| PF_SANDUSD       | flexible_futures |
+| PF_APTUSD        | flexible_futures |
+| PF_GRTUSD        | flexible_futures |
+| PF_CHZUSD        | flexible_futures |
+| PF_LPTUSD        | flexible_futures |
+| PF_BATUSD        | flexible_futures |
+| PF_AXSUSD        | flexible_futures |
+| PF_GALAUSD       | flexible_futures |
+| PF_ETCUSD        | flexible_futures |
+| PF_KAVAUSD       | flexible_futures |
+| PF_LRCUSD        | flexible_futures |
+| PF_KSMUSD        | flexible_futures |
+| PF_FLOWUSD       | flexible_futures |
+| PF_ZECUSD        | flexible_futures |
+| PF_QTUMUSD       | flexible_futures |
+| PF_DASHUSD       | flexible_futures |
+| PF_1INCHUSD      | flexible_futures |
+| PF_KNCUSD        | flexible_futures |
+| PF_OGNUSD        | flexible_futures |
+| PF_SUSHIUSD      | flexible_futures |
+| PF_GMXUSD        | flexible_futures |
+| PF_ARBUSD        | flexible_futures |
+| PF_LDOUSD        | flexible_futures |
+| PF_PEPEUSD       | flexible_futures |
+| PF_SHIBUSD       | flexible_futures |
+| FF_ETHUSD_260515 | flexible_futures |
+| FF_XBTUSD_260515 | flexible_futures |
+| FF_XBTUSD_260925 | flexible_futures |
+| FF_ETHUSD_260925 | flexible_futures |
+| FF_XBTUSD_260529 | flexible_futures |
+| FF_ETHUSD_260529 | flexible_futures |
+
+
+** Preamble
+
+#+begin_src python
+from kolabi.shared.config import load_exchange_config
+from kolabi.shared.exchanges import get_adapter
+
+config = load_exchange_config(
+    "kraken",
+    symbol="PI_XBTUSD",
+    environment="demo",
+)
+
+Adapter = get_adapter("kraken")
+adapter = Adapter(
+    api_key=config.api_key,
+    api_secret=config.api_secret,
+    base_url=config.base_url,
+    symbol=config.symbol,
+    **config.adapter_kwargs,
+)
+#+end_src
+
+#+RESULTS:
+
+** Read Data
+
+#+begin_src python
+print(adapter.list_instruments()[:5])
+print(adapter.validate_symbol("PI_XBTUSD"))
+print(adapter.get_balance())
+print(adapter.get_position())
+#+end_src
+
+#+RESULTS:
+: [{'symbol': 'PI_XBTUSD', 'type': 'futures_inverse', 'underlying': 'rr_xbtusd', 'tickSize': 0.5, 'contractSize': 1, 'tradeable': True, 'impactMidSize': 1000.0, 'maxPositionSize': 5000000.0, 'openingDate': '2019-02-27T13:49:16Z', 'marginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'fundingRateCoefficient': 24, 'maxRelativeFundingRate': 0.0025, 'isin': 'PI_XBTUSD', 'contractValueTradePrecision': 0, 'postOnly': False, 'feeScheduleUid': 'd46c2190-81e3-4370-a333-424f24387829', 'mtf': True, 'base': 'BTC', 'quote': 'USD', 'pair': 'BTC:USD', 'retailMarginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'marginSchedules': {}, 'category': '', 'tags': [], 'tradfi': False}, {'symbol': 'PI_ETHUSD', 'type': 'futures_inverse', 'underlying': 'rr_ethusd', 'tickSize': 0.025, 'contractSize': 1, 'tradeable': True, 'impactMidSize': 1000.0, 'maxPositionSize': 2000000.0, 'openingDate': '2019-03-05T10:07:17Z', 'marginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'fundingRateCoefficient': 24, 'maxRelativeFundingRate': 0.0025, 'contractValueTradePrecision': 0, 'postOnly': False, 'feeScheduleUid': 'd46c2190-81e3-4370-a333-424f24387829', 'mtf': False, 'base': 'ETH', 'quote': 'USD', 'pair': 'ETH:USD', 'retailMarginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'marginSchedules': {}, 'category': '', 'tags': [], 'tradfi': False}, {'symbol': 'PI_XRPUSD', 'type': 'futures_inverse', 'underlying': 'rr_xrpusd', 'tickSize': 0.0001, 'contractSize': 1, 'tradeable': True, 'impactMidSize': 1000.0, 'maxPositionSize': 3000000.0, 'openingDate': '2019-03-05T10:07:55Z', 'marginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'fundingRateCoefficient': 24, 'maxRelativeFundingRate': 0.0025, 'contractValueTradePrecision': 0, 'postOnly': False, 'feeScheduleUid': 'd46c2190-81e3-4370-a333-424f24387829', 'mtf': False, 'base': 'XRP', 'quote': 'USD', 'pair': 'XRP:USD', 'retailMarginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'marginSchedules': {}, 'category': '', 'tags': [], 'tradfi': False}, {'symbol': 'PI_LTCUSD', 'type': 'futures_inverse', 'underlying': 'rr_ltcusd', 'tickSize': 0.01, 'contractSize': 1, 'tradeable': True, 'impactMidSize': 1000.0, 'maxPositionSize': 2000000.0, 'openingDate': '2019-03-05T10:08:23Z', 'marginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'fundingRateCoefficient': 24, 'maxRelativeFundingRate': 0.0025, 'contractValueTradePrecision': 0, 'postOnly': False, 'feeScheduleUid': 'd46c2190-81e3-4370-a333-424f24387829', 'mtf': False, 'base': 'LTC', 'quote': 'USD', 'pair': 'LTC:USD', 'retailMarginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'marginSchedules': {}, 'category': '', 'tags': [], 'tradfi': False}, {'symbol': 'PI_BCHUSD', 'type': 'futures_inverse', 'underlying': 'rr_bchusd', 'tickSize': 0.1, 'contractSize': 1, 'tradeable': True, 'impactMidSize': 200.0, 'maxPositionSize': 2000000.0, 'openingDate': '2019-03-05T10:34:12Z', 'marginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'fundingRateCoefficient': 24, 'maxRelativeFundingRate': 0.0025, 'contractValueTradePrecision': 0, 'postOnly': False, 'feeScheduleUid': 'd46c2190-81e3-4370-a333-424f24387829', 'mtf': False, 'base': 'BCH', 'quote': 'USD', 'pair': 'BCH:USD', 'retailMarginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'marginSchedules': {}, 'category': '', 'tags': [], 'tradfi': False}]
+: {'symbol': 'PI_XBTUSD', 'type': 'futures_inverse', 'underlying': 'rr_xbtusd', 'tickSize': 0.5, 'contractSize': 1, 'tradeable': True, 'impactMidSize': 1000.0, 'maxPositionSize': 5000000.0, 'openingDate': '2019-02-27T13:49:16Z', 'marginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'fundingRateCoefficient': 24, 'maxRelativeFundingRate': 0.0025, 'isin': 'PI_XBTUSD', 'contractValueTradePrecision': 0, 'postOnly': False, 'feeScheduleUid': 'd46c2190-81e3-4370-a333-424f24387829', 'mtf': True, 'base': 'BTC', 'quote': 'USD', 'pair': 'BTC:USD', 'retailMarginLevels': [{'contracts': 0, 'initialMargin': 0.02, 'maintenanceMargin': 0.01}], 'marginSchedules': {}, 'category': '', 'tags': [], 'tradfi': False}
+: 20168.05190074529
+: Position(symbol='PI_XBTUSD', qty=100.0, entry_price=80671.5)
+
+CLI equivalents:
+
+#+begin_example
+python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo instruments
+python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo check-symbol
+python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo balance
+python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo position
+#+end_example
+
+** Send Orders
+# These blocks send real orders to Kraken Futures demo.
+
+#+begin_src python
+# Limit order
+ack = adapter.place_order(side="buy", orderQty=2, price=70000, type_="LIMIT")
+print(ack)
+
+# Market order
+ack = adapter.place_order(side="buy", orderQty=1, type_="MARKET")
+print(ack)
+
+# Cancel order
+ack = adapter.cancel_order("YOUR_ORDER_ID")
+print(ack)
+
+# Amend order
+ack = adapter.amend_order("YOUR_ORDER_ID", price=70500)
+print(ack)
+#+end_src
+
+* trade.cli
+
+- Command: =python -m kolabi.bargain.cli=
+- Role: direct Kraken Futures CLI for instruments, balance, position, order submission, amend, and cancel
+- Global options:
+  - =--symbol= : selected Kraken Futures product id, example: =PI_XBTUSD=
+  - =--environment {demo,live}= : selected endpoint family
+
+| Command          | Purpose                                | Main options                                          |
+|------------------+----------------------------------------+-------------------------------------------------------|
+| =balance=        | read available margin                  | none                                                  |
+| =position=       | read current position                  | none                                                  |
+| =instruments=    | list Futures instruments               | =--contains=                                          |
+| =check-symbol=   | verify the selected product id         | none                                                  |
+| =limit=          | send one limit order                   | =--side=, =--qty=, =--price=                          |
+| =market=         | send one market order                  | =--side=, =--qty=                                     |
+| =cancel=         | cancel one order                       | =--order-id=                                          |
+| =amend=          | amend one order                        | =--order-id=, =--price=, =--qty=                      |
+| =trailing=       | send native Kraken trailing stop       | =--side=, =--qty=, =--deviation=, =--unit=            |
+| =trailing-limit= | send native Kraken trailing stop limit | =--side=, =--qty=, =--price=, =--deviation=, =--unit= |
+
+Examples:
+
+#+begin_src bash
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo balance
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo position
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo instruments --contains ADA
+  python -m kolabi.bargain.cli --symbol PF_ADAUSD --environment demo check-symbol
+  # orders
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo limit --side buy --qty 2 --price 70000
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo market --side buy --qty 1
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo cancel --order-id YOUR_ORDER_ID
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo amend --order-id YOUR_ORDER_ID --price 70100 --qty 3
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo trailing \
+    --side buy --qty 1 --deviation 20 --unit PERCENT
+  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo trailing-limit \
+    --side buy --qty 1 --price 82000 --deviation 20 --unit PERCENT
+#+end_src
+
+* trade.smoke
+
+- Command: =python -m kolabi.bargain.smoke=
+- Role: place a paced sweep of standard Kraken Futures order kinds
+- Use:- demo validation of the contract layer and order serializers
+- Main options:
+  - =--symbol= : default: =PI_XBTUSD=
+  - =--environment {demo,live}=
+  - =--sleep-seconds=: use =2= or more to stay conservative
+  - =--log-level=
+
+#+begin_src bash
+python -m kolabi.bargain.smoke --symbol PI_XBTUSD --environment demo --sleep-seconds 2
+#+end_src
+
+* tree.account
+
+- Command: =python -m kolabi.tree.account=
+- Role: private Kraken Futures account/order state service
+- Data persisted: orders, fills, balances, positions, margin fields, connection health
+
+| Subcommand  | Purpose                                      |
+|-------------+----------------------------------------------|
+| =run=       | start private websocket listener             |
+| =reconcile= | fetch one private REST snapshot and store it |
+| =status=    | show private DB counts and stream status     |
+
+Shared options:
+
+| Option                      | Meaning                                 |
+|-----------------------------+-----------------------------------------|
+| =--db-url=                  | private SQLite DB location              |
+| =--exchange=                | exchange label stored in DB             |
+| =--environment {demo,live}= | endpoint family                         |
+| =--market-type=             | market label stored in DB               |
+| =--account-scope=           | logical account scope                   |
+| =--ws-url=                  | override private websocket URL          |
+| =--rest-url=                | override private REST base URL          |
+| =--api-key-env=             | API key environment variable            |
+| =--api-secret-env=          | API secret environment variable         |
+| =--stream-kind=             | stream label for connection health rows |
+
+Examples:
+
+#+begin_src bash
+python -m kolabi.tree.account run --environment demo
+python -m kolabi.tree.account reconcile --environment demo
+python -m kolabi.tree.account status --environment demo
+#+end_src
+
+* bot run
+#+BEGIN_SRC bash :results output
+  python -m kolabi.bot run --help
+#+END_SRC  
+
+#+RESULTS:
+#+begin_example
+usage: kolabi.bot run [-h] --strategy STRATEGY [--exchange EXCHANGE]
+                      [--symbol SYMBOL] [--environment {demo,live}]
+                      [--db-url DB_URL] [--market-db-url MARKET_DB_URL]
+                      [--account-db-url ACCOUNT_DB_URL]
+                      [--ready-timeout-seconds READY_TIMEOUT_SECONDS]
+                      [--ready-poll-seconds READY_POLL_SECONDS]
+                      [--max-public-age-seconds MAX_PUBLIC_AGE_SECONDS]
+                      [--max-private-age-seconds MAX_PRIVATE_AGE_SECONDS]
+                      [--max-reconcile-age-seconds MAX_RECONCILE_AGE_SECONDS]
+                      [--skip-ready-check] [--log-level LOG_LEVEL]
+                      [--update-pause UPDATE_PAUSE] [--log-pause LOG_PAUSE]
+                      [--sync] [--dry-run]
+
+options:
+  -h, --help            show this help message and exit
+  --strategy, -s STRATEGY
+                        Path to TSV strategy file (e.g. Orders/demo_ada.tsv)
+  --exchange EXCHANGE
+  --symbol SYMBOL
+  --environment {demo,live}
+  --db-url DB_URL       Optional database URL for run persistence
+  --market-db-url MARKET_DB_URL
+                        Optional public market data DB URL. Defaults from
+                        Kraken Futures environment.
+  --account-db-url ACCOUNT_DB_URL
+                        Optional private account DB URL. Defaults from Kraken
+                        Futures environment.
+  --ready-timeout-seconds READY_TIMEOUT_SECONDS
+                        Maximum wait for fresh Kraken public/private state
+                        before the TSV loop starts.
+  --ready-poll-seconds READY_POLL_SECONDS
+                        Polling cadence used while waiting for Kraken runtime
+                        readiness.
+  --max-public-age-seconds MAX_PUBLIC_AGE_SECONDS
+                        Maximum acceptable age for the public market snapshot.
+  --max-private-age-seconds MAX_PRIVATE_AGE_SECONDS
+                        Maximum acceptable age for the private websocket
+                        heartbeat.
+  --max-reconcile-age-seconds MAX_RECONCILE_AGE_SECONDS
+                        Maximum acceptable age for the startup REST reconcile.
+  --skip-ready-check    Skip Kraken runtime freshness checks before starting
+                        the strategy.
+  --log-level LOG_LEVEL
+  --update-pause UPDATE_PAUSE
+  --log-pause LOG_PAUSE
+  --sync                Run orders synchronously (blocking) instead of
+                        spawning threads
+  --dry-run             Parse the strategy file and print orders without
+                        submitting them
+#+end_example
+
+*** Examples:
+
+#+begin_src bash
+python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
+
+python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+#+end_src
+
+** bot run-once
+#+BEGIN_SRC bash :results output
+  python -m kolabi.bot run-once --help
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+usage: kolabi.bot run-once [-h] [--exchange EXCHANGE] [--symbol SYMBOL]
+                           [--environment {demo,live}] [--db-url DB_URL]
+                           [--market-db-url MARKET_DB_URL]
+                           [--account-db-url ACCOUNT_DB_URL]
+                           [--ready-timeout-seconds READY_TIMEOUT_SECONDS]
+                           [--ready-poll-seconds READY_POLL_SECONDS]
+                           [--max-public-age-seconds MAX_PUBLIC_AGE_SECONDS]
+                           [--max-private-age-seconds MAX_PRIVATE_AGE_SECONDS]
+                           [--max-reconcile-age-seconds MAX_RECONCILE_AGE_SECONDS]
+                           [--skip-ready-check] [--log-level LOG_LEVEL]
+                           [--update-pause UPDATE_PAUSE]
+                           [--log-pause LOG_PAUSE] [--sync] [--dry-run]
+                           [--tps_run TPS_RUN TPS_RUN] [--name NAME]
+                           [--tOut TOUT] [--drPause DRPAUSE]
+                           [--prix PRIX PRIX] [--quantity QUANTITY]
+                           [--tailPrice TAILPRICE] [--oDelta ODELTA]
+                           [--tDelta TDELTA] [--nbEssais NBESSAIS]
+                           [--oType OTYPE] [--tType TTYPE] [--side SIDE]
+                           [--aType ATYPE] [--Hook HOOK]
+
+Run one order pair through kolabi.bot while keeping the legacy multi_kola vocabulary. The key point is that --prix is always a two-bound ordered interval, interpreted by --aType.
+
+options:
+  -h, --help            show this help message and exit
+  --exchange EXCHANGE
+  --symbol SYMBOL
+  --environment {demo,live}
+  --db-url DB_URL       Optional database URL for run persistence
+  --market-db-url MARKET_DB_URL
+                        Optional public market data DB URL. Defaults from Kraken Futures environment.
+  --account-db-url ACCOUNT_DB_URL
+                        Optional private account DB URL. Defaults from Kraken Futures environment.
+  --ready-timeout-seconds READY_TIMEOUT_SECONDS
+                        Maximum wait for fresh Kraken public/private state before the TSV loop starts.
+  --ready-poll-seconds READY_POLL_SECONDS
+                        Polling cadence used while waiting for Kraken runtime readiness.
+  --max-public-age-seconds MAX_PUBLIC_AGE_SECONDS
+                        Maximum acceptable age for the public market snapshot.
+  --max-private-age-seconds MAX_PRIVATE_AGE_SECONDS
+                        Maximum acceptable age for the private websocket heartbeat.
+  --max-reconcile-age-seconds MAX_RECONCILE_AGE_SECONDS
+                        Maximum acceptable age for the startup REST reconcile.
+  --skip-ready-check    Skip Kraken runtime freshness checks before starting the strategy.
+  --log-level LOG_LEVEL
+  --update-pause UPDATE_PAUSE
+  --log-pause LOG_PAUSE
+  --sync                Run orders synchronously (blocking) instead of spawning threads
+  --dry-run             Parse the strategy file and print orders without submitting them
+  --tps_run, -t TPS_RUN TPS_RUN
+                        Strategy validity window in minutes from launch, as start end. Example: -t 0 60 means active now for one hour.
+  --name, -m NAME       Internal order name shown in logs.
+  --tOut, -O TOUT       Validation timeout in minutes for the main order lifecycle.
+  --drPause, -p DRPAUSE
+                        Pause between repeated attempts, in minutes.
+  --prix, -x PRIX PRIX  Price interval as two ordered bounds. This is a strict range, not a single point. Meaning depends on aType: pD = differential from reference price, p% = percent from reference price, pA = absolute prices. Examples: -a qAt%pD -x 1 2 means from ref+1 to ref+2; -a qAt%p% -x -1 1 means from -1% to +1% around ref; -a qAt%pA -x 79320 79340 means an absolute interval. Do not use equal bounds like -x 1 1.
+  --quantity, -q QUANTITY
+                        Absolute size or percentage, depending on aType.
+  --tailPrice, -T TAILPRICE
+                        Tail thickness using the legacy aType semantics. Default interpretation is percent unless aType contains tA or tD.
+  --oDelta, -d ODELTA   Difference between trigger price and order price.
+  --tDelta, -s TDELTA   Difference between trigger price and tail stop price.
+  --nbEssais, -n NBESSAIS
+                        Number of attempts.
+  --oType, -o OTYPE     Main order type in the legacy vocabulary. Examples: M = Market, L = Limit, S = Stop, SL = StopLimit, MT = MarketIfTouched, LT = LimitIfTouched.
+  --tType, -y TTYPE     Tail order type in the legacy vocabulary. Examples: S- = reduce-only Stop on lastMidPrice, Sf- = reduce-only Stop on fairPrice, SL- = reduce-only StopLimit.
+  --side, -c SIDE       Order side.
+  --aType, -a ATYPE     Legacy interpretation of prix, quantity, and tailPrice. Use pD/p%/pA for price, q%/qA for quantity, t%/tD/tA for tail. Example: qAt%pD means absolute quantity, percent tail, differential prices.
+  --Hook, -H HOOK       Optional hook dependency, for example XBrx-S_T.
+
+Examples:
+  Differential around current reference:
+    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run
+  Percent around current reference:
+    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XPct -t 0 60 -x -1 1 -q 1 -T 0.5 -o L -y S- -c buy -a qAt%p% --dry-run
+  Absolute interval:
+    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XAbs -t 0 60 -x 79320 79340 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pA --dry-run
+#+end_example
+
+** bot preflight
+#+BEGIN_SRC bash :results output
+python -m kolabi.bot preflight --help
+#+END_SRC   
+
+#+RESULTS:
+#+begin_example
+usage: kolabi.bot preflight [-h] [--exchange EXCHANGE] [--symbol SYMBOL]
+                            [--environment {demo,live}]
+                            [--market-db-url MARKET_DB_URL]
+                            [--account-db-url ACCOUNT_DB_URL]
+                            [--ready-timeout-seconds READY_TIMEOUT_SECONDS]
+                            [--ready-poll-seconds READY_POLL_SECONDS]
+                            [--max-public-age-seconds MAX_PUBLIC_AGE_SECONDS]
+                            [--max-private-age-seconds MAX_PRIVATE_AGE_SECONDS]
+                            [--max-reconcile-age-seconds MAX_RECONCILE_AGE_SECONDS]
+
+options:
+  -h, --help            show this help message and exit
+  --exchange EXCHANGE
+  --symbol SYMBOL
+  --environment {demo,live}
+  --market-db-url MARKET_DB_URL
+                        Optional public market data DB URL. Defaults from
+                        Kraken Futures environment.
+  --account-db-url ACCOUNT_DB_URL
+                        Optional private account DB URL. Defaults from Kraken
+                        Futures environment.
+  --ready-timeout-seconds READY_TIMEOUT_SECONDS
+  --ready-poll-seconds READY_POLL_SECONDS
+  --max-public-age-seconds MAX_PUBLIC_AGE_SECONDS
+  --max-private-age-seconds MAX_PRIVATE_AGE_SECONDS
+  --max-reconcile-age-seconds MAX_RECONCILE_AGE_SECONDS
+#+end_example
+
+# Need to centralize this in the doc direclty
+
+- Command: =python -m kolabi.bot preflight=
+- Role: check whether the public and private Kraken DBs are fresh enough to start a TSV strategy
+
+Options:
+
+| Option                        | Meaning                                |
+|-------------------------------+----------------------------------------|
+| =--exchange=                  | exchange name                          |
+| =--symbol=                    | Futures product id                     |
+| =--environment {demo,live}=   | endpoint family                        |
+| =--market-db-url=             | public market DB override              |
+| =--account-db-url=            | private account DB override            |
+| =--ready-timeout-seconds=     | displayed timeout budget for operators |
+| =--ready-poll-seconds=        | polling cadence                        |
+| =--max-public-age-seconds=    | public market freshness threshold      |
+| =--max-private-age-seconds=   | private websocket freshness threshold  |
+| =--max-reconcile-age-seconds= | REST reconcile freshness threshold     |
+
+* Typical Sequences
+
+** Discover Products
+
+#+begin_src bash
+python -m kolabi.bargain.cli --environment demo --symbol PI_XBTUSD  instruments
+python -m kolabi.bargain.cli --environment demo --symbol PI_XBTUSD  instruments --contains ADA
+python -m kolabi.bargain.cli --environment demo --symbol PI_ADAUSD  check-symbol
+#+end_src
+
+** Check Services
+
+#+begin_src bash
+python -m kolabi.tree.kraken probe --environment demo --pair PI_XBTUSD --seconds 15 --trace-ws
+python -m kolabi.tree.account status --environment demo
+#+end_src
+
+** Start the DB in different shells
+#+BEGIN_SRC bash
+  # Start the public Kraken Futures book DB service:
+  python -m kolabi.tree.kraken run --pair PI_XBTUSD --environment demo
+  # Start the private account/order DB service:
+  python -m kolabi.tree.account run --environment demo
+  # Check strategy readiness against both DBs:
+  python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo  
+#+END_SRC   
+** Send And Cancel One Demo Order
+
+#+begin_src bash
+python -m kolabi.bargain.cli --environment demo --symbol PI_XBTUSD  limit --side buy --qty 2 --price 70000
+python -m kolabi.bargain.cli --environment demo --symbol PI_XBTUSD  cancel --order-id YOUR_ORDER_ID
+#+end_src
+
+** Test a more complicated order with a Tail
+#+begin_src bash
+python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -a qAt%pD -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell  --dry-run
+
+python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XPct -t 0 60 -a qAt%p% -x -1 1 -q 1 -T 0.5 -o L -y S- -c buy  --dry-run
+
+python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XAbs -t 0 60 -a qAt%pA -x 79320 79340 -q 1 -T 0.5 -o L -y S- -c sell  --dry-run
+#+end_src
+
+
+
+** Run Strategy
+
+#+begin_src bash
+    python -m kolabi.tree.kraken run --environment demo --pair PI_XBTUSD
+    python -m kolabi.tree.account run --environment demo
+    python -m kolabi.bot preflight --environment demo --exchange kraken --symbol PI_XBTUSD
+    python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+#+end_src
