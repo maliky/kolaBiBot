@@ -2,21 +2,440 @@
 #+OPTIONS: toc:2 num:nil
 
 * TODO
+** <2026-05-19 mar. 20:33>
+
+Source reviewed: your =<2026-05-19 mar. 17:38>= tree and pasted =pair_cycle.py= notes. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
+
+*** 1. Is =PairCycle= already addressing =StrategyState / step_strategy=?
+
+ Partly, not fully.
+
+ | Item                               | Current situation                                        | Correction                                                        |
+ |------------------------------------+----------------------------------------------------------+-------------------------------------------------------------------|
+ | =PairCycleRunner.run_pairs_once()= | Runs a list of pairs concurrently with =asyncio.gather=. | This is a batch runner, not yet a persistent strategy supervisor. |
+ | =run_pair_once(pair)=              | Creates =state = PairCycleState(pair=pair)= each time.   | This loses persistent =dict[pair_id, PairState]= behavior.        |
+ | =step_pair(state,event)=           | Good pure reducer for one pair.                          | Keep it. This is the Haskell-like nucleus.                        |
+ | Missing piece                      | No =StrategyState(pairs: dict[str, PairCycleState])=.    | Add =step_strategy()= above =step_pair()=.                        |
+
+ So your intuition is right, but the current code does not yet implement the full recommendation. =PairCycleRunner= runs multiple pairs once; =StrategyState= would own many pair states across time and events.
+
+*** DONE 2. Main incoherence in the =17:38= tree: =Chronos= / =Ogun= confusion
+    CLOSED: [2026-05-19 mar. 20:38]
+
+ You have two conflicting lines:
+
+ | In document                                            | Problem                                        |
+ |--------------------------------------------------------+------------------------------------------------|
+ | =strategy_supervisor()  # I want this to be chronos()= | Good.                                          |
+ | =command_executor_chronos()  # and this as Ogun()=     | Good.                                          |
+ | =StrategySupervisor= =Ogun=                            | Incoherent: this assigns =Ogun= to supervisor. |
+ | =Chronos= = Async coordinator of all pairs=            | Coherent with your intent.                     |
+
+ Use this corrected vocabulary:
+
+ | Technical role                  | Name          | Metaphor                 | Responsibility                                                   |
+ |---------------------------------+---------------+--------------------------+------------------------------------------------------------------|
+ | =StrategySupervisor=            | =Chronos=     | Timekeeper / coordinator | Owns =StrategyState=, routes DB events to pairs, emits commands. |
+ | =CommandExecutor=               | =Ogun=        | Forge / executor         | Executes typed =RuntimeCommand= through exchange write port.     |
+ | =OrderPairSpec=                 | =DragonPolen= | Pair seed / shell        | Static TSV-defined head/tail plan.                               |
+ | =PairState=                     | =DragonEgg=   | Maturity of the egg      | Runtime state of one pair.                                       |
+ | =PairActor=                     | =DragonFly=   | Live flying process      | Optional async task for one pair.                                |
+ | =StrategySpec=                  | =Dragon=      | Whole strategy           | Collection of pair specs plus global settings.                   |
+ | =StrategyBook= or =StrategySet= | =DragonGrove= | Grove                    | Collection of strategies, if needed.                             |
+
+ I would not rename =OrderDict= to =DragonEgg=. That is misleading. =OrderDict= is one low-level exchange payload, not the pair embryo. Better metaphor:
+
+ | Type             | Better metaphor          |
+ |------------------+--------------------------|
+ | =OrderPairSpec=  | =DragonPolen=            |
+ | =OrderDict=      | keep literal =OrderDict= |
+ | =RuntimeCommand= | =ForgeCommand=           |
+ |                  |                          |
+
+
+*** DONE 4. Corrected architecture
+    CLOSED: [2026-05-19 mar. 20:47]
+
+ #+begin_src text
+ TSV
+   -> tsv/parser.py
+      -> StrategySpec / Dragon
+         -> OrderPairSpec / DragonPollen
+
+ DB monitors
+   -> PublicFact / PrivateFact
+      -> Chronos
+         owns StrategyState[pair_id -> PairCycleState]
+         routes facts into PairEvent
+         calls step_strategy()
+           calls step_pair()
+           returns RuntimeCommand(s)
+
+ Ogun
+   receives RuntimeCommad
+   converts to exchange-specific payload
+   sends REST write command
+   records REST ack
+   waits for / correlates private DB confirmation
+
+ Private DB update
+   -> CommandConfirmation / PairEvent
+      -> back to Chronos
+ #+end_src
+
+*** 5. Proposed =StrategyState= layer
+
+ #+begin_src python
+ @dataclass(frozen=True)
+ class StrategyState:
+     strategy_id: str
+     pairs: dict[str, PairCycleState]
+     last_event_id: str | None = None
+
+
+ def step_strategy(
+     state: StrategyState,
+     event: PairEvent,
+ ) -> tuple[StrategyState, tuple[RuntimeCommand, ...]]:
+     """Route one event to the affected pair and return updated strategy state."""
+     pair_id = event.pair_id
+     pair_state = state.pairs[pair_id]
+
+     next_pair_state, commands = step_pair(pair_state, event)
+
+     return (
+         replace(
+             state,
+             pairs={**state.pairs, pair_id: next_pair_state},
+             last_event_id=event.event_id,
+         ),
+         commands,
+     )
+ #+end_src
+
+ This is the missing layer above =step_pair()=.
+
+*** DONE 6. Corrected metaphor table
+    CLOSED: [2026-05-19 mar. 20:51]
+
+ | Type                  | Purpose                                | Metaphor       |
+ |-----------------------+----------------------------------------+----------------|
+ | =StrategySpec=        | One strategy loaded from TSV           | =Dragon=       |
+ | =StrategySet=         | Collection of strategies               | =DragonGrove=  |
+ | =OrderPairSpec=       | One TSV row: head plan + tail plan     | =DragonPollen= |
+ | =PairCycleState=      | Runtime lifecycle of one pair          | =DragonEgg=    |
+ | =PairActor=           | Async process for one pair             | =DragonFly=    |
+ | =PairEvent=           | Domain event consumed by reducer       |                |
+ | =RuntimeCommand=      | Command emitted by reducer             | =OgunBang=     |
+ | =CommandAck=          | REST response                          | =OgunAck=      |
+ | =CommandConfirmation= | Private DB confirmation                | =Echo=         |
+ | =Chronos=             | Strategy supervisor / time coordinator | =Chronos=      |
+ | =Ogun=                | Command executor / exchange writer     | =Ogun=         |
+
+*** DONE 7. Corrected event table
+    CLOSED: [2026-05-19 mar. 21:00]
+
+| <20>                    | <10>                       | <20>                                        | <90>                                                                                        |
+| Event                   | Source                     | Meaning                                     | Correction                                                                                  |
+|-------------------------+----------------------------+---------------------------------------------+---------------------------------------------------------------------------------------------|
+| =StrategyLoaded=        | TSV parser                 | Strategy loaded                             | OK.                                                                                         |
+| =PairWindowOpened=      | clock / scheduler          | Pair becomes time-eligible                  | OK.                                                                                         |
+| =PriceConditionMet=     | public DB                  | Price rule satisfied                        | OK.                                                                                         |
+| =HookConditionMet=      | public/private DB          | Hook source condition satisfied             | OK.                                                                                         |
+| =HeadHooked=            | Chronos/reducer            | Head locally eligible for submission        | =.                                                                                          |
+| =HeadSubmitted=         | REST ack via Ogun          | REST write accepted                         | OK.                                                                                         |
+| =HeadConfirmedNew=      | private DB                 | Head exists on platform                     | OK.                                                                                         |
+| =HeadPartiallyFilled=   | private DB                 | Head partly filled                          | OK.                                                                                         |
+| =HeadFilled=            | private DB                 | Head fully filled                           | OK.                                                                                         |
+| =HeadCanceledZeroFill=  | private DB                 | No exposure from head                       | Your table says “tail needed”; fix to “tail usually not needed unless explicit chain rule”. |
+| =HeadCanceledAfterFill= | private DB                 | Head ended with exposure/played quantity    | OK, but tail may be for protection or chained entry.                                        |
+| =HeadFailed=            | private DB / command error | Invalid/rejected head                       | Remove duplicate row.                                                                       |
+| =TailMaterialized=      | reducer                    | Tail order details computed after head info | Add this; it solves your TailPlan concern.                                                  |
+| =TailHooked=            | reducer/internal           | Tail locally eligible                       | OK.                                                                                         |
+| =TailSubmitted=         | REST ack via Ogun          | Tail REST write accepted                    | OK.                                                                                         |
+| =TailConfirmed=         | private DB                 | Tail exists on platform                     | OK.                                                                                         |
+| =TailAmendRequested=    | reducer/internal           | Existing tail should be amended             | OK.                                                                                         |
+| =TailAmended=           | private DB                 | Amendment confirmed                         | OK.                                                                                         |
+| =TailClosed=            | private DB                 | Tail terminal                               | OK.                                                                                         |
+| =DuplicateEventIgnored= | reducer/internal           | Idempotency no-op                           | OK.                                                                                         |
+
+I do not agree and I want you to align with the following, still you can argue and give me arguments to defend your point.
+I want =HeadCanceledZeroFill= to still hook at tail after.
+If the =HeadFailed= then no tail.
+The selection of failed and canceledzerofill is my prerogative and is done at event emission after carreful review ot the exachange order reason
+
+The tail should not be hooked if fail.
+*** DONE 8. Important correction about tail purpose
+    CLOSED: [2026-05-19 mar. 21:02]
+
+Tail is not only exposure protection.
+
+ #+begin_src text
+ A tail is a dependent order whose materialization depends on a prior order/event.
+ Most tails protect exposure, but some tails are chained-entry or strategy-continuation orders.
+ #+end_src
+- tail materializes from played/canceled/filled condition
+- zero-fill cancel creates tail only if chain rule explicitly allows it
+- tail quantity equals the rule-defined quantity, often played quantity
+*
+*** TODO 9. What to change in =pair_cycle.py=
+# > for the following correct by doing the recommended changes
+ | Current issue                                      | Why                                       | Change                                                             |
+ |----------------------------------------------------+-------------------------------------------+--------------------------------------------------------------------|
+ | run_pair_once() = initializes state every call     | No persistent strategy memory.            | Move persistent state to =Chronos/StrategyState=.                  |
+ | =pair_window_is_active()= uses relative zero test  | Ambiguous for windows like =[60,120]=.    | Use absolute launch time or store =activated_at=.                  |
+ | =step_pair()= uses =event.note= strings            | Weak type model.                          | Replace with =PairEvent= dataclasses or enum.                      |
+ | =tail_order_dict(pair)= uses planned head quantity | Wrong for partial fills.                  | Use =state.played_quantity= or =TailPlan.resolve_quantity(state)=. |
+ | =confirmed_from_ack()= advances semantic state     | REST ack is not private truth.            | REST ack -> submitted only; private DB -> confirmed/played/closed. |
+ | Price and ID helpers live in =pair_cycle.py=       | File mixes reducer, runner, pricing, IDs. | Split into =order_building.py=, =pricing.py=, =ids.py=.            |
+
+# > create dataclass for pairevent but call it EggMove
+
+*** DONE 10. Immediate design decisions for you
+    CLOSED: [2026-05-19 mar. 21:07]
+
+ | Decision                                      | My recommendation                                                                             |
+ |-----------------------------------------------+-----------------------------------------------------------------------------------------------|
+ | Should =Chronos= be the strategy coordinator? | Yes.                                                                                          |
+ | Should =Ogun= execute commands?               | Yes.                                                                                          |
+ | Should =DragonFly= mean pair actor?           | Yes, if you use one async task per pair.                                                      |
+ | Should =PairCycle= be renamed =DragonFly=?    | No. Keep PairCycle                                                                            |
+ | Should =OrderDict= be =DragonEgg=?            | No.                                                                                           |
+ | Should tail be fully known from TSV?          | No. TSV defines =TailPlan=. Final =TailOrder= is materialized after head event.               |
+ | Should DB monitor fire commands?              | No. DB monitor emits facts; =Chronos= routes events; reducer emits commands; =Ogun= executes. |
+
+
 ** <2026-05-19 mar. 17:38>
-*** pair_cycle.py :  Pure reducer + runner bridge: step_pair(), PairCycleRunner.
-- [ ] strengthen terminal guards, idempotency, partial-fill quantity, private confirmation.
+*** kolabi/
+**** bot/
+***** domain.py : Pure vocabulary: Side, HeadState, TailState, OrderReason, PairCycleState.
+  - [ ] split TailState into base state vs mode; avoid float for quantities.
+  # ok
+***** pair_cycle.py :  Pure reducer + runner bridge: step_pair(), PairCycleRunner.
+  - [ ] strengthen terminal guards, idempotency, partial-fill quantity, private confirmation.
+  # > Explain / detail with example what you mean
 
- # > Explain / detail with example what you mean
-  
-*** runtime/auditor.py :  New MarketAuditor shell around old market-auditor behavior.
-- [ ] keep as interpreter/orchestrator, not as semantic owner.
+***** runtime/auditor.py :  New MarketAuditor shell around old market-auditor behavior.
+  - [ ] keep as interpreter/orchestrator, not as semantic owner.
+  # give example of things that need to change
 
-*** service.py :  Application service: config, preflight, TSV execution, runtime-state startup.
-- [ ] keep out of pure-domain import path.
+***** service.py :  Application service: config, preflight, TSV execution, runtime-state startup.
+  - [ ] keep out of pure-domain import path.
+  # explain with examples
+***** tsv/parser.py :  Strategy file parser.
+  - [ ] map TSV rows into typed OrderPairSpec earlier.
+  # > ok lets do that
+**** shared/core
+***** runtime_types : Canonical runtime types: RuntimeEvent, RuntimeCommand, OrderDict, BrokerReply.
+   - [ ] step_runtime() is still empty; reduce loose string payloads.
 
-*** tsv/parser.py :  Strategy file parser.
-- [ ] map TSV rows into typed OrderPairSpec earlier.  
+# >I need example here, ask me question to understand this part
+**** runtime/kola/
+***** chronos.py :  Legacy Chronos becoming typed interpreter.
+   - [ ] still owns too much behavior; should only execute commands and emit events.
+# > yes I agree.
+# > propose a split of this file, what behavior are you identifying which should be moved.
+***** async_chronos.py :  Async-compatible Chronos shell.
+   - [ ] not final async design; use only after step_pair() is stable.
+# > ok
+***** pure_runtime.py: Extracted pure helper functions.
+   - [ ] expand this pattern; move more logic here.
+# > logic comming from chronos.py for example ?
+**** shared/exchanges/
+***** kraken_adapter.py : Exchange adapter and Kraken mapping.
+   - [ ] keep exchange semantics separate from pair lifecycle.
+# > what semantics do you want to split ?
+***** runtime_compat.py : Compatibility layer for BitMEX/Binance/Kraken-like calls.
+   - [ ] transitional only; avoid making it the domain model.
+# > yet ack.
+**** shared/runtime_state.py : DB-backed public/private state.
+   - [ ] pure tests should not import this directly.
+# > Why not ?
+*** tests/
+**** bot/test_pair_cycle_step.py : First semantic tests.
+  - [ ] add quantity, terminal-state, idempotency, and private-confirmation tests
+# > is there a way I can guide you for those test ? like filling in a behavioral driven test template ?
+** TODO General
+*** Pure imports are not isolated :
+    how we do that ? identify the pure import and propose reorganisation for isolating them
+*** Events are still string notes.
+    list all event still string notes
+    build a translation table
+    move the event from string notes to real types
+*** Tail quantity is not safely derived from played quantity.
+show me where and what you mean by safely
+*** Terminal states are not guarded.
+remind me what you mean by guarded
+*** REST ack and private confirmation are still too close.
+rest ack should be done somewhere with the db updating service. why does kolabi takes care of this
+*** =Chronos= still duplicates lifecycle meaning
+yes and we need to work on that. identify and propose what you want to deduplicate.
+** TODO Tests
+Given theses tests, help me to correct it.
+| Test                                                               | Purpose                                  | Expected result                                   |
+| ------------------------------------------------------------------ | ---------------------------------------- | ------------------------------------------------- |
+| =test_partial_fill_tail_uses_played_quantity_not_planned_quantity= | Catch oversized tail after partial fill. | Tail command quantity equals filled quantity.     |
+| =test_failed_head_ignores_later_played_event=                      | Enforce terminal state.                  | State unchanged, no command.                      |
+| =test_closed_head_ignores_later_partial_fill_event=                | Enforce terminal state.                  | State unchanged, no command.                      |
+| =test_duplicate_head_played_does_not_submit_second_tail=           | Enforce idempotency.                     | No second =PLACE= command.                        |
+| =test_rest_ack_marks_submitted_only=                               | Separate ACK from confirmation.          | Head =SUBMITTED=, tail not activated.             |
+| =test_private_confirmation_required_for_tail_hook=                 | Enforce private DB source of truth.      | Tail hooks only after private confirmation event. |
+| =test_flapping_tail_amends_existing_platform_tail=                 | Avoid duplicate platform tails.          | Emits =AMEND=, not =PLACE=.                       |
+| =test_zero_fill_cancel_never_creates_tail=                         | Protect no-exposure case.                | Head =FAILED=, tail =LATENT=, no command.         |
+** VOCAB
+runtime_event_from_confirme_head
+played_quantity_from_event
 
+I'm thinking of renaming methaphoricaly PairCycle as DragonFly DrgFly
+OrderDict could be a dragon's egg DrgEgg
+# Is the PairCycle the Strategy supervisor ?
+
+Instead of PairActor name this DragonFly
+
+load TSV
+create typed pair specs
+initialize PairState for each pair
+
+async TaskGroup:
+public_db_event_source()
+private_db_event_source()
+strategy_supervisor()  # > I want this to be chronos()
+command_executor_chronos()  # and this as Ogun()
+
+
+#+begin_src text
+"Make Chronos the strategy supervisor
+"Call the command interpreter over typed commands/events Ogun"
+#+end_src
+
+** Questions to guide the design
+When the TSV file is loaded, does each row create a =TailPlan= immediately, or only a =HeadPlan= with tail parameters?
+
+# > The issue I have here is I can give the full detail of the tail until the head is trigger.  Head can be updated at relative to price market for example as a sell limit order placed at 1% above mid price and updated every 10 minutes. when this head is filled, is the time I will know the price it is filled at and be able to create the tail.
+
+#+begin_src text
+TSV row -> OrderPairSpec
+OrderPairSpec contains HeadPlan + TailPlan.
+No exchange order exists yet.
+#+end_src
+
+Active order are set only by a time window.
+The time window define the active time pair can be hooked.
+
+by hooked I mean that the conditions (price and maybe other) of an active order are satisfied from the local db, and the order can be emitted to the exchange
+
+An submitted order is an order for wich we have executed the rest cmd.
+A confirmed order is an order for which we have received REST ack and which has been mirored/amended in the local private db
+
+
+=Ogun= should receive typed RuntimeCommand.
+ Legacy dicts should exist only at the adapter boundary.
+
+
+Two events should never produce conflicting commands even if they arrive at the same time.
+ Private order terminal event wins over public price event.
+
+
+We have one StragegySupervisor That we call =Chrono= he is the one owning dict[pair_id, PairState]
+
+We should persist at the minimum:
+ #+begin_src text
+ strategy_id
+ pair_id
+ head client_order_id
+ tail client_order_id
+ head state
+ tail state/mode
+ played quantity
+ last processed private event id/timestamp
+ last emitted command id
+ #+end_src
+
+
+
+** Vocabulary
+Strategysupervisor Chronos
+Executer of RuntimeCommand Ogun
+A strategy a Dragon
+A PairOrdr a DragonEgg
+
+| Type                        | Purpose                                | Metaphore            |
+|-----------------------------+----------------------------------------+----------------------|
+| =StrategySpec=              | Whole TSV strategy file                | Dragon's grove       |
+| =OrderPairSpec=             | One TSV row: head plan + tail plan     | DragonEgg Shell      |
+| =PairState=                 | Current lifecycle state of one pair    | DragonEgg maturity   |
+| =MarketFact=                | Public DB observation                  | Dragon's Environment |
+| =PrivateFact=               | Private DB observation                 | Dragon's Health      |
+| =PairEvent=                 | Domain event consumed by reducer       | DragonEgg Event      |
+| =RuntimeCommand=            | Command emitted by reducer             | DragonDDragon note   |
+| =CommandAck=                | REST response                          | Dr                   |
+| =CommandConfirmation=       | Private DB confirmation             dd | Echo                 |
+| =StrategySupervisor= =Ogun= | Command executor/interpreter           | Ogun                 |
+| =Chronos=                   | Async coordinator of all pairs         | Chronos              |
+
+Check
+| Event                   | Source                     | Meaning                          | Metaphore    |
+|-------------------------+----------------------------+----------------------------------+--------------|
+| =StrategyLoaded=        | TSV parser                 | Strategy rows loaded             |              |
+| =PairWindowOpened=      | clock                      | Pair may become active           |              |
+| =PriceConditionMet=     | public DB                  | Head condition can be checked    |              |
+| =HookConditionMet=      | private DB                 | Hook source reached target state |              |
+| =HeadSubmitRequested=   | reducer/internal           | Head should be sent              |              |
+| =HeadSubmitted=         | REST ack                   | Exchange accepted request        |              |
+| =HeadConfirmedNew=      | private DB                 | Head exists on platform          |              |
+| =HeadPartiallyFilled=   | private DB                 | Head created partial exposure    |     |
+| =HeadFilled=            | private DB                 | Head fully filled                |  |
+| =HeadFailed=            | private DB                 | No exposure                      |              |
+| =HeadCanceledZeroFill=  | private DB                 | No exposure ; tail needed        |              |
+| =HeadCanceledAfterFill= | private DB                 | Exposure exists; tail needed     |              |
+| =HeadFailed=            | private DB / command error | No valid head                    |              |
+| =TailHooked=            | reducer/internal           | Tail is locally eligible         |              |
+| =TailSubmitted=         | REST ack                   | Tail submission request accepted |              |
+| =TailConfirmed=         | private DB                 | Tail exists on platform          |              |
+| =TailAmendRequested=    | reducer/internal           | Existing tail should be amended  |              |
+| =TailAmended=           | private DB                 | Tail amendment confirmed         |              |
+| =TailClosed=            | private DB                 | Tail terminal                    |              |
+| =DuplicateEventIgnored= | reducer/internal           | Idempotency protection           |              |
+
+# > The error is to think that tail comes as an exposure protection. In most time yes but it is also used as a tool to enter the market.  Orders can be chained together and sometime we want to chain on a tail been filled after a canceled head for example.
+
+
+| Command           | Executor    |
+| ----------------- | ----------- |
+| =PlaceHead=       | =Ogun=     |
+| =CancelHead=      | =Ogun=     |
+| =PlaceTail=       | =Ogun=     |
+| =AmendTail=       | =Ogun=     |
+| =CancelTail=      | =Ogun=     |
+| =RecordPairState= | persistence |
+| =Ignore=          | no-op       |
+
+
+** Check
+
+
+#+begin_src python
+@dataclass(frozen=True)
+class StrategyState:
+pairs: dict[str, PairCycleState]
+
+def step_strategy(
+state: StrategyState,
+event: PairEvent,
+) -> tuple[StrategyState, tuple[RuntimeCommand, ...]]:
+...
+#+end_src
+
+Then tests:
+
+#+begin_src text
+Given three TSV rows
+When one private event arrives for pair B
+Then only pair B changes
+And commands for pair A and C are empty
+#+end_src
+
+That preserves the legacy “multiple orderpairs in TSV loop” idea in a Haskell-compatible way.
 * <2026-05-19 mar. 11:05>
 ** Proposed action plan
 11. Concrete success criteria.
@@ -79,13 +498,13 @@
 3. Played order should not be amended.
 4. Failed and Closed are terminal states
 5. Tail is creation :
-   - Latent -- Hooked -- submitted tail when head is Played     
+   - Latent -- Hooked -- submitted tail when head is Played
    - Flapping when head is Living
    - Flying when head is Closed
 6. In case of Flapping Tail we only have one tail, that is amended on the plateform as partial_fills comes in the private db.
 7. If a head is partially filled and then canceled, then it should live behind flying tail associated with the partialy filled amound.
 8. When an order is hooked the next automatic step is the submission.
-   
+
 ** Vocabulary definition
 - Private DB :: source of truth for my orders, execution, confirmation, position, and balance.
 - Public DB :: source of truth for market conditions, price/index indicators, and trigger conditions.
@@ -115,7 +534,7 @@
   - the first order of the pair.
   - created in latent state when the strategy is defined (cli args or file)
   - Hooked by public market conditions.
-    
+
 - Tail ::
   - The second order of the pair
   - follows the same order life cycle as any order.
@@ -134,15 +553,15 @@
   - not yet confirmed by the private DB.
 - Confirmed Tail ::
   - submitted tail confirmed by the private DB.
-  - then classified as =New=, =Failed=, =Living=, or =Closed= like any other order.    
+  - then classified as =New=, =Failed=, =Living=, or =Closed= like any other order.
 - Flapping Tail ::
   - a tail order associated with a =Living Head=.
-  - not a separate base order state.    
+  - not a separate base order state.
   - may be amended on the platform as partial fills appear in the private DB.
 
 - Flying Tail ::
   - a =confirmed tail order= associated with a =Closed Head=.
-  - not a separate base order state.    
+  - not a separate base order state.
   - sized according to the final confirmed played quantity of the head.
 
 
@@ -151,16 +570,16 @@
 #+BEGIN_SRC plantuml :results file link :file ordercycle.png
   @startuml
   title Order life cycle (additive reading)
-  
+
   hide empty description
   skinparam shadowing false
   skinparam state {
     BackgroundColor white
     BorderColor black
   }
-  
+
   [*] --> Latent
-  
+
   Latent -->  Hooked
   Hooked --> Submitted
   Submitted --> New : limit order
@@ -168,13 +587,13 @@
   note on link
    This transition is intentional,
    but it violates the additive logic.
-  end note  
+  end note
   Submitted --> Living : partial_fill
   Submitted --> Closed : strategic\nfullfillement
   state  Confirmed {
-    state New 
+    state New
     state Failed
-  
+
     state Played {
       state Living
       Living --> Living : market\nupdate
@@ -184,7 +603,7 @@
     New --> Closed : strategic\nfullfillement
     New --> Failed : error
     New --> Living : partial_fill
-    Living --> Closed : is_canceled          
+    Living --> Closed : is_canceled
     Living --> Failed : error
   }
   @enduml
@@ -196,25 +615,25 @@
 #+BEGIN_SRC plantuml :results file link :file tailcycle.png
     @startuml
     title Tail life cycle relative to the head
-  
+
     hide empty description
     skinparam shadowing false
-  
+
     [*] -->  HooTail : head is\nplayed
-  
+
     state "Hooked Tail" as HooTail {
       state C <<choice>>
       state "Flapping Tail" as FlaTail
       state "Flying Tail" as FlyTail
       C --> FlaTail : head is\nLiving
       C --> FlyTail : head is\nClosed
-  
+
       FlaTail --> FlaTail : head is\nnamended
       FlaTail -[#red,dashed]-> FlyTail : Head has\nan error
       FlaTail --> FlyTail : head is\nClosed
-  
+
   }
-  
+
     @enduml
 #+END_SRC
 
@@ -251,7 +670,6 @@
 | T       | F         | Living |
 | T       | T         | closed |
 
-
 * <2026-05-16 sam. 14:48> Fix the type architecture.
 
 2. Strengthen BargainLike until Chronos, Condition, HookOrder, TrailStop can use it.
@@ -259,44 +677,8 @@
 4. Make get_order_from return a narrower type, or add separate helpers for different payloads.
 5. Fix mypy errors in touched runtime files first, not the whole repository.
 6. Expand RuntimeState to model primary/tail/hook lifecycle explicitly.
-7. Keep all behavior and tests unchanged.  
+7. Keep all behavior and tests unchanged.
 
-* <2026-05-16 sam. 12:14>
-  I see :: @@ -112,15 +113,15 @@ class PriceObj:
- 
-     def get_current_prices(
-         self,
--        price,
--        refPrice,
--        refTail=None,
--        stopTail=None,
--        flexTail=None,
--        sOfsD=None,
--        sOfsP=None,
--        fOfsD=None,
--        fScale=None,
-+        price: float,
-+        refPrice: Optional[float],
-+        refTail: Optional[float] = None,
-+        stopTail: Optional[float] = None,
-+        flexTail: Optional[float] = None,
-
-refPrice seem mandatory bu Optional type?  
-
-* TODO 
-
-* OpenAPI Scaffold
-
-- =kolabi/openapi/kraken/= is now present as a scaffold.
-- It is not a generated client yet.
-- It exists to receive:
-  - official OpenAPI or Swagger artifacts if Kraken provides them
-  - generated client code
-  - schema extraction helpers
-  - translation glue between generated shapes and =kraken_contract=
-- Active trading code still uses:
-  - =kolabi/kraken_contract/= for verified wire contracts
-  - =kolabi/shared/exchanges/kraken_adapter.py= for the actual adapter
 
 * Environments
 
@@ -409,11 +791,11 @@ sqlite3 pub-futures-demo.sqlite \
   python -m kolabi.tree.account run --environment demo
   # Check strategy readiness against both DBs:
   python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo
-  
+
   # read the latest public book summary for one product id
   python -m kolabi.tree.kraken status --pair PI_XBTUSD --environment demo
   python -m kolabi.tree.account status --environment demo
-  
+
   # read the current position for one product id
   python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo balance
   python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo position
@@ -426,7 +808,7 @@ sqlite3 pub-futures-demo.sqlite \
   # List instruments containing ADA:
   python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo instruments --contains ADA
   # see open position ?
-  
+
   # Send a demo limit order:
   python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo limit --side buy --qty 2 --price 70000
   # Send a demo market order:
@@ -435,13 +817,13 @@ sqlite3 pub-futures-demo.sqlite \
   python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo cancel --order-id YOUR_ORDER_ID
   # Amend an order price and/or quantity:
   python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo amend --order-id YOUR_ORDER_ID --price 80010 --qty 2
-  
+
   #  Run a TSV strategy on demo:
   python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
   #  Dry run:
   python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment live --dry-run
-  
-  
+
+
 #+end_src
 
 ** Tail Order Example
