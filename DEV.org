@@ -1,6 +1,13 @@
 #+TITLE: kolaBiBot
 #+OPTIONS: toc:2 num:nil
 
+* <2026-05-19 mar. 11:05>
+We can remove the Legacy... names and merge / only keep one name
+We can remove dead code.
+We need to simplify the code base and document each touched file.
+Target lets: move out of the legacy aera. what needs to be done  for that?
+We need to tighen types in the legacy files.  create more types eg, price type should not just be float, idem for quantities. find other things whcih gain to be tighten
+
 * <2026-05-17 dim. 07:37> rewrite and vocabulary
 1. A tail cannot be hooked after the failed head.
 2. A tail can only be hooked after a played head.
