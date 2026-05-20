@@ -1,0 +1,34 @@
+# requirements-dev.txt
+-r requirements.txt
+
+# tests
+pytest
+hypothesis
+pytest-xdist
+pytest-bdd
+
+# typing
+mypy
+pyright
+typing_extensions
+types-requests
+
+# lint / format
+ruff
+black
+ruff-lsp
+python-lsp-server[all]
+
+# debugging
+ipython
+ipdb
+
+# legacy cleanup
+vulture
+
+# database
+psycopg[binary]
+
+# visu
+pydot
+pygraphviz

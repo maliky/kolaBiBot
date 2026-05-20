@@ -9,34 +9,35 @@
  - admitted order :: sent order with REST ACK reply.
  - Confirmed order :: admitted order confirmed by private DB.
 
- - =Hooked -> Sent=
- - =Sent -> Unadmitted= on REST error
- - =Sent -> Admitted= on REST ACK
+ - =Hooked -> Submitted=
+ - =Submitted= -> =Unadmitted= on REST error
+ - =Submitted= -> =Admitted= on REST ACK
  - =Admitted -> Confirmed= on private DB confirmation
 
 ** Five-layer lists
 *** Layer 1 — Raw Kraken/order reasons classified
 #+NAME:kraken_raw
-| <5>        | <5>          | <30>                                              | <5>          |
-| is_played? | is_canceled? | reason                                            | base state   |
-|------------+--------------+---------------------------------------------------+--------------|
-| F          | F            | limit_order_from_stop                             | New, Open    |
-| F          | F            | new_placed_order_by_user                          | New, Open    |
-| F          | T            | cancelled_by_admin                                | Failed       |
-| F          | T            | cancelled_by_user                                 | Failed       |
-| F          | T            | contract_expired                                  | Failed       |
-| F          | T            | dead_man_switch                                   | Failed       |
-| F          | T            | liquidation                                       | Failed       |
-| F          | T            | market_inactive                                   | Failed       |
-| F          | T            | not_enough_margin                                 | Failed       |
-| F          | T            | order_for_edit_not_found                          | Failed       |
-| T          | F            | partial_fill                                      | Living, Open |
-| T          | T            | full_fill                                         | Closed       |
-| T          | T            | ioc_order_failed_because_it_would_not_be_executed | Closed       |
-| T          | T            | post_order_failed_because_it_would_filled         | Closed       |
-| T          | T            | stop_order_triggered                              | Closed       |
-| T          | T            | would_execute_self                                | Closed       |
-| T          | T            | would_not_reduce_position                         | Closed       |
+| <5>        | <5>          | <30>                                              | <5>          |                         |
+| is_played? | is_canceled? | reason                                            | base state   | move                    |
+|------------+--------------+---------------------------------------------------+--------------+-------------------------|
+| F          | F            | limit_order_from_stop                             | New, Open    | not_played_nor_canceled |
+| F          | F            | new_placed_order_by_user                          | New, Open    | not_played_nor_canceled |
+| F          | T            | cancelled_by_admin                                | Failed       | not_played_canceled     |
+| F          | T            | cancelled_by_user                                 | Failed       | not_played_canceled     |
+| F          | T            | contract_expired                                  | Failed       | not_played_canceled     |
+| F          | T            | dead_man_switch                                   | Failed       | not_played_canceled     |
+| F          | T            | liquidation                                       | Failed       | not_played_canceled     |
+| F          | T            | market_inactive                                   | Failed       | not_played_canceled     |
+| F          | T            | not_enough_margin                                 | Failed       | not_played_canceled     |
+| F          | T            | order_for_edit_not_found                          | Failed       | not_played_canceled     |
+| T          | F            | partial_fill                                      | Living, Open | played_not_canceled     |
+| T          | T            | full_fill                                         | Closed       | played_and_canceled     |
+| T          | T            | ioc_order_failed_because_it_would_not_be_executed | Closed       | played_and_canceled     |
+| T          | T            | post_order_failed_because_it_would_filled         | Closed       | played_and_canceled     |
+| T          | T            | stop_order_triggered                              | Closed       | played_and_canceled     |
+| T          | T            | would_execute_self                                | Closed       | played_and_canceled     |
+| T          | T            | would_not_reduce_position                         | Closed       | played_and_canceled     |
+
 
 
 #+BEGIN_SRC plantuml :results file link :file mainordercycle.png

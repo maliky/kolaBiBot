@@ -29,7 +29,7 @@ class LatentEggState(StrEnum):
 
     LATENT = "latent"
     HOOKED = "hooked"
-    SUBMITTED = "sent"
+    SUBMITTED = "submitted"
     UNADMITTED = "unadmitted"
     ADMITTED = "admitted"
     CONFIRMED = "confirmed"

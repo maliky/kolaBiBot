@@ -1,16 +1,7 @@
-pylint
 pandas
 numpy
 websocket_client
 requests
-hypothesis
-flake8
-mypy
-black
-pytest
 sqlalchemy
 python-binance
 responses
-ruff
-pyright
-pylint
