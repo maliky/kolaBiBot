@@ -32,18 +32,12 @@ def test_<scenario_name>() -> None:
 
 ** Behaviour checklist
 
-- Terminal guard:
-  `FAILED` and `CLOSED` states ignore later contradictory moves.
-- Idempotency:
-  replay of the same move does not emit duplicate `PLACE` tail command.
-- Quantity safety:
-  tail order quantity uses played quantity when present.
-- Intent boundary:
-  reducer returns intents only; exchange payload building lives at interpreter boundary.
-- Source-of-truth split:
-  `HEAD_SUBMITTED` marks submitted only; private confirmation move hooks tail.
-- Tail policy:
-  `HEAD_FAILED` never hooks tail; `HEAD_CANCELED_ZERO_FILL` may hook tail by rule.
+- Terminal guard:  `FAILED` and `CLOSED` states ignore later contradictory moves.
+- Idempotency:  replay of the same move does not emit duplicate `PLACE` tail command.
+- Quantity safety:  tail order quantity uses played quantity when present.
+- Intent boundary:  reducer returns intents only; exchange payload building lives at interpreter boundary.
+- Source-of-truth split:  `HEAD_SUBMITTED` marks submitted only; private confirmation move hooks tail.
+- Tail policy:  `HEAD_FAILED` never hooks tail; `HEAD_CANCELED_ZERO_FILL` may hook tail by rule.
 
 ** Suggested test names
 

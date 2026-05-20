@@ -2,6 +2,105 @@
 #+OPTIONS: toc:2 num:nil
 
 * TODO
+** <2026-05-20 mer. 08:52>
+*** Audit basis
+  - Ruff: 5 minor fixable issues.
+  - Mypy: 123 errors in 29 files.  # >  I want to fixe this
+  - Pyright: not meaningful # >  explain
+
+*** Revised progress estimate
+
+- Typed vocabulary ( 60% -> 68%)  Real progress: =HeadState=, =TailState=, =TailMode=, =OrderReason=, =EggMove=, =RuntimeCommand=. But the vocabulary is still transitional: =OrderState = HeadState=, duplicated =Side= enums, legacy property aliases inside =OrderPairSpec=, mutable =dict= inside frozen dataclasses.
+# > Remove OrderState and replace them to HeadState
+# > Remove duplicated Side enums and legacy property aliases from OrderPairSpec
+# > Remove mutable dict from frozen dataclass
+
+- Pure reducer (40% -> 45%)
+   =step_pair()= exists, is side-effect-free, and has tests. But it is not yet the active runtime path.
+   # > What is the current active path ?  make step_pair the active path.
+    It also has a likely semantic inconsistency: first tail activation can emit =AMEND_TAIL= before any =tail_identity= exists, so =intents_to_commands()= silently emits no command.
+
+- Runtime-command boundary (60% -> 65%)
+   Better than before: =RuntimeCommand=, =RuntimeCommandKind=, =runtime_command_from_order()=, =execute_runtime_command()=. But the boundary still adapts legacy dicts and calls legacy order helpers. It is a bridge, not yet a clean port.
+# > propose a fix ? what needs to do.
+
+- Async readiness (45% -> 45)
+  0% | =AsyncChronos= exists and is tested, but it has =# mypy: ignore-errors=, uses =asyncio.to_thread= around blocking legacy calls, and the active =BotService.run_orders()= still uses threads. Async is available, not architecturally dominant.
+# > How do we make that dominant ?
+
+- Haskell migration readiness (45-->50%)
+  The shape is improving: pure helpers, enums, dataclasses, command/event types. But too much remains Pythonic and mutable: =Any=, =dict= payloads, pandas, queues, threads, legacy objects, dynamic order dictionaries.
+# >, ok, we continue
+
+- Behavioral-test readiness (55% -> 65%)
+ Stronger than before because 121 tests pass and reducer/contract tests exist. But the tests may encode wrong behavior in places; they test =AMEND_TAIL= on first tail hook, which may be exactly the bug.
+# > Yes I need to review the tests.
+
+*** # > How do we make the new =PairCycleRunner= and =step_pair()=  the active strategic engine.
+*** Critical incoherences
+
+  1. =HEAD_FILLED= creates a tail state but emits =AMEND_TAIL=.
+
+     In =step_pair()=, a filled head produces:
+
+     - =tail_state = TailState.HOOKED=
+     - =tail_mode = TailMode.FLAPPING=
+     - intent from =_tail_intent_for_state()=
+
+     But =_tail_intent_for_state()= returns =AMEND_TAIL= when =tail_state= is =HOOKED=. Then =intents_to_commands()= drops the amend if =tail_identity is None=.
+
+     Question: if the tail has no exchange identity yet, what exactly is being amended?
+
+     This is the most important bug or ambiguity I found.
+
+  2. =can_hook_tail()= and =step_pair()= do not fully agree.
+
+     =can_hook_tail()= says a tail can hook only if the head is “played” and not failed.
+
+     But =step_pair()= allows =HEAD_CANCELED_ZERO_FILL= to hook/place a tail.
+
+     That may be correct for your special meaning of “played” — e.g. post-only rejected because it would fill, reduce-only reducing nothing, cancel-if-touched fulfilled — but then the reducer needs a clearer outcome type. Right now, “canceled zero fill” is too broad.
+
+# > What do you suggest
+
+  3. =classify_confirmed_state()= maps =CANCELED_UNPLAYED= to =FAILED=, while =HEAD_CANCELED_ZERO_FILL= maps to =CLOSED= and may place a tail.
+
+     This is not necessarily wrong, but the distinction must be explicit:
+      # > This is ok and is clear for me.
+     - failed cancel: no tail
+     - fulfilled zero-fill cancel: tail allowed
+     - ordinary user/admin cancel: probably no tail unless intentionally treated as fulfilled
+      # > ordinary / admin cancel should not hook a tail.
+
+  4. =PairCycleRunner= does not yet consume private confirmation as a full event loop.
+
+     It submits the head and stops at “awaiting private confirmation.” The helper =egg_move_from_confirmed_head()= exists, but I do not see it wired into the active runner path.
+
+     # > wire the egg_move_... to the active runner.
+     
+  5. =StrategyState= is marked frozen but contains mutable =dict=.
+
+     This is acceptable in transitional Python, but not Haskell-like. For migration readiness, use immutable mappings conceptually: events in, new state out.
+# > Remove the mutable dict and use immutable mappings instead.
+*** Why the previous estimate may be false
+  For example, having =TailMode.FLAPPING= and =TailMode.FLYING= looks clean, but if =HOOKED + FLAPPING= emits an amend before placement, the vocabulary has not yet stabilized the lifecycle.
+
+  It may also underestimate progress in testing: =121 passed= is significant. The problem is not lack of tests; the problem is whether the tests encode the right semantics.
+*** Next decisive question
+
+# > remove the vocabulary activated and replace it by hooked.
+
+| Head outcome                                       | Fill | Tail allowed?                       |
+|----------------------------------------------------+------+-------------------------------------|
+| full fill                                          |   >0 | yes                                 |
+| partial fill then cancel                           |   >0 | yes, adjusted quantity              |
+| reduce-only fulfilled with no position             |    0 | yes, this is semantically fulfilled |
+| post-only rejected because it would take liquidity |    0 | yes, this is semantically fulfilled |
+| ordinary user/admin cancel before play             |    0 | no                                  |
+| exchange technical failure / margin failure        |    0 | no                                  |
+
+# > Make this table should become the reducer contract.
+
 ** <2026-05-19 mar. 20:33>
 
 Source reviewed: your =<2026-05-19 mar. 17:38>= tree and pasted =pair_cycle.py= notes. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
@@ -454,7 +553,7 @@ That preserves the legacy “multiple orderpairs in TSV loop” idea in a Haskel
 - Q08 ConfirmedOrder.is_played   Zero-fill cases
  an order be semantically played with zero filled quantity. the the ref table  [[*<2026-05-17 dim. 11:22> ref table][<2026-05-17 dim. 11:22> ref table]]
 - Q09 ConfirmedOrder.is_played   Reduce-only fulfillment
-   If reduce-only reduces nothing because no position exists, should it be played and closed. There is no state fulfilled_without_exposure.
+            If reduce-only reduces nothing because no position exists, should it be played and closed. There is no state fulfilled_without_exposure.
 - Q10 ConfirmedOrder.is_played   Post-only rejection
   A post-only is rejected because it would take liquidity, is a close see [[*<2026-05-17 dim. 11:22> ref table][<2026-05-17 dim. 11:22> ref table]]  you can map closed to strategiclay fullfilled
 - Q11 can_hook_tail(   Tail after zero-fill close
@@ -465,9 +564,9 @@ That preserves the legacy “multiple orderpairs in TSV loop” idea in a Haskel
    Should tail mode depend on HeadState only, or on HeadState + played_quantity + reason?
 # Here we have tail state and tail mode
 - Q14 PairCycleState   Quantity type
-   played/filled/remaining quantities should use Decimal immediately and not wrap existing floats with typed aliases.
+            played/filled/remaining quantities should use Decimal immediately and not wrap existing floats with typed aliases.
 - Q15 PairCycleState   Tail identity
-   theT   The identity that  must be stored for a submitted tail is the same that for any other order. usualy we keep the client order id and, exchange order id.
+            theT   The identity that  must be stored for a submitted tail is the same that for any other order. usualy we keep the client order id and, exchange order id.
 - Q16 PairCycleState   Command history
   Only the two latest command per order role should be store for idempotency.
 - Q17 pair_cycle.py   Centrality
@@ -478,23 +577,23 @@ That preserves the legacy “multiple orderpairs in TSV loop” idea in a Haskel
 - Q19 step_pair(   Terminal guards
     States are absolutely terminal are failed and closed.
 - Q20 step_pair(   Duplicate events
-   If the same private confirmation event arrives twice the reducer should ignore it log as a small warning.
+            If the same private confirmation event arrives twice the reducer should ignore it log as a small warning.
 - Q21 PAIR_EVENT_   Event vocabulary
   We  full typed event dataclasses immediately.
 - Q22 RuntimeEvent.note   String dispatch
-   note  should be removed from logic entirely and not kept for human-readable diagnostics.
+            note  should be removed from logic entirely and not kept for human-readable diagnostics.
 - Q23 tail_order_dict(pair)   Partial fill quantity
     tail quantity always equal played_quantity rather than original head.quantity.
 - Q24 tail_order_dict(pair)   Quantity source
-   If the head is amended before fill, the tail quantity should be derive the actual filled quantity.
+            If the head is amended before fill, the tail quantity should be derive the actual filled quantity.
 - Q25 tail_command(   Amend identity
    For tail amendment, both  clOrdID, exchange order_id, should be mandatory.
 - Q26 played_quantity_from_event(   Missing quantity
-   If an event has no filled quantity, it should it default to unknown.
+            If an event has no filled quantity, it should it default to unknown.
 - Q27 played_quantity_from_event(   String quantity
    All exchange quantities be parsed as Decimal(str(value)).
 - Q28 runtime_event_from_confirmed_head(   Source of truth
-   Should this function only be called from private DB/WebSocket confirmation, never from REST placement acknowledgment ?
+            Should this function only be called from private DB/WebSocket confirmation, never from REST placement acknowledgment ?
 # > need to check.
 - Q29 confirmed_from_ack(   Dangerous naming
    this be renamed to submitted_from_ack() because REST ack confirms submission, not lifecycle completion.
@@ -505,34 +604,34 @@ That preserves the legacy “multiple orderpairs in TSV loop” idea in a Haskel
 - Q31 run_pair_once(   REST ack progression
     REST placement ack should only move the order to SUBMITTED never to CLOSED or FAILED.
 - Q32 runtime_types.py   Boundary typing
-   Which should be typed first: RuntimeEvent, RuntimeCommand, OrderDict, or BrokerReply ?
+            Which should be typed first: RuntimeEvent, RuntimeCommand, OrderDict, or BrokerReply ?
 # > you choose
 - Q33 RuntimeCommand   Idempotency
     two commands are duplicates when they have, same client order id and same semantic action.
 - Q34 step_runtime(   Placeholder
     step_runtime() should be deleted until needed.
 - Q35 runtime_commands.py   Pure vs IO split
-   execute_runtime_command() should move to an interpreter module, leaving this file pure.
+            execute_runtime_command() should move to an interpreter module, leaving this file pure.
 
 - Q36 runtime_command_from_order(   Malformed orders
     malformed legacy order dicts should raise exceptions.
 - Q37 validation_conditions_for(   Confirmation rules
-   Validation rules should be exchange-independent and not Kraken-specific. The later should be removed.
+            Validation rules should be exchange-independent and not Kraken-specific. The later should be removed.
 - Q38 execute_runtime_command(   Legacy binding
-   this function should not be  allowed to call legacy order functions directly anymore. we want to move one. If we break we will repear.
+            this function should not be  allowed to call legacy order functions directly anymore. we want to move one. If we break we will repear.
 - Q39 Chronos   Metaphor preservation
     Chronos should remain the intentional metaphorical name for the time-bound orchestration.
 - Q40 Chronos   Internal split
-   Which part should be extracted first: normalizer, dispatcher, confirmation matcher, or event emitter.
+            Which part should be extracted first: normalizer, dispatcher, confirmation matcher, or event emitter.
 # > you choose.
 - Q41 Chronos.handle_load(   Exception logic
    I think exception handling should be pushed into command execution/interpreter code (Ogun)
 - Q42 Chronos.build_runtime_command(   Purity
-   this function shoulb be required to stay pure: no DB, no exchange, no mutation.
+            this function shoulb be required to stay pure: no DB, no exchange, no mutation.
 - Q43 Chronos.confirm_pair_transition(   Duplicated lifecycle logic
    This function delegate all lifecycle decisions to step_pair().
 - Q44 Chronos.matches_confirmation_rule(   Confirmation identity
-   the minimum valid confirmation match is an order id and a timestamp.
+            the minimum valid confirmation match is an order id and a timestamp.
 - Q45 latest_execution_for_status(   IO helper
     this stay only as query/helper code with no domain decision authority.
 - Q46 async_chronos.py   Async timing
@@ -540,10 +639,10 @@ That preserves the legacy “multiple orderpairs in TSV loop” idea in a Haskel
 - Q47 AsyncChronos.emit_event(   Event stream
     Emitted events should be logged only and fed immediately into step_pair.
 - Q48 pure_runtime.py   Extraction target
-   Which logic should move here next: price derivation, condition evaluation, hook update, or payload construction?
+            Which logic should move here next: price derivation, condition evaluation, hook update, or payload construction?
    # > you choose
 - Q49 condition_truth_value(   Invalid comparisons
-   If a condition has invalid values,  it should a typed validation error.
+            If a condition has invalid values,  it should a typed validation error.
 - Q50 derive_hooked_order_update(   Hook vocabulary
     “hooked” mean formally verified and ready for automatic submission.
 - Q51 build_order_payload(   Payload ownership
@@ -553,7 +652,7 @@ That preserves the legacy “multiple orderpairs in TSV loop” idea in a Haskel
 - Q53 MarketAuditor.go(   Semantic ownership
     MarketAuditor.go() should call the typed pair-cycle interpreter rather than deciding lifecycle semantics itself
 - Q54 kraken_adapter.py   Exchange boundary
-   Which Kraken quirks must never leak into step_pair()?
+            Which Kraken quirks must never leak into step_pair()?
    # > I do not know give example of what quirks could leak
 - Q55 _map_order_status_from_payload(   Real payload tests 
 I do not have real Kraken payload examples so check the api doc only. they should have it
@@ -562,9 +661,9 @@ I do not have real Kraken payload examples so check the api doc only. they shoul
 - Q57 runtime_compat.py   Transitional wrapper
     This file can be removed aggressively after ExchangePort is stable.
 - Q58 runtime_state.py   Pure/IO split
-   we should extract a pure PublicMarketState dataclass/protocol before touching DB code.
+            we should extract a pure PublicMarketState dataclass/protocol before touching DB code.
 - Q59 KrakenRuntimeStateClient   IO boundary
-   Should this client be forbidden from importing pure domain reducers?
+            Should this client be forbidden from importing pure domain reducers?
     # >  why do you ask ?
 - Q60 service.py   Heavy imports
     Service.py should be treated as application composition only not imported by pure tests.
