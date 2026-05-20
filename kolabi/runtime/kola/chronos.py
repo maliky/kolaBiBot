@@ -41,8 +41,8 @@ from kolabi.runtime.kola.utils.orderfunc import (
     normalize_order_dict,
 )
 from kolabi.runtime.kola.utils.pricefunc import setdef_stopPrice
+from kolabi.runtime.kola.ogun_executor import execute_runtime_command
 from kolabi.shared.core.runtime_commands import (
-    execute_runtime_command,
     runtime_command_from_order,
     timeout_override_minutes_for,
     validation_conditions_for,

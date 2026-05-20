@@ -27,8 +27,8 @@ from kolabi.runtime.kola.utils.datefunc import now, setdef_timedelta
 from kolabi.runtime.kola.utils.general import opt_pop_if_in_
 from kolabi.runtime.kola.utils.logfunc import get_logger
 from kolabi.runtime.kola.utils.orderfunc import get_order_from, normalize_order_dict
+from kolabi.runtime.kola.ogun_executor import execute_runtime_command
 from kolabi.shared.core.runtime_commands import (
-    execute_runtime_command,
     runtime_command_from_order,
     timeout_override_minutes_for,
     validation_conditions_for,
