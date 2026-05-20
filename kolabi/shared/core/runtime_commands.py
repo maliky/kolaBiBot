@@ -43,7 +43,7 @@ def runtime_command_from_order(
         command_reason = reason or OrderRole.AMEND.value
     else:
         kind = RuntimeCommandKind.PLACE
-        command_reason = reason or OrderRole.PRIMARY.value
+        command_reason = reason or OrderRole.HEAD.value
     return RuntimeCommand(
         kind=kind,
         symbol=Symbol(symbol),

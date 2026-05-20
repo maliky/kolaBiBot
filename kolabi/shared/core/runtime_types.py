@@ -13,10 +13,10 @@ Transitional: yes, includes compatibility aliases while legacy surfaces migrate.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Iterable, Mapping, NewType, Protocol, TypedDict
 
 DecimalLike = Decimal | int | float | str
@@ -65,7 +65,7 @@ class Side(StrEnum):
 
 
 class OrderRole(StrEnum):
-    PRIMARY = "primary"
+    HEAD = "head"
     TAIL = "tail"
     HOOK = "hook"
     AMEND = "amend"
@@ -303,6 +303,16 @@ class CryptoApiLike(Protocol):
 
 
 class BargainLike(Protocol):
+    """Broker-facing negotiation boundary used by Chronos/order-cycle logic.
+
+    Why this name:
+    - `Bargain` keeps the strategic metaphor: negotiation with the market.
+    - This protocol defines the minimal contract needed by runtime logic
+      (price read, balance, execution lookup, position/open-order access).
+    - It is intentionally structural: any object exposing this surface can be
+      used without explicit inheritance.
+    """
+
     symbol: str
     crypto_api: CryptoApiLike
 
@@ -336,6 +346,15 @@ class RuntimeCommand:
 
 @dataclass(frozen=True)
 class RuntimeState:
+    """Minimal runtime shell state for orchestration layers.
+
+    Vocabulary choice:
+    - Keep metaphorical orchestration terms at the boundary (`Chronos`,
+      `Bargain`, `head`, `tail`).
+    - Keep strategy lifecycle enums in `kolabi.bot.domain`.
+    - `OrderStatus` remains the raw exchange order status family.
+    """
+
     symbol: Symbol
     active_order_id: ClientOrderId | None = None
     active_exchange_order_id: ExchangeOrderId | None = None

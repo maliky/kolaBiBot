@@ -5,9 +5,8 @@ from datetime import datetime, timezone
 from kolabi.bot.domain import (
     ExecutionOutcome,
     HeadState,
-    OrderState,
-    TailState,
     TailMode,
+    TailState,
     classify_confirmed_state,
 )
 from kolabi.shared.core.runtime_types import (
@@ -26,8 +25,7 @@ from kolabi.shared.core.runtime_types import (
 
 
 def test_head_and_tail_state_preserve_legacy_aliases() -> None:
-    assert HeadState is OrderState
-    assert HeadState.SUBMITTED.value == "submitted"
+    assert HeadState.SUBMITTED.value == "sent"
     assert TailState.LIVING.value == "living"
     assert TailMode.FLAPPING.value == "flapping"
 
@@ -43,12 +41,12 @@ def test_runtime_event_and_command_types_are_typed_values() -> None:
     command = RuntimeCommand(
         kind=RuntimeCommandKind.PLACE,
         symbol=symbol,
-        reason=OrderRole.PRIMARY.value,
+        reason=OrderRole.HEAD.value,
     )
 
     assert event.kind == RuntimeEventKind.ORDER_REQUESTED
     assert command.kind == RuntimeCommandKind.PLACE
-    assert command.reason == "primary"
+    assert command.reason == "head"
 
 
 def test_extended_enums_and_tagged_outcome_state() -> None:

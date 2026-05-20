@@ -9,7 +9,7 @@ Important types: `HeadState`, `TailState`, `TailMode`, `OrderReason`,
 `ExecutionOutcome`, `OrderPairSpec`, `PairCycleState`, `EggMove`,
 `StrategyState`.
 Role: pure logic.
-Transitional: yes, includes compatibility aliases (`OrderState`).
+Transitional: no compatibility alias for `OrderState`; use `HeadState`.
 """
 from __future__ import annotations
 
@@ -17,43 +17,84 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Mapping, Protocol
 
 from kolabi.shared.core.runtime_types import Side
-from typing import Mapping, Protocol
 
 NumberPair = tuple[float, float]
 
 
-class HeadState(StrEnum):
+class LatentEggState(StrEnum):
+    """Transport/confirmation before strategic state."""
+
     LATENT = "latent"
     HOOKED = "hooked"
-    SUBMITTED = "submitted"
+    SUBMITTED = "sent"
+    UNADMITTED = "unadmitted"
+    ADMITTED = "admitted"
+    CONFIRMED = "confirmed"
+
+
+class EggState(StrEnum):
+    """Strategic class after confirmation."""
+
     NEW = "new"
-    LIVING = "living"
     FAILED = "failed"
+    LIVING = "living"
     CLOSED = "closed"
+
+
+class PairRole(StrEnum):
+    """Pair role labels."""
+
+    HEAD = "head"
+    TAIL = "tail"
+
+
+class HeadState(StrEnum):
+    """Head base state within the pair lifecycle."""
+
+    LATENT = LatentEggState.LATENT.value
+    HOOKED = LatentEggState.HOOKED.value
+    SUBMITTED = LatentEggState.SUBMITTED.value
+    UNADMITTED = LatentEggState.UNADMITTED.value
+    CONFIRMED = LatentEggState.CONFIRMED.value
+    ADMITTED = LatentEggState.ADMITTED.value
+    NEW = EggState.NEW.value
+    LIVING = EggState.NEW.value
+    FAILED = EggState.NEW.value
+    CLOSED = EggState.CLOSED.value
 
 
 class TailState(StrEnum):
-    LATENT = "latent"
-    HOOKED = "hooked"
-    SUBMITTED = "submitted"
-    CONFIRMED = "confirmed"
-    LIVING = "living"
-    FAILED = "failed"
-    CLOSED = "closed"
+    """Tail base state within the pair lifecycle."""
+
+    LATENT = LatentEggState.LATENT.value
+    HOOKED = LatentEggState.HOOKED.value
+    SUBMITTED = LatentEggState.SUBMITTED.value
+    UNADMITTED = LatentEggState.UNADMITTED.value
+    ADMITTED = LatentEggState.ADMITTED.value
+    CONFIRMED = LatentEggState.CONFIRMED.value
+    NEW = EggState.NEW.value
+    LIVING = EggState.LIVING.value
+    FAILED = EggState.FAILED.value
+    CLOSED = EggState.CLOSED.value
 
 
 class TailMode(StrEnum):
+    """tail-relative mode driven by head state."""
+
     FLAPPING = "flapping"
     FLYING = "flying"
 
 
 # Compatibility alias used by current runtime call sites.
-OrderState = HeadState
+TailRole = TailMode
 
 
 class OrderReason(StrEnum):
+    """Raw exchange reasons as emitted by order/execution feeds."""
+
     LIMIT_ORDER_FROM_STOP = "limit_order_from_stop"
     NEW_PLACED_ORDER_BY_USER = "new_placed_order_by_user"
     CANCELLED_BY_ADMIN = "cancelled_by_admin"
@@ -84,6 +125,8 @@ class ExecutionOutcome(StrEnum):
 class EggMoveKind(StrEnum):
     HEAD_HOOKED = "head_hooked"
     HEAD_SUBMITTED = "head_submitted"
+    HEAD_UNADMITTED = "head_unadmitted"
+    HEAD_ADMITTED = "head_unadmitted"    
     HEAD_FAILED = "head_failed"
     HEAD_CANCELED_ZERO_FILL = "head_canceled_zero_fill"
     HEAD_CANCELED_AFTER_FILL = "head_canceled_after_fill"
@@ -166,7 +209,7 @@ class ConfirmedOrder:
 
     @property
     def is_terminal(self) -> bool:
-        return self.state in {OrderState.FAILED, OrderState.CLOSED}
+        return self.state in {HeadState.FAILED, HeadState.CLOSED}
 
 
 @dataclass(frozen=True)
