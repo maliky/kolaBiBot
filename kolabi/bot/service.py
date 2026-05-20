@@ -288,31 +288,31 @@ class BotService:
             else 1.0
         )
         for spec in specs:
-            if "qA" in spec.atype and spec.q is not None and float(spec.q) < min_qty:
+            if "qA" in spec.amount_type and spec.head.quantity is not None and float(spec.head.quantity) < min_qty:
                 raise ValueError(
-                    f"Strategy '{spec.name}' quantity {spec.q} is below "
+                    f"Strategy '{spec.name}' quantity {spec.head.quantity} is below "
                     f"the minimum quantity {min_qty:g} for {self.config.symbol}."
                 )
 
     def _spec_to_kwargs(self, spec: OrderSpec) -> AuditorGoKwargs:
         """Translate OrderSpec into kwargs accepted by MarketAuditor.go."""
         return {
-            "tps_run": spec.tps_run,
-            "prix": spec.prix,
-            "essais": 1 if spec.essais is None else spec.essais,
-            "side": spec.side,
-            "q": spec.q,
-            "tp": 0.0 if spec.tp is None else spec.tp,
-            "atype": spec.atype,
-            "oType": spec.oType,
+            "tps_run": (spec.window.start_minutes, spec.window.end_minutes),
+            "prix": spec.head.price_interval,
+            "essais": 1 if spec.attempts is None else spec.attempts,
+            "side": spec.head.side.value,
+            "q": spec.head.quantity,
+            "tp": 0.0 if spec.tail.price is None else spec.tail.price,
+            "atype": spec.amount_type,
+            "oType": spec.head.order_type,
             "nameT": spec.name,
             "updatepause": self.config.updatepause,
             "logpause": self.config.logpause,
-            "dr_pause": spec.dr_pause,
-            "tType": spec.tType,
-            "timeout": spec.timeout,
-            "oDelta": spec.oDelta,
-            "tDelta": spec.tDelta,
+            "dr_pause": spec.pause_minutes,
+            "tType": spec.tail.order_type,
+            "timeout": spec.timeout_minutes,
+            "oDelta": spec.head.delta,
+            "tDelta": spec.tail.delta,
             "hook": spec.hook or None,
         }
 

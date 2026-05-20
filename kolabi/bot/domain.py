@@ -17,14 +17,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+
+from kolabi.shared.core.runtime_types import Side
 from typing import Mapping, Protocol
 
 NumberPair = tuple[float, float]
-
-
-class Side(StrEnum):
-    BUY = "buy"
-    SELL = "sell"
 
 
 class HeadState(StrEnum):
@@ -143,57 +140,7 @@ class OrderPairSpec:
     amount_type: str
     hook: str | None = None
 
-    @property
-    def tps_run(self) -> NumberPair:
-        return (self.window.start_minutes, self.window.end_minutes)
 
-    @property
-    def essais(self) -> int:
-        return self.attempts
-
-    @property
-    def dr_pause(self) -> float | None:
-        return self.pause_minutes
-
-    @property
-    def timeout(self) -> int | None:
-        return self.timeout_minutes
-
-    @property
-    def side(self) -> str:
-        return self.head.side.value
-
-    @property
-    def prix(self) -> NumberPair:
-        return self.head.price_interval
-
-    @property
-    def q(self) -> int | None:
-        return self.head.quantity
-
-    @property
-    def tp(self) -> float | None:
-        return self.tail.price
-
-    @property
-    def atype(self) -> str:
-        return self.amount_type
-
-    @property
-    def oType(self) -> str:
-        return self.head.order_type
-
-    @property
-    def oDelta(self) -> float | None:
-        return self.head.delta
-
-    @property
-    def tDelta(self) -> float | None:
-        return self.tail.delta
-
-    @property
-    def tType(self) -> str:
-        return self.tail.order_type
 
 
 @dataclass(frozen=True)
