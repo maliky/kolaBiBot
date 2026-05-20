@@ -5,15 +5,17 @@ state, and reducer events used by the active pair-cycle runtime.
 Inputs: normalized side/order/reason strings and strategy fields.
 Outputs: typed domain records and pure classification helpers.
 Side effects: none.
-Important types: `HeadState`, `TailState`, `OrderReason`, `ExecutionOutcome`,
-`OrderPairSpec`, `PairCycleState`, `EggMove`, `StrategyState`.
+Important types: `HeadState`, `TailState`, `TailMode`, `OrderReason`,
+`ExecutionOutcome`, `OrderPairSpec`, `PairCycleState`, `EggMove`,
+`StrategyState`.
 Role: pure logic.
-Transitional: yes, includes compatibility aliases (`OrderState`, `TailMode`).
+Transitional: yes, includes compatibility aliases (`OrderState`).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Mapping, Protocol
 
@@ -39,13 +41,19 @@ class TailState(StrEnum):
     LATENT = "latent"
     HOOKED = "hooked"
     SUBMITTED = "submitted"
+    CONFIRMED = "confirmed"
+    LIVING = "living"
+    FAILED = "failed"
+    CLOSED = "closed"
+
+
+class TailMode(StrEnum):
     FLAPPING = "flapping"
     FLYING = "flying"
 
 
-# Compatibility aliases used by the current pair-cycle runtime.
+# Compatibility alias used by current runtime call sites.
 OrderState = HeadState
-TailMode = TailState
 
 
 class OrderReason(StrEnum):
@@ -201,12 +209,13 @@ class ConfirmedOrder:
     identity: OrderIdentity
     state: HeadState
     reason: OrderReason
-    filled_quantity: float
-    total_quantity: float
+    filled_quantity: Decimal
+    total_quantity: Decimal
 
     @property
     def is_played(self) -> bool:
-        return self.reason in PLAYED_REASONS or self.filled_quantity > 0
+        """Played is semantic strategy fulfilment and may have zero fill."""
+        return self.reason in PLAYED_REASONS
 
     @property
     def is_terminal(self) -> bool:
@@ -217,24 +226,24 @@ class ConfirmedOrder:
 class PairCycleState:
     pair: OrderPairSpec
     head_state: HeadState = HeadState.LATENT
-    tail_mode: TailState | None = None
+    tail_state: TailState | None = None
+    tail_mode: TailMode | None = None
     head_identity: OrderIdentity | None = None
     tail_identity: OrderIdentity | None = None
-    played_quantity: float = 0.0
+    played_quantity: Decimal | None = None
+    latest_commands: dict[str, tuple[str, ...]] | None = None
 
 
 @dataclass(frozen=True)
 class EggMove:
-    """Typed reducer input for one pair transition step.
-
-    This replaces note-string dispatch in the pair reducer.
-    """
+    """Typed reducer input for one pair transition step."""
 
     kind: EggMoveKind
     occurred_at: datetime
     symbol: str
     order: Mapping[str, object] | None = None
     reply: Mapping[str, object] | None = None
+    event_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -295,11 +304,11 @@ def can_hook_tail(head: ConfirmedOrder) -> bool:
     return head.is_played and head.state != HeadState.FAILED
 
 
-def tail_mode_for_head(head: ConfirmedOrder) -> TailState | None:
+def tail_mode_for_head(head: ConfirmedOrder) -> TailMode | None:
     if not can_hook_tail(head):
         return None
     if head.state == HeadState.LIVING:
-        return TailState.FLAPPING
+        return TailMode.FLAPPING
     if head.state == HeadState.CLOSED:
-        return TailState.FLYING
-    return TailState.HOOKED
+        return TailMode.FLYING
+    return None

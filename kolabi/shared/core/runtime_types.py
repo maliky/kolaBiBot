@@ -340,11 +340,3 @@ class RuntimeState:
     active_exchange_order_id: ExchangeOrderId | None = None
     status: OrderStatus | None = None
     metadata: dict[str, str] = field(default_factory=dict)
-
-
-def step_runtime(
-    state: RuntimeState,
-    event: RuntimeEvent,
-) -> tuple[RuntimeState, list[RuntimeCommand]]:
-    _ = event
-    return state, []
