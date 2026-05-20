@@ -18,15 +18,16 @@ def test_<scenario_name>() -> None:
     )
 
     # When: reducer processes the move
-    next_state, commands = step_pair(state, move)
+    next_state, intents = step_pair(state, move)
 
     # Then: assert state transition
     assert next_state.head_state == HeadState.<EXPECTED>
-    assert next_state.tail_mode == TailState.<EXPECTED>
-    assert next_state.played_quantity == <EXPECTED_FLOAT>
+    assert next_state.tail_state == TailState.<EXPECTED>
+    assert next_state.tail_mode == TailMode.<EXPECTED_OR_NONE>
+    assert next_state.played_quantity == Decimal("<EXPECTED>")
 
-    # And: assert command shape
-    assert commands == (...)  # or len(commands) == N
+    # And: assert intent shape
+    assert intents == (...)  # or len(intents) == N
 #+end_src
 
 ** Behaviour checklist
@@ -37,6 +38,8 @@ def test_<scenario_name>() -> None:
   replay of the same move does not emit duplicate `PLACE` tail command.
 - Quantity safety:
   tail order quantity uses played quantity when present.
+- Intent boundary:
+  reducer returns intents only; exchange payload building lives at interpreter boundary.
 - Source-of-truth split:
   `HEAD_SUBMITTED` marks submitted only; private confirmation move hooks tail.
 - Tail policy:

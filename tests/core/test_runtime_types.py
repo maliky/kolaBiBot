@@ -6,8 +6,8 @@ from kolabi.bot.domain import (
     ExecutionOutcome,
     HeadState,
     OrderState,
-    TailMode,
     TailState,
+    TailMode,
     classify_confirmed_state,
 )
 from kolabi.shared.core.runtime_types import (
@@ -27,9 +27,9 @@ from kolabi.shared.core.runtime_types import (
 
 def test_head_and_tail_state_preserve_legacy_aliases() -> None:
     assert HeadState is OrderState
-    assert TailState is TailMode
     assert HeadState.SUBMITTED.value == "submitted"
-    assert TailState.FLAPPING.value == "flapping"
+    assert TailState.LIVING.value == "living"
+    assert TailMode.FLAPPING.value == "flapping"
 
 
 def test_runtime_event_and_command_types_are_typed_values() -> None:

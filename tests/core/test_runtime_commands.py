@@ -5,9 +5,9 @@ from typing import Any
 
 import pandas as pd
 from kolabi.runtime.kola.chronos import Chronos
+from kolabi.runtime.kola.ogun_executor import execute_runtime_command
 from kolabi.shared.core.runtime_commands import (
     command_payload_for_role,
-    execute_runtime_command,
     runtime_command_from_order,
     timeout_override_minutes_for,
     validation_conditions_for,
@@ -68,7 +68,7 @@ def test_execute_runtime_command_uses_legacy_place_functions(monkeypatch) -> Non
         seen["args"] = (brg, side, orderQty, price, opts)
         return {"orderID": "OID-1", "clOrdID": "CID-1"}
 
-    monkeypatch.setattr("kolabi.shared.core.runtime_commands.place", fake_place)
+    monkeypatch.setattr("kolabi.runtime.kola.ogun_executor.place", fake_place)
     command = runtime_command_from_order(
         symbol="PI_XBTUSD",
         order={
