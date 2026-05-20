@@ -12,6 +12,7 @@ Transitional: yes, extracted from `pair_cycle.py` while legacy shells remain.
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal
 from typing import cast
 
 from kolabi.bot.domain import OrderPairSpec, PairCycleState, Side
@@ -48,9 +49,9 @@ def head_order_dict(pair: OrderPairSpec, *, client_order_id: str | None = None) 
     return order
 
 
-def resolve_tail_quantity(state: PairCycleState) -> float | int | None:
+def resolve_tail_quantity(state: PairCycleState) -> Decimal | int | None:
     """Resolve tail quantity from played runtime state first, then planned size."""
-    if state.played_quantity > 0:
+    if state.played_quantity is not None and state.played_quantity > 0:
         return state.played_quantity
     return state.pair.head.quantity
 
@@ -87,6 +88,6 @@ def tail_command(
     )
 
 
-def with_played_quantity(state: PairCycleState, quantity: float) -> PairCycleState:
+def with_played_quantity(state: PairCycleState, quantity: Decimal) -> PairCycleState:
     """Return updated pair state with a normalized played quantity."""
-    return replace(state, played_quantity=max(quantity, 0.0))
+    return replace(state, played_quantity=max(quantity, Decimal("0")))
