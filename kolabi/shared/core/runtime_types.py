@@ -13,10 +13,11 @@ Transitional: yes, includes compatibility aliases while legacy surfaces migrate.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Iterable, NewType, Protocol, TypedDict
+from typing import Iterable, Mapping, NewType, Protocol, TypedDict
 
 DecimalLike = Decimal | int | float | str
 
@@ -339,4 +340,4 @@ class RuntimeState:
     active_order_id: ClientOrderId | None = None
     active_exchange_order_id: ExchangeOrderId | None = None
     status: OrderStatus | None = None
-    metadata: dict[str, str] = field(default_factory=dict)
+    metadata: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
