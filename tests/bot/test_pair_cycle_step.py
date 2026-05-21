@@ -11,13 +11,14 @@ from kolabi.bot.domain import (
     OrderRole,
     OrderPairSpec,
     PairCycleState,
+    PairIntentKind,
     Side,
     TailMode,
     TailSpec,
     TailState,
     TimeWindow,
 )
-from kolabi.bot.pair_cycle import PairIntentKind, step_pair
+from kolabi.bot.pair_cycle import step_pair
 
 
 def sample_pair() -> OrderPairSpec:
