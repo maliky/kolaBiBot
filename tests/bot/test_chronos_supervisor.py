@@ -70,7 +70,7 @@ def sample_state() -> StrategyState:
 def test_chronos_dedupes_duplicate_event() -> None:
     chronos = Chronos(state=sample_state())
     move = EggMove(
-        kind=EggMoveKind.HEAD_FAILED,
+        kind=EggMoveKind.NOT_PLAYED_CANCELED,
         occurred_at=datetime(2026, 5, 21, 12, 1, tzinfo=timezone.utc),
         symbol="PI_XBTUSD",
         pair_name="pair-b",
@@ -97,7 +97,7 @@ def test_chronos_private_terminal_precedence() -> None:
         event_id="evt-public",
     )
     private_terminal = EggMove(
-        kind=EggMoveKind.HEAD_FAILED,
+        kind=EggMoveKind.NOT_PLAYED_CANCELED,
         occurred_at=datetime(2026, 5, 21, 12, 1, 1, tzinfo=timezone.utc),
         symbol="PI_XBTUSD",
         pair_name="pair-b",
@@ -132,7 +132,7 @@ def test_chronos_dedupes_duplicate_command() -> None:
 def test_chronos_requires_identity_for_confirmation_match() -> None:
     chronos = Chronos(state=sample_state())
     private_move = EggMove(
-        kind=EggMoveKind.HEAD_ACKNOWLEDGED,
+        kind=EggMoveKind.NOT_PLAYED_NOR_CANCELED,
         occurred_at=datetime(2026, 5, 21, 12, 2, tzinfo=timezone.utc),
         symbol="PI_XBTUSD",
         is_private=True,
@@ -148,7 +148,7 @@ def test_chronos_requires_identity_for_confirmation_match() -> None:
 def test_chronos_pending_identity_timeout_is_typed() -> None:
     chronos = Chronos(state=sample_state(), pending_timeout=timedelta(seconds=5))
     private_move = EggMove(
-        kind=EggMoveKind.HEAD_ACKNOWLEDGED,
+        kind=EggMoveKind.NOT_PLAYED_NOR_CANCELED,
         occurred_at=datetime(2026, 5, 21, 12, 2, tzinfo=timezone.utc),
         symbol="PI_XBTUSD",
         is_private=True,
@@ -234,7 +234,7 @@ def test_closed_tail_can_hook_dependent_pair() -> None:
     )
     chronos = Chronos(state=state)
     move = EggMove(
-        kind=EggMoveKind.HEAD_CLOSED,
+        kind=EggMoveKind.PLAYED_AND_CANCELED,
         occurred_at=datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc),
         symbol="PI_XBTUSD",
         pair_name="pair-x",

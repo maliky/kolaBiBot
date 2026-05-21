@@ -111,7 +111,7 @@ def given_public_and_private_same_pair() -> tuple[Chronos, list[EggMove]]:
             event_id="evt-public",
         ),
         EggMove(
-            kind=EggMoveKind.HEAD_FAILED,
+            kind=EggMoveKind.NOT_PLAYED_CANCELED,
             occurred_at=datetime(2026, 5, 21, 12, 1, 1, tzinfo=timezone.utc),
             symbol="PI_XBTUSD",
             pair_name="pair-b",
@@ -125,7 +125,7 @@ def given_public_and_private_same_pair() -> tuple[Chronos, list[EggMove]]:
 def given_private_event_without_identity() -> tuple[Chronos, EggMove]:
     chronos = given_strategy_state_with_three_pairs()
     return chronos, EggMove(
-        kind=EggMoveKind.HEAD_ACKNOWLEDGED,
+        kind=EggMoveKind.NOT_PLAYED_NOR_CANCELED,
         occurred_at=datetime(2026, 5, 21, 12, 2, tzinfo=timezone.utc),
         symbol="PI_XBTUSD",
         is_private=True,
@@ -152,7 +152,7 @@ def given_closed_tail_and_dependent_pair() -> tuple[Chronos, EggMove]:
         )
     )
     move = EggMove(
-        kind=EggMoveKind.HEAD_CLOSED,
+        kind=EggMoveKind.PLAYED_AND_CANCELED,
         occurred_at=datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc),
         symbol="PI_XBTUSD",
         pair_name="pair-x",
@@ -167,7 +167,7 @@ def when_private_event_for_pair_b(chronos: Chronos) -> tuple[Chronos, tuple[Runt
     before = chronos.state
     commands = chronos.process_event(
         EggMove(
-            kind=EggMoveKind.HEAD_FAILED,
+            kind=EggMoveKind.NOT_PLAYED_CANCELED,
             occurred_at=datetime(2026, 5, 21, 12, 1, tzinfo=timezone.utc),
             symbol="PI_XBTUSD",
             pair_name="pair-b",
@@ -181,7 +181,7 @@ def when_private_event_for_pair_b(chronos: Chronos) -> tuple[Chronos, tuple[Runt
 @when("the same private fill event is processed twice", target_fixture="result")
 def when_same_private_fill_twice(chronos: Chronos) -> tuple[Chronos, tuple[RuntimeCommand, ...], tuple[RuntimeCommand, ...]]:
     move = EggMove(
-        kind=EggMoveKind.HEAD_FILLED,
+        kind=EggMoveKind.PLAYED_AND_CANCELED,
         occurred_at=datetime(2026, 5, 21, 12, 1, tzinfo=timezone.utc),
         symbol="PI_XBTUSD",
         pair_name="pair-b",

@@ -96,7 +96,7 @@ def test_step_strategy_updates_last_event_metadata() -> None:
     state = sample_state()
     occurred_at = datetime(2026, 5, 21, 12, 3, tzinfo=timezone.utc)
     move = EggMove(
-        kind=EggMoveKind.HEAD_FAILED,
+        kind=EggMoveKind.NOT_PLAYED_CANCELED,
         occurred_at=occurred_at,
         symbol="PI_XBTUSD",
         pair_name="pair-b",

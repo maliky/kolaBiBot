@@ -322,11 +322,8 @@ def _event_status(event: EggMove) -> str | None:
 
 def _is_private_terminal(event: EggMove) -> bool:
     return event.is_private and event.kind in {
-        EggMoveKind.HEAD_FAILED,
-        EggMoveKind.HEAD_CLOSED,
-        EggMoveKind.HEAD_CANCELED_AFTER_FILL,
-        EggMoveKind.HEAD_CANCELED_ZERO_FILL,
-        EggMoveKind.HEAD_FILLED,
+        EggMoveKind.NOT_PLAYED_CANCELED,
+        EggMoveKind.PLAYED_AND_CANCELED,
     }
 
 
