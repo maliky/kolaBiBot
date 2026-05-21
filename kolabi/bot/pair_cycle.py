@@ -21,6 +21,7 @@ from enum import StrEnum
 from typing import Protocol, cast
 
 from kolabi.bot.domain import (
+    classify_confirmed_move,
     ConfirmedOrder,
     EggMove,
     EggMoveKind,
@@ -49,16 +50,6 @@ from kolabi.shared.core.runtime_types import (
     to_decimal,
 )
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, PublicMarketState
-
-PAIR_EVENT_HEAD_HOOKED = EggMoveKind.HEAD_HOOKED.value
-PAIR_EVENT_HEAD_SUBMITTED = EggMoveKind.HEAD_SUBMITTED.value
-PAIR_EVENT_HEAD_PLAYED = EggMoveKind.HEAD_FILLED.value
-PAIR_EVENT_HEAD_PARTIAL_FILL = EggMoveKind.HEAD_PARTIAL_FILL.value
-PAIR_EVENT_HEAD_FAILED = EggMoveKind.HEAD_FAILED.value
-PAIR_EVENT_HEAD_CANCELED = EggMoveKind.HEAD_CANCELED_AFTER_FILL.value
-PAIR_EVENT_HEAD_CLOSED = EggMoveKind.HEAD_CLOSED.value
-PAIR_EVENT_HEAD_ACKNOWLEDGED = EggMoveKind.HEAD_ACKNOWLEDGED.value
-
 
 class PairIntentKind(StrEnum):
     NOOP = "noop"
@@ -252,7 +243,16 @@ def step_pair(
         )
         return next_state, ()
 
-    if move.kind == EggMoveKind.HEAD_FAILED:
+    if move.kind == EggMoveKind.NOT_PLAYED_NOR_CANCELED:
+        next_state = replace(
+            state,
+            head_state=HeadState.NEW,
+            head_identity=head_identity_from_move(state, move),
+            played_quantity=played_quantity_from_move(state, move),
+        )
+        return next_state, ()
+
+    if move.kind == EggMoveKind.NOT_PLAYED_CANCELED:
         next_state = replace(
             state,
             head_state=HeadState.FAILED,
@@ -263,81 +263,39 @@ def step_pair(
         )
         return next_state, ()
 
-    if move.kind == EggMoveKind.HEAD_CANCELED_ZERO_FILL:
-        if state.tail_state is not None:
+    if move.kind == EggMoveKind.PLAYED_NOT_CANCELED:
+        played_quantity = played_quantity_from_move(state, move)
+        if (
+            state.head_state == HeadState.LIVING
+            and state.played_quantity == played_quantity
+            and state.tail_state in {TailState.SUBMITTED, TailState.LIVING}
+        ):
             return state, ()
         next_state = replace(
             state,
-            head_state=HeadState.CLOSED,
+            head_state=HeadState.LIVING,
             head_identity=head_identity_from_move(state, move),
-            tail_state=TailState.HOOKED,
-            tail_mode=TailMode.FLYING,
-            played_quantity=played_quantity_from_move(state, move),
+            tail_state=TailState.LIVING,
+            tail_mode=TailMode.FLAPPING,
+            played_quantity=played_quantity,
         )
-        return next_state, (PairIntent(PairIntentKind.PLACE_TAIL),)
+        return next_state, (_tail_intent_for_state(next_state),)
 
-    if move.kind == EggMoveKind.HEAD_CANCELED_AFTER_FILL:
+    if move.kind == EggMoveKind.PLAYED_AND_CANCELED:
         played_quantity = played_quantity_from_move(state, move)
         if (
             state.head_state == HeadState.CLOSED
             and state.played_quantity == played_quantity
-            and state.tail_state in {TailState.LIVING, TailState.SUBMITTED}
+            and state.tail_mode == TailMode.FLYING
         ):
             return state, ()
         next_state = replace(
             state,
             head_state=HeadState.CLOSED,
             head_identity=head_identity_from_move(state, move),
-            tail_state=TailState.LIVING,
+            tail_state=_next_closed_tail_state(state),
             tail_mode=TailMode.FLYING,
             played_quantity=played_quantity,
-        )
-        return next_state, (_tail_intent_for_state(next_state),)
-
-    if move.kind == EggMoveKind.HEAD_FILLED:
-        played_quantity = played_quantity_from_move(state, move)
-        if (
-            state.head_state == HeadState.LIVING
-            and state.played_quantity == played_quantity
-            and state.tail_state in {TailState.HOOKED, TailState.SUBMITTED, TailState.LIVING}
-        ):
-            return state, ()
-        next_state = replace(
-            state,
-            head_state=HeadState.LIVING,
-            head_identity=head_identity_from_move(state, move),
-            tail_state=TailState.HOOKED,
-            tail_mode=TailMode.FLAPPING,
-            played_quantity=played_quantity,
-        )
-        return next_state, (_tail_intent_for_state(next_state),)
-
-    if move.kind == EggMoveKind.HEAD_PARTIAL_FILL:
-        played_quantity = played_quantity_from_move(state, move)
-        if (
-            state.head_state == HeadState.LIVING
-            and state.played_quantity == played_quantity
-            and state.tail_mode == TailMode.FLAPPING
-        ):
-            return state, ()
-        next_state = replace(
-            state,
-            head_state=HeadState.LIVING,
-            head_identity=head_identity_from_move(state, move),
-            tail_state=TailState.LIVING,
-            tail_mode=TailMode.FLAPPING,
-            played_quantity=played_quantity,
-        )
-        return next_state, (_tail_intent_for_state(next_state),)
-
-    if move.kind == EggMoveKind.HEAD_CLOSED:
-        next_state = replace(
-            state,
-            head_state=HeadState.CLOSED,
-            head_identity=head_identity_from_move(state, move),
-            tail_state=TailState.LIVING,
-            tail_mode=TailMode.FLYING,
-            played_quantity=played_quantity_from_move(state, move),
         )
         return next_state, (_tail_intent_for_state(next_state),)
 
@@ -346,12 +304,18 @@ def step_pair(
 
 def _tail_intent_for_state(state: PairCycleState) -> PairIntent:
     if state.tail_identity is not None or state.tail_state in {
-        TailState.HOOKED,
         TailState.SUBMITTED,
         TailState.LIVING,
     }:
         return PairIntent(PairIntentKind.AMEND_TAIL)
     return PairIntent(PairIntentKind.PLACE_TAIL)
+
+
+def _next_closed_tail_state(state: PairCycleState) -> TailState:
+    """Choisit l'etat du tail ferme selon son activation precedente."""
+    if state.tail_state in {TailState.SUBMITTED, TailState.LIVING}:
+        return TailState.LIVING
+    return TailState.HOOKED
 
 
 def intents_to_commands(
@@ -466,20 +430,8 @@ def egg_move_from_confirmed_head(
     *,
     symbol: str,
 ) -> EggMove:
-    kind = EggMoveKind.HEAD_ACKNOWLEDGED
-    if head.state == HeadState.FAILED:
-        kind = EggMoveKind.HEAD_FAILED
-    elif head.state == HeadState.CLOSED and head.filled_quantity > 0:
-        kind = EggMoveKind.HEAD_CANCELED_AFTER_FILL
-    elif head.state == HeadState.CLOSED:
-        kind = EggMoveKind.HEAD_CANCELED_ZERO_FILL
-    elif head.reason == OrderReason.PARTIAL_FILL:
-        kind = EggMoveKind.HEAD_PARTIAL_FILL
-    elif head.is_played:
-        kind = EggMoveKind.HEAD_FILLED
-
     return EggMove(
-        kind=kind,
+        kind=classify_confirmed_move(head),
         occurred_at=datetime.now(timezone.utc),
         symbol=symbol,
         reply={

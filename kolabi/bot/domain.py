@@ -120,13 +120,10 @@ class EggMoveKind(StrEnum):
     HEAD_SUBMITTED = "head_submitted"
     HEAD_UNADMITTED = "head_unadmitted"
     HEAD_ADMITTED = "head_admitted"
-    HEAD_FAILED = "head_failed"
-    HEAD_CANCELED_ZERO_FILL = "head_canceled_zero_fill"
-    HEAD_CANCELED_AFTER_FILL = "head_canceled_after_fill"
-    HEAD_PARTIAL_FILL = "head_partial_fill"
-    HEAD_FILLED = "head_filled"
-    HEAD_CLOSED = "head_closed"
-    HEAD_ACKNOWLEDGED = "head_acknowledged"
+    NOT_PLAYED_NOR_CANCELED = "not_played_nor_canceled"
+    NOT_PLAYED_CANCELED = "not_played_canceled"
+    PLAYED_NOT_CANCELED = "played_not_canceled"
+    PLAYED_AND_CANCELED = "played_and_canceled"
 
 
 PLAYED_REASONS = frozenset(
@@ -227,6 +224,11 @@ class ConfirmedOrder:
     def is_played(self) -> bool:
         """Le jeu est rempli semantiquement, meme avec zero fill."""
         return self.reason in PLAYED_REASONS
+
+    @property
+    def is_canceled(self) -> bool:
+        """Le broker a termine l'ordre sans le laisser ouvert."""
+        return self.state in {HeadState.FAILED, HeadState.CLOSED}
 
     @property
     def is_terminal(self) -> bool:
@@ -347,3 +349,14 @@ def tail_mode_for_head(head: ConfirmedOrder) -> TailMode | None:
     if head.state == HeadState.CLOSED:
         return TailMode.FLYING
     return None
+
+
+def classify_confirmed_move(head: ConfirmedOrder) -> EggMoveKind:
+    """Classe un ordre confirme selon la table canonique jeu/annulation."""
+    if head.is_played and head.is_canceled:
+        return EggMoveKind.PLAYED_AND_CANCELED
+    if head.is_played:
+        return EggMoveKind.PLAYED_NOT_CANCELED
+    if head.is_canceled:
+        return EggMoveKind.NOT_PLAYED_CANCELED
+    return EggMoveKind.NOT_PLAYED_NOR_CANCELED
