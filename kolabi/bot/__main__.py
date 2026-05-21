@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 import json
 import sys
 from pathlib import Path
 
 from kolabi.bot.domain import StrategySpec
 from kolabi.bot.service import BotConfig, BotService
-from kolabi.bot.tsv import read_strategy_file, strategy_from_run_once_args
+from kolabi.bot.tsv import (
+    read_strategy_file,
+    strategy_from_run_once_args,
+    strategy_to_pretty_dict,
+)
 
 
 def add_runtime_options(parser: argparse.ArgumentParser) -> None:
@@ -338,7 +341,7 @@ def run_command(args: argparse.Namespace) -> int:
         return 1
 
     if args.dry_run:
-        print(json.dumps(asdict(strategy), indent=2, sort_keys=True, default=str))
+        print(json.dumps(strategy_to_pretty_dict(strategy), indent=2, sort_keys=True, default=str))
         return 0
 
     service = build_service(args)
@@ -358,7 +361,7 @@ def run_once_command(args: argparse.Namespace) -> int:
     strategy = build_single_strategy(args)
 
     if args.dry_run:
-        print(json.dumps(asdict(strategy), indent=2, sort_keys=True, default=str))
+        print(json.dumps(strategy_to_pretty_dict(strategy), indent=2, sort_keys=True, default=str))
         return 0
 
     service = build_service(args)

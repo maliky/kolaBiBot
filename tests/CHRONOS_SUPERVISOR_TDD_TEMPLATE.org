@@ -1,0 +1,218 @@
+* Chronos Supervisor Test-Development Rules
+
+** 1. Layer responsibility rules
+
+*** Rule 1.1 — Chronos shall supervise, route, cache, and schedule.
+
+Chronos owns =StrategyState=, receives facts/events, applies ordering/deduplication/precedence rules, and forwards typed events to Isis.
+
+*** Rule 1.2 — Chronos shall not decide lifecycle semantics.
+
+Chronos must not decide whether a head is played, failed, closed, or whether a tail should exist.
+
+*** Rule 1.3 — Isis shall be the only semantic decision layer.
+
+Isis applies:
+
+#+begin_src text
+StrategyState + EggMove -> StrategyState + RuntimeCommand(s)
+#+end_src
+
+*** Rule 1.4 — Ogun shall be the only command execution layer.
+
+Ogun receives =RuntimeCommand= values and executes them through adapters.
+
+*** Rule 1.5 — Chronos shall not build exchange payloads.
+
+Exchange-specific payload construction belongs to Ogun/adapters, not Chronos.
+
+** 2. Canonical vocabulary rules
+
+*** Rule 2.1 — The strategy container shall be named =StrategySpec=.
+
+*** Rule 2.2 — The pair container shall be named =OrderPairSpec=.
+
+*** Rule 2.3 — The pair runtime state shall be named =PairCycleState=.
+
+*** Rule 2.4 — The strategy runtime state shall be named =StrategyState=.
+
+*** Rule 2.5 — The typed event dataclass shall be named =EggMove=.
+
+*** Rule 2.6 — The typed command value shall be named =RuntimeCommand=.
+
+*** Rule 2.7 — =Chronos= shall mean strategy supervisor.
+
+*** Rule 2.8 — =Ogun= shall mean command executor.
+
+** 3. State cache rules
+
+*** Rule 3.1 — Chronos shall maintain persistent =StrategyState=.
+
+*** Rule 3.2 — The state cache shall include =strategy_id=.
+
+*** Rule 3.3 — The state cache shall include =pair_id=.
+
+*** Rule 3.4 — The state cache shall include =head_client_order_id=.
+
+*** Rule 3.5 — The state cache shall include =tail_client_order_id=.
+
+*** Rule 3.6 — The state cache shall include =head_state=.
+
+*** Rule 3.7 — The state cache shall include =tail_state=.
+
+*** Rule 3.8 — The state cache may include =tail_mode=.
+
+*** Rule 3.9 — The state cache shall include =played_quantity=.
+
+*** Rule 3.10 — The state cache shall include =last_processed_private_event_id=.
+
+*** Rule 3.11 — The state cache shall include =last_processed_private_event_ts=.
+
+*** Rule 3.12 — The state cache shall include =last_emitted_command_id=.
+
+*** Rule 3.13 — The state cache shall include =last_emitted_command_ts=.
+
+** 4. Event ordering and deduplication rules
+
+*** Rule 4.1 — Private terminal events shall win over public price events for the same pair.
+
+*** Rule 4.2 — Duplicate events shall be detected first by =(pair_id, event_id)=.
+
+*** Rule 4.3 — Duplicate events shall fall back to =(order_id, status, ts_bucket)= when =event_id= is unavailable.
+
+*** Rule 4.4 — Stale events shall be ignored.
+
+*** Rule 4.5 — Ignored stale events shall be recorded as =DuplicateEventIgnored=.
+
+*** Rule 4.6 — Events without sufficient identity shall be held in a pending queue.
+
+*** Rule 4.7 — Pending identity events shall fail typed after timeout.
+
+*** Rule 4.8 — Missing identity failure shall not emit exchange commands.
+
+** 5. Command emission rules
+
+*** Rule 5.1 — Command deduplication shall use =(pair_id, semantic_action, client_order_id)=.
+
+*** Rule 5.2 — One loop tick shall keep only the highest-precedence command per pair.
+
+*** Rule 5.3 — Chronos may forward =PlaceHead=.
+
+*** Rule 5.4 — Chronos may forward =AmendHead=.
+
+*** Rule 5.5 — Chronos may forward =CloseHead=.
+
+*** Rule 5.6 — Chronos may forward =FailHead=.
+
+*** Rule 5.7 — Chronos may forward =PlaceTail=.
+
+*** Rule 5.8 — Chronos may forward =AmendTail=.
+
+*** Rule 5.9 — Chronos may forward =CloseTail=.
+
+*** Rule 5.10 — Chronos may forward =FailTail=.
+
+*** Rule 5.11 — Chronos may forward =Ignore=.
+
+*** Rule 5.12 — Chronos shall emit persistence intent instead of performing persistence IO inline.
+
+*** Rule 5.13 — Persistence IO shall be performed by an adapter layer.
+
+** 6. Reducer boundary rules
+
+*** Rule 6.1 — =step_pair= shall own pair lifecycle transitions.
+
+*** Rule 6.2 — =step_strategy= shall own pair routing and strategy-state replacement.
+
+*** Rule 6.3 — Exchange-specific mapping shall stay outside reducers.
+
+*** Rule 6.4 — Reducers shall not read DB.
+
+*** Rule 6.5 — Reducers shall not call REST.
+
+*** Rule 6.6 — Reducers shall not sleep, mutate, or perform IO.
+
+** 7. Tail and chaining rules
+
+*** Rule 7.1 — A tail may be protective.
+
+*** Rule 7.2 — A tail may be an entry tool.
+
+*** Rule 7.3 — A closed tail may trigger a dependent pair.
+
+*** Rule 7.4 — A closed head with zero fill may activate a tail when the strategy defines such chaining.
+
+*** Rule 7.5 — A failed head shall not activate a tail.
+
+*** Rule 7.6 — The word =closed= shall be preferred over =canceled= in domain vocabulary unless referring to raw exchange terminology.
+
+** 8. Required BDD scenarios
+
+*** Scenario 8.1 — Event routing to one pair
+
+Given three pairs in =StrategyState=.
+When a private event for pair B arrives.
+Then only pair B state changes.
+And emitted commands for pairs A and C are empty.
+
+*** Scenario 8.2 — Duplicate private fill event
+
+Given a duplicated private fill event.
+When Chronos processes it twice.
+Then Chronos emits commands only once.
+And Chronos records the second event as =DuplicateEventIgnored=.
+
+*** Scenario 8.3 — Private terminal event precedence
+
+Given a public price trigger and a private terminal event for the same pair.
+When both are seen in the same cycle window.
+Then the private terminal event wins.
+And the public-trigger event is recorded as ignored.
+
+*** Scenario 8.4 — REST ACK without private confirmation
+
+Given a command ACK without private confirmation.
+When timeout expires.
+Then pair state remains =admitted=.
+And a typed supervision warning event is emitted.
+
+*** Scenario 8.5 — Tail chaining
+
+Given tail chaining is enabled.
+When the tail for pair X is =closed=.
+Then the hook condition for dependent pair Y becomes eligible.
+And Chronos forwards the next typed command according to Isis reducer output.
+
+** 9. Required unit tests
+
+*** Rule 9.1 — =test_step_strategy_routes_event_to_single_pair= shall pass.
+
+*** Rule 9.2 — =test_step_strategy_preserves_other_pairs= shall pass.
+
+*** Rule 9.3 — =test_chronos_dedupes_duplicate_event= shall pass.
+
+*** Rule 9.4 — =test_chronos_private_terminal_precedence= shall pass.
+
+*** Rule 9.5 — =test_chronos_dedupes_duplicate_command= shall pass.
+
+*** Rule 9.6 — =test_chronos_requires_identity_for_confirmation_match= shall pass.
+
+*** Rule 9.7 — =test_chronos_emits_no_exchange_payloads_directly= shall pass.
+
+*** Rule 9.8 — =test_chronos_emits_typed_runtime_commands_only= shall pass.
+
+** 10. Acceptance gate
+
+*** Rule 10.1 — The supervisor layer shall not be accepted until the state cache schema is fixed and tested.
+
+*** Rule 10.2 — The supervisor layer shall not be accepted until event precedence and event deduplication are tested.
+
+*** Rule 10.3 — The supervisor layer shall not be accepted until command deduplication and command conflict resolution are tested.
+
+*** Rule 10.4 — The supervisor layer shall not be accepted until reducer delegation is tested.
+
+*** Rule 10.5 — The supervisor layer shall not be accepted until at least one chaining scenario is green.
+
+*** Rule 10.6 — No test shall pass by relying on exchange-specific payloads inside Chronos.
+
+*** Rule 10.7 — No test shall pass by allowing Chronos to bypass Isis for lifecycle decisions.

@@ -116,8 +116,26 @@ def strategy_from_run_once_args(args: object) -> StrategySpec:
 
 
 def strategy_to_pretty_dict(strategy: StrategySpec) -> dict[str, object]:
-    """Retourne une structure simple a afficher en dry-run."""
-    return asdict(strategy)
+    """Retourne une structure dry-run stable avec alias canoniques."""
+    payload = asdict(strategy)
+    pairs = payload.get("pairs", [])
+    if isinstance(pairs, (list, tuple)):
+        normalized_pairs = []
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                normalized_pairs.append(pair)
+                continue
+            if "head_price" in pair:
+                pair["head_price_spec"] = pair["head_price"]
+            if "head_price_type" in pair:
+                pair["head_price_spec_type"] = pair["head_price_type"]
+            if "head_quantity" in pair:
+                pair["head_quantity_spec"] = pair["head_quantity"]
+            if "head_quantity_type" in pair:
+                pair["head_quantity_spec_type"] = pair["head_quantity_type"]
+            normalized_pairs.append(pair)
+        payload["pairs"] = normalized_pairs
+    return payload
 
 
 def normalize_legacy_row(row: pd.Series) -> dict[str, object]:
