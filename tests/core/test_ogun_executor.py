@@ -36,6 +36,20 @@ def amend_command(**order: object) -> RuntimeCommand:
     )
 
 
+class _FakeCryptoApi:
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, object], dict[str, object]]] = []
+
+    def amend(self, order: dict[str, object], **params: object) -> dict[str, object]:
+        self.calls.append((order, params))
+        return {"status": "amended", "order": order, "params": params}
+
+
+class _FakeBargain:
+    def __init__(self) -> None:
+        self.crypto_api = _FakeCryptoApi()
+
+
 def cancel_command(**order: object) -> RuntimeCommand:
     payload = {"clOrdID": "CID-T"}
     payload.update(order)
@@ -186,6 +200,44 @@ def test_execute_amend_dispatches_to_amend_prices(monkeypatch: pytest.MonkeyPatc
     }
 
 
+def test_execute_quantity_only_amend_dispatches_to_amend_orderqty(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_amend_orderqty(brg: object, order: dict[str, object], new_qty: float) -> dict[str, object]:
+        captured.update({"brg": brg, "order": order, "new_qty": new_qty})
+        return {"status": "qty-amended"}
+
+    monkeypatch.setattr("kolabi.runtime.kola.ogun_executor.amend_orderQty", fake_amend_orderqty)
+
+    result = execute_runtime_command(
+        object(),
+        amend_command(newPrice=None, newQty=Decimal("3")),
+        amend_absdelta=0.5,
+    )
+
+    assert result == {"status": "qty-amended"}
+    assert captured["order"] == {"orderID": "OID-T", "orderQty": 3.0}
+    assert captured["new_qty"] == 3.0
+
+
+def test_execute_price_and_quantity_amend_uses_combined_adapter_call() -> None:
+    brg = _FakeBargain()
+
+    result = execute_runtime_command(
+        brg,
+        amend_command(ordType="StopLimit", newPrice=Decimal("101.0"), newQty=Decimal("3")),
+        amend_absdelta=0.5,
+    )
+
+    assert result["status"] == "amended"
+    assert brg.crypto_api.calls == [
+        (
+            {"orderID": "OID-T"},
+            {"orderID": "OID-T", "orderQty": 3.0, "price": 101.0, "stopPx": 100.5},
+        )
+    ]
+
+
 def test_execute_cancel_dispatches_to_cancel_order(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -222,6 +274,15 @@ def test_missing_required_field_raises_before_helper_call(monkeypatch: pytest.Mo
         )
 
     assert called is False
+
+
+def test_amend_requires_at_least_one_change() -> None:
+    with pytest.raises(ValueError, match="at least one planned change"):
+        execute_runtime_command(
+            object(),
+            amend_command(newPrice=None),
+            amend_absdelta=0.5,
+        )
 
 
 def test_unsupported_command_kind_raises() -> None:

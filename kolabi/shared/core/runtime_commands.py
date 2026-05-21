@@ -96,9 +96,12 @@ def command_payload_for_role(
             "ordType": str(order["ordType"]),
             "side": str(order["side"]),
             "orderID": str(order["orderID"]),
-            "newPrice": _as_float_price(order["newPrice"]),
             "text": str(order.get("text", "")),
         }
+        if "newPrice" in order:
+            amend_request["newPrice"] = _as_float_price(order["newPrice"])
+        if "newQty" in order:
+            amend_request["newQty"] = order["newQty"]
         request = amend_request
     else:
         request = _new_order_request_from(command)

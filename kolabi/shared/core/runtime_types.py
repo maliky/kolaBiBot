@@ -148,6 +148,7 @@ class OrderDict(TypedDict, total=False):
     clOrdID: str
     orderID: str
     newPrice: LimitPrice | float
+    newQty: Quantity
     text: str | None
     oDelta: PriceOffset | float
     cumQty: FilledQty | float
@@ -173,6 +174,7 @@ class AmendOrderRequest(TypedDict, total=False):
     side: str
     orderID: str
     newPrice: LimitPrice | float
+    newQty: Quantity
     text: str | None
 
 

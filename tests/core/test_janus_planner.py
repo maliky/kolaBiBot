@@ -130,6 +130,7 @@ def test_place_tail_translates_to_one_tail_place_command() -> None:
 
 def test_amend_tail_with_full_identity_translates_to_one_amend_command() -> None:
     state = sample_state(
+        played_quantity=Decimal("1"),
         tail_identity=OrderIdentity(
             pair_name="pair-a",
             role="tail",
@@ -151,12 +152,13 @@ def test_amend_tail_with_full_identity_translates_to_one_amend_command() -> None
         "side": "sell",
         "ordType": "Stop",
         "pair_name": "pair-a",
-        "orderQty": Decimal("2"),
+        "orderQty": Decimal("1"),
         "stopPx": Decimal("99.0"),
         "oDelta": Decimal("0.5"),
         "clOrdID": "CID-T",
         "orderID": "OID-T",
         "newPrice": Decimal("99.0"),
+        "newQty": Decimal("1"),
     }
 
 

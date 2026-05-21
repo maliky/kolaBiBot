@@ -80,6 +80,9 @@ def tail_amend_order_dict(state: PairCycleState) -> OrderDict:
     order["clOrdID"] = state.tail_identity.client_order_id
     order["orderID"] = state.tail_identity.exchange_order_id
     order["newPrice"] = cast(StopPrice, to_decimal(state.pair.tail_price_spec))
+    quantity = resolve_tail_quantity(state)
+    if quantity is not None:
+        order["newQty"] = cast(OrderQty, to_decimal(quantity))
     return order
 
 
