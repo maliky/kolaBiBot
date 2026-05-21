@@ -140,7 +140,9 @@ Exchange-specific payload construction belongs to Ogun/adapters, not Chronos.
 
 *** Rule 7.3 — A closed tail may trigger a dependent pair.
 
-*** Rule 7.4 — A closed head with zero fill may activate a tail when the strategy defines such chaining.
+*** Rule 7.4 — A head may activate tail logic only when its confirmed move is strategically played.
+
+This includes =played_not_canceled= and =played_and_canceled=, even when the played quantity is zero.
 
 *** Rule 7.5 — A failed head shall not activate a tail.
 
