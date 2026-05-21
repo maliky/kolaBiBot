@@ -67,6 +67,22 @@ def tail_order_dict(state: PairCycleState) -> OrderDict:
     return order
 
 
+def tail_amend_order_dict(state: PairCycleState) -> OrderDict:
+    """Build an amend payload from runtime tail identity and target price."""
+    if state.tail_identity is None:
+        raise ValueError("tail amend requires an existing tail identity")
+    if not state.tail_identity.client_order_id or not state.tail_identity.exchange_order_id:
+        raise ValueError("tail amend requires both client and exchange order IDs")
+    if state.pair.tail_price_spec is None:
+        raise ValueError("tail amend requires a planned tail price")
+
+    order = tail_order_dict(state)
+    order["clOrdID"] = state.tail_identity.client_order_id
+    order["orderID"] = state.tail_identity.exchange_order_id
+    order["newPrice"] = cast(StopPrice, to_decimal(state.pair.tail_price_spec))
+    return order
+
+
 def tail_command(
     state: PairCycleState,
     *,
@@ -74,10 +90,11 @@ def tail_command(
     kind: RuntimeCommandKind,
 ) -> RuntimeCommand:
     """Build a tail command for placement or amendment from runtime state."""
+    order = tail_amend_order_dict(state) if kind == RuntimeCommandKind.AMEND else tail_order_dict(state)
     return RuntimeCommand(
         kind=kind,
         symbol=symbol,
-        order=tail_order_dict(state),
+        order=order,
         reason=OrderRole.TAIL.value,
     )
 

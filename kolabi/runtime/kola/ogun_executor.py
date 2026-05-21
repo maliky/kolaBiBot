@@ -25,7 +25,7 @@ from kolabi.runtime.kola.orders.orders import (
     place_stop,
 )
 from kolabi.shared.core.runtime_commands import command_order_type
-from kolabi.shared.core.runtime_types import OrderDict, RuntimeCommand, RuntimeCommandKind
+from kolabi.shared.core.runtime_types import OrderDict, RuntimeCommand, RuntimeCommandKind, decimal_to_float
 
 
 def execute_runtime_command(
@@ -35,6 +35,13 @@ def execute_runtime_command(
     amend_absdelta: float,
 ) -> Any:
     order = cast(OrderDict, dict(command.order or {}))
+    if command.kind not in {
+        RuntimeCommandKind.PLACE,
+        RuntimeCommandKind.AMEND,
+        RuntimeCommandKind.CANCEL,
+    }:
+        raise ValueError(f"Unsupported runtime command kind: {command.kind!r}")
+
     ord_type = command_order_type(command)
     order.pop("ordType", None)
 
@@ -58,7 +65,7 @@ def execute_runtime_command(
         )
 
     side = str(order.pop("side"))
-    order_qty = _quantity_from_order(order)
+    order_qty = _as_float_quantity(_quantity_from_order(order))
     opts = cast(dict[str, Any], order)
 
     if ord_type == "Market":
@@ -97,3 +104,11 @@ def _as_float_price(value: object) -> float:
     if isinstance(value, (int, float, str)):
         return float(Decimal(str(value)))
     raise TypeError(f"Unsupported price value type: {type(value)!r}")
+
+
+def _as_float_quantity(value: object) -> float:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (int, float, str)):
+        return decimal_to_float(value)
+    raise TypeError(f"Unsupported quantity value type: {type(value)!r}")
