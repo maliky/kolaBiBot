@@ -1,0 +1,174 @@
+* Janus Translation Test-Development Rules
+
+** 1. Layer responsibility rules
+
+*** Rule 1.1 — Janus shall be the pure planning layer.
+
+Janus receives ordered intents plus routed state/context and returns typed =RuntimeCommand= values.
+
+*** Rule 1.2 — Janus shall not execute commands.
+
+Janus must not call Ogun, exchange adapters, REST APIs, WebSocket clients, databases, or any external service.
+
+*** Rule 1.3 — Janus shall not mutate strategy state.
+
+Janus must not mutate =PairCycleState=, =StrategyState=, or any reducer-owned runtime state.
+
+*** Rule 1.4 — Janus shall not inspect live exchange state.
+
+Janus plans from supplied context only. Live exchange inspection belongs to Ogun, adapters, or supervisor-side services.
+
+*** Rule 1.5 — Janus shall translate intent into command.
+
+The core Janus contract is:
+
+#+begin_src text
+PairCycleState + ordered PairIntent(s) + symbol/context
+  -> ordered RuntimeCommand(s)
+#+end_src
+
+** 2. Input and output contract rules
+
+*** Rule 2.1 — Janus shall consume ordered =PairIntent= values.
+
+Input order is semantically meaningful and must be preserved.
+
+*** Rule 2.2 — Janus shall consume enough routed context to build commands.
+
+Required context may include pair state, symbol, pair name, role, known order identity, and canonical order data.
+
+*** Rule 2.3 — Janus shall return ordered =RuntimeCommand= values.
+
+Janus output is a command plan, not an execution result.
+
+*** Rule 2.4 — Janus shall return no strategy-state update.
+
+Any state update must happen in Isis, =step_pair()=, Chronos, or later event processing, not in Janus.
+
+** 3. Ordering and determinism rules
+
+*** Rule 3.1 — Janus shall preserve intent order exactly.
+
+If intents are received in order =A, B, C=, planned commands must follow the same order unless an explicit error stops planning.
+
+*** Rule 3.2 — Janus shall be deterministic.
+
+Given the same pair state, same intents, and same context, Janus must return equivalent commands every time.
+
+*** Rule 3.3 — Janus shall not depend on mutable object identity.
+
+Tests should compare command values, not Python object identity.
+
+** 4. Head planning rules
+
+*** Rule 4.1 — =PLACE_HEAD= shall translate to one =PLACE= runtime command.
+
+The command must carry the head role and a canonical head order payload.
+
+*** Rule 4.2 — =PLACE_HEAD= shall not execute the order.
+
+Planning a head order only produces a =RuntimeCommand=.
+
+*** Rule 4.3 — =AMEND_HEAD= shall not be planned unless emitted by a reducer.
+
+Tests should not invent =AMEND_HEAD= behavior before the reducer emits that intent.
+
+** 5. Tail planning rules
+
+*** Rule 5.1 — =PLACE_TAIL= shall translate to one =PLACE= runtime command.
+
+The command must use current tail-capable state and a canonical tail payload.
+
+*** Rule 5.2 — =AMEND_TAIL= requires an existing tail identity.
+
+If no tail identity exists, Janus must raise a deterministic error.
+
+*** Rule 5.3 — =AMEND_TAIL= with partial identity shall fail loudly.
+
+If one required identity is present and another required identity is missing, Janus must raise a stable error.
+
+*** Rule 5.4 — Janus shall not silently downgrade =AMEND_TAIL= to =PLACE_TAIL=.
+
+Downgrading amend to place hides lifecycle confusion and should not be part of the clean Janus contract.
+
+** 6. Exchange-agnostic rules
+
+*** Rule 6.1 — Janus shall not know Kraken-specific quirks.
+
+Kraken-specific =ordType=, flags, endpoint details, and payload quirks belong to Ogun or exchange adapters.
+
+*** Rule 6.2 — Janus shall not validate exchange minimum quantity.
+
+Minimum quantity, tick size, precision, margin, and exchange-specific constraints belong outside Janus.
+
+*** Rule 6.3 — Janus shall build canonical internal command payloads.
+
+The payload should be suitable for later adapter translation, not already shaped as an exchange-specific request.
+
+** 7. Failure rules
+
+*** Rule 7.1 — Unsupported intent kinds shall raise deterministic exceptions.
+
+Janus must not ignore unknown intents silently.
+
+*** Rule 7.2 — Missing required state shall fail loudly.
+
+If Janus cannot build a valid command because required state is absent, it must raise a stable error.
+
+*** Rule 7.3 — Failure messages shall be stable enough for tests.
+
+Tests should assert error type and key message fragment, not fragile full prose unless deliberately standardized.
+
+** 8. Test placement rules
+
+*** Rule 8.1 — Janus tests shall cover planning only.
+
+Tests should verify intent-to-command translation, ordering, determinism, and failure behavior.
+
+*** Rule 8.2 — Janus tests shall not cover execution.
+
+Adapter calls, exchange responses, REST failures, and command execution belong to Ogun tests.
+
+*** Rule 8.3 — Janus tests shall not cover pair lifecycle semantics.
+
+Whether a head or tail should exist is decided before Janus, mainly by =step_pair()= and Isis.
+
+*** Rule 8.4 — Janus tests shall not cover supervisor behavior.
+
+Deduplication, precedence, scheduling, and identity timeout belong to Chronos.
+
+** 9. Minimum baseline test rules
+
+*** Rule 9.1 — Test that Janus preserves intent order.
+
+Multiple intents must produce commands in the same order.
+
+*** Rule 9.2 — Test that =PLACE_HEAD= translates correctly.
+
+The result should be one head =PLACE= runtime command with canonical payload.
+
+*** Rule 9.3 — Test that =PLACE_TAIL= translates correctly.
+
+The result should be one tail =PLACE= runtime command with canonical payload.
+
+*** Rule 9.4 — Test that =AMEND_TAIL= without identity raises.
+
+There should be no silent fallback to =PLACE_TAIL=.
+
+*** Rule 9.5 — Test that =AMEND_TAIL= with partial identity raises.
+
+Missing required identity must produce deterministic failure.
+
+*** Rule 9.6 — Test that unsupported intents raise.
+
+Unknown planner input must not be ignored.
+
+** 10. BDD rules
+
+*** Rule 10.1 — Janus does not need BDD by default.
+
+Janus is an internal planner layer, so unit tests are sufficient unless a planner behavior becomes operator-visible.
+
+*** Rule 10.2 — BDD should be added only for visible planning policies.
+
+BDD may be justified later if operators can observe planning behavior, such as command ordering or deterministic refusal to plan unsafe amendments.

@@ -1,0 +1,161 @@
+* Ogun Execution Test-Development Rules 
+
+** 1. Layer responsibility rules
+
+*** Rule 1.1 — Ogun shall be the command executor layer.
+
+Ogun receives typed =RuntimeCommand= values plus an exchange-facing execution context.
+
+*** Rule 1.2 — Ogun shall not plan strategy semantics.
+
+Ogun must not decide head/tail lifecycle, pair state, strategy state, activation, failure, or closure semantics.
+
+*** Rule 1.3 — Ogun shall not reclassify lifecycle states.
+
+Played, failed, closed, canceled, fulfilled, or pending meanings belong outside Ogun.
+
+*** Rule 1.4 — Ogun shall call exchange-facing helpers or adapters.
+
+Ogun dispatches commands to the proper helper/adapter and returns acknowledgements or raises execution errors.
+
+*** Rule 1.5 — Ogun shall not mutate input commands.
+
+The received =RuntimeCommand= must remain unchanged.
+
+** 2. Input and output contract rules
+
+*** Rule 2.1 — Ogun shall consume typed =RuntimeCommand= values.
+
+Untyped dictionaries should not be treated as valid Ogun input.
+
+*** Rule 2.2 — Ogun shall consume an execution context.
+
+The context provides exchange-facing helpers, adapters, credentials, or adapter handles as needed by tests.
+
+*** Rule 2.3 — Ogun shall return broker acknowledgement payloads.
+
+Successful execution returns the adapter/broker acknowledgement.
+
+*** Rule 2.4 — Ogun shall raise execution errors on failure.
+
+Failures should be explicit and testable.
+
+** 3. Dispatch rules
+
+*** Rule 3.1 — Ogun shall dispatch by =RuntimeCommandKind=.
+
+Command kind decides the broad execution path: =PLACE=, =AMEND=, =CANCEL=, etc.
+
+*** Rule 3.2 — Ogun shall dispatch place commands by canonical order type.
+
+Market, limit, stop-family, and other supported order types must route to the correct helper.
+
+*** Rule 3.3 — Unsupported command kinds shall fail loudly.
+
+Unknown command kinds must not be ignored.
+
+*** Rule 3.4 — Unsupported order types shall fail loudly.
+
+Unknown order types must not be sent to the adapter.
+
+** 4. Command execution rules
+
+*** Rule 4.1 — =PLACE Market= shall call the market placement helper.
+
+The helper receives normalized quantity and side.
+
+*** Rule 4.2 — =PLACE Limit= shall call the limit placement helper.
+
+The helper receives explicit price, normalized quantity, and side.
+
+*** Rule 4.3 — Stop-family place commands shall call the appropriate stop helper.
+
+Stop-market, stop-limit, or related canonical types should dispatch through their dedicated supported path.
+
+*** Rule 4.4 — =AMEND= shall require a target order identity.
+
+Ogun must not amend without a clear target order id.
+
+*** Rule 4.5 — =AMEND= shall require at least one planned change.
+
+Price amendment and quantity amendment are both valid if the command schema supports them.
+
+*** Rule 4.6 — =AMEND= shall call the amend helper.
+
+The helper receives target identity and planned amendment fields.
+
+*** Rule 4.7 — =CANCEL= shall require cancelable identity.
+
+Ogun must not cancel without an explicit cancelable order identity.
+
+*** Rule 4.8 — =CANCEL= shall call the cancel helper.
+
+The helper receives the cancelable identity.
+
+** 5. Normalization and validation rules
+
+*** Rule 5.1 — Ogun shall normalize numeric fields at the adapter boundary.
+
+For example, =Decimal= may be converted to =float= only at the last execution boundary.
+
+*** Rule 5.2 — Ogun shall validate required fields before adapter calls.
+
+Missing required fields must raise stable exceptions.
+
+*** Rule 5.3 — Ogun shall not validate strategy-level meaning.
+
+Ogun validates executability of the command, not whether the strategy should have emitted it.
+
+*** Rule 5.4 — Ogun shall know exchange minimum quantity or tick size only through adapter contract.
+
+If the adapter exposes this validation, Ogun may use it. Otherwise, Ogun should not embed exchange-specific rules.
+
+** 6. Error-handling rules
+
+*** Rule 6.1 — Adapter exceptions shall either bubble unchanged or be narrowly wrapped.
+
+Tests should enforce one chosen policy.
+
+*** Rule 6.2 — Ogun shall not retry failed calls by default.
+
+Retry policy belongs to a supervisor or explicit execution wrapper.
+
+*** Rule 6.3 — Ogun shall not persist acknowledgements.
+
+Persistence belongs outside Ogun unless explicitly wrapped by another boundary.
+
+*** Rule 6.4 — Ogun shall not log as part of pure execution tests.
+
+Logging may be tested only if an explicit logging boundary is added.
+
+** 7. Minimum unit-test rules
+
+*** Rule 7.1 — Test market placement dispatch.
+
+*** Rule 7.2 — Test limit placement dispatch.
+
+*** Rule 7.3 — Test stop-family placement dispatch.
+
+*** Rule 7.4 — Test amend dispatch.
+
+*** Rule 7.5 — Test quantity amendment if the command schema supports it.
+
+*** Rule 7.6 — Test cancel dispatch.
+
+*** Rule 7.7 — Test missing required field failures.
+
+*** Rule 7.8 — Test unsupported command kind failure.
+
+*** Rule 7.9 — Test unsupported order type failure.
+
+*** Rule 7.10 — Test that input commands are not mutated.
+
+** 8. BDD rules
+
+*** Rule 8.1 — Ogun does not need BDD by default.
+
+Unit tests are sufficient while Ogun remains an internal execution boundary.
+
+*** Rule 8.2 — Add BDD only if execution behavior becomes operator-visible.
+
+BDD may be added later for visible execution policy, not for ordinary adapter dispatch.
