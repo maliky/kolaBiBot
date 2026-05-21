@@ -369,7 +369,7 @@ def intents_to_commands(
                     kind=RuntimeCommandKind.PLACE,
                     symbol=symbol,
                     order=head_order_dict(state.pair),
-                    reason=OrderRole.PRIMARY.value,
+                    reason=OrderRole.HEAD.value,
                 )
             )
         elif intent.kind == PairIntentKind.PLACE_TAIL:
@@ -396,7 +396,7 @@ def intents_to_commands(
 
 
 def resolve_quantity(pair: OrderPairSpec) -> float:
-    quantity = pair.head.quantity
+    quantity = pair.head_quantity
     if quantity is None or quantity <= 0:
         raise ValueError(f"Order pair '{pair.name}' needs a positive head quantity")
     return float(to_decimal(quantity))

@@ -15,7 +15,7 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import cast
 
-from kolabi.bot.domain import OrderPairSpec, PairCycleState, Side
+from kolabi.bot.domain import OrderPairSpec, PairCycleState, Side, opposite_side
 from kolabi.shared.core.runtime_types import (
     OrderDict,
     OrderQty,
@@ -28,22 +28,14 @@ from kolabi.shared.core.runtime_types import (
     to_decimal,
 )
 
-
-def opposite_side(side: Side) -> Side:
-    """Return the opposite side for dependent tail orders."""
-    if side == Side.BUY:
-        return Side.SELL
-    return Side.BUY
-
-
 def head_order_dict(pair: OrderPairSpec, *, client_order_id: str | None = None) -> OrderDict:
     """Build the head order payload from the static pair specification."""
     order: OrderDict = {
         "side": pair.head.side.value,
         "ordType": pair.head.order_type,
     }
-    if pair.head.quantity is not None:
-        order["orderQty"] = cast(OrderQty, to_decimal(pair.head.quantity))
+    if pair.head_quantity is not None:
+        order["orderQty"] = cast(OrderQty, to_decimal(pair.head_quantity))
     if client_order_id is not None:
         order["clOrdID"] = client_order_id
     return order
@@ -53,7 +45,7 @@ def resolve_tail_quantity(state: PairCycleState) -> Decimal | int | None:
     """Resolve tail quantity from played runtime state first, then planned size."""
     if state.played_quantity is not None and state.played_quantity > 0:
         return state.played_quantity
-    return state.pair.head.quantity
+    return state.pair.head_quantity
 
 
 def tail_order_dict(state: PairCycleState) -> OrderDict:
@@ -66,8 +58,8 @@ def tail_order_dict(state: PairCycleState) -> OrderDict:
     quantity = resolve_tail_quantity(state)
     if quantity is not None:
         order["orderQty"] = cast(OrderQty, to_decimal(quantity))
-    if pair.tail.price is not None:
-        order["stopPx"] = cast(StopPrice, to_decimal(pair.tail.price))
+    if pair.tail_price_spec is not None:
+        order["stopPx"] = cast(StopPrice, to_decimal(pair.tail_price_spec))
     if pair.tail.delta is not None:
         order["oDelta"] = cast(PriceOffset, to_decimal(pair.tail.delta))
     return order

@@ -1,3 +1,3 @@
 name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	prix	hook
-# Sell limit at current lower ask + 1.0, with a bot-managed 0.5% tail trigger.
-XSellTail	0 1440	1	60		sell	L		S-		qAt%pD	1	0.5	1 1	
+# Sell limit in the current lower-ask +1/+2 band, with a bot-managed 0.5% tail trigger.
+XSellTail	0 1440	1	60		sell	L		S-		qAt%pD	1	0.5	1 2	

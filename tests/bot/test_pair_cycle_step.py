@@ -8,6 +8,7 @@ from kolabi.bot.domain import (
     EggMoveKind,
     HeadSpec,
     HeadState,
+    OrderRole,
     OrderPairSpec,
     PairCycleState,
     Side,
@@ -23,22 +24,27 @@ def sample_pair() -> OrderPairSpec:
     return OrderPairSpec(
         name="pair-a",
         window=TimeWindow(start_minutes=-1.0, end_minutes=1.0),
-        attempts=1,
-        pause_minutes=None,
-        timeout_minutes=None,
+        try_num=1,
+        dr_pause=None,
+        timeout=None,
         head=HeadSpec(
             side=Side.BUY,
             order_type="Limit",
-            price_interval=(100.0, 101.0),
-            quantity=2,
             delta=None,
         ),
+        head_price=(100.0, 101.0),
+        head_price_type="pA",
+        head_quantity=2,
+        head_quantity_type="qA",
         tail=TailSpec(
+            side=Side.SELL,
             order_type="Stop",
-            price=99.0,
             delta=0.5,
         ),
+        tail_price_spec=99.0,
+        tail_price_spec_type="tA",
         amount_type="qApD",
+        hook_name=None,
     )
 
 

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import sys
 from pathlib import Path
 
+from kolabi.bot.domain import StrategySpec
 from kolabi.bot.service import BotConfig, BotService
-from kolabi.bot.tsv import OrderSpec, read_strategy_file
+from kolabi.bot.tsv import read_strategy_file, strategy_from_run_once_args
 
 
 def add_runtime_options(parser: argparse.ArgumentParser) -> None:
@@ -233,25 +235,9 @@ def build_service(args: argparse.Namespace) -> BotService:
     )
 
 
-def build_single_order_spec(args: argparse.Namespace) -> OrderSpec:
-    """Translate compatibility CLI vocabulary into one in-memory OrderSpec."""
-    return OrderSpec(
-        name=args.name,
-        tps_run=(float(args.tps_run[0]), float(args.tps_run[1])),
-        essais=args.nbEssais,
-        dr_pause=args.drPause,
-        timeout=args.tOut,
-        side=args.side,
-        prix=(float(args.prix[0]), float(args.prix[1])),
-        q=args.quantity,
-        tp=args.tailPrice,
-        atype=args.aType,
-        oType=args.oType,
-        oDelta=args.oDelta,
-        tDelta=args.tDelta,
-        tType=args.tType,
-        hook=args.Hook,
-    )
+def build_single_strategy(args: argparse.Namespace) -> StrategySpec:
+    """Traduit la CLI legacy vers une StrategySpec canonique."""
+    return strategy_from_run_once_args(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -346,26 +332,22 @@ def run_command(args: argparse.Namespace) -> int:
     if not strategy_path.exists():
         raise FileNotFoundError(f"Strategy file not found: {strategy_path}")
 
-    specs = read_strategy_file(strategy_path)
-    if not specs:
+    strategy = read_strategy_file(strategy_path)
+    if not strategy.pairs:
         print("No strategies found in file.", file=sys.stderr)
         return 1
 
     if args.dry_run:
-        for spec in specs:
-            print(
-                f"[DRY-RUN] {spec.name}: {spec.side} {spec.q} "
-                f"between {spec.prix} type={spec.oType}"
-            )
+        print(json.dumps(asdict(strategy), indent=2, sort_keys=True, default=str))
         return 0
 
     service = build_service(args)
-    service.run_orders(specs, asynchronous=not args.sync)
+    service.run_strategy(strategy, asynchronous=not args.sync)
     if args.sync:
-        print(f"Executed {len(specs)} order(s) synchronously.")
+        print(f"Executed {len(strategy.pairs)} order(s) synchronously.")
     else:
         print(
-            f"Submitted {len(specs)} order(s). "
+            f"Submitted {len(strategy.pairs)} order(s). "
             "Threads running in background; monitor logs for progress."
         )
     return 0
@@ -373,18 +355,14 @@ def run_command(args: argparse.Namespace) -> int:
 
 def run_once_command(args: argparse.Namespace) -> int:
     """Run one command-line strategy row using the compatibility parameter names."""
-    spec = build_single_order_spec(args)
+    strategy = build_single_strategy(args)
 
     if args.dry_run:
-        print(
-            f"[DRY-RUN] {spec.name}: {spec.side} {spec.q} "
-            f"between {spec.prix} type={spec.oType} tail={spec.tType} "
-            f"atype={spec.atype} tp={spec.tp}"
-        )
+        print(json.dumps(asdict(strategy), indent=2, sort_keys=True, default=str))
         return 0
 
     service = build_service(args)
-    service.run_orders([spec], asynchronous=not args.sync)
+    service.run_strategy(strategy, asynchronous=not args.sync)
     if args.sync:
         print("Executed 1 order pair synchronously.")
     else:

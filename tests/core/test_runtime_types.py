@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from kolabi.bot.domain import (
     ExecutionOutcome,
     HeadState,
+    OrderState,
     TailMode,
     TailState,
     classify_confirmed_state,
@@ -24,8 +25,10 @@ from kolabi.shared.core.runtime_types import (
 )
 
 
-def test_head_and_tail_state_preserve_legacy_aliases() -> None:
-    assert HeadState.SUBMITTED.value == "sent"
+def test_head_and_tail_state_follow_canonical_contract() -> None:
+    assert HeadState is OrderState
+    assert TailState is OrderState
+    assert HeadState.SUBMITTED.value == "submitted"
     assert TailState.LIVING.value == "living"
     assert TailMode.FLAPPING.value == "flapping"
 

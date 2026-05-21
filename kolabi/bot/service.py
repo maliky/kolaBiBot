@@ -9,9 +9,9 @@ from kolabi.bot.indicators import (
     IndicatorClient,
     KrakenDbIndicatorClient,
 )
+from kolabi.bot.domain import OrderPairSpec, StrategySpec
 from kolabi.bot.persistence import OrderRecorder, PersistenceConfig
 from kolabi.bot.runtime.auditor import MarketAuditor
-from kolabi.bot.tsv import OrderSpec
 from kolabi.shared.config import load_exchange_config
 from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.kraken_futures import kraken_futures_environment
@@ -243,30 +243,34 @@ class BotService:
             f"{self.config.ready_timeout_seconds:.0f}s: {reasons}"
         )
 
-    def run_orders(self, specs: Iterable[OrderSpec], asynchronous: bool = True) -> None:
-        """Schedule the provided orders using the legacy `go` routine."""
-        spec_list = list(specs)
-        self._validate_specs(spec_list)
+    def run_strategy(self, strategy: StrategySpec, asynchronous: bool = True) -> None:
+        """Lance une strategie canonique en iterant ses paires."""
+        pair_list = list(strategy.pairs)
+        self._validate_pairs(pair_list)
         self.start()
-        for spec in spec_list:
-            kwargs = self._spec_to_kwargs(spec)
+        for pair in pair_list:
+            kwargs = self._pair_to_kwargs(pair)
             snapshot = self.indicators.fetch_snapshot(self.config.symbol)
             run_id: Optional[int] = None
             if self.recorder:
-                run = self.recorder.start_run(spec, snapshot)
+                run = self.recorder.start_run(pair, snapshot)
                 run_id = run.id
-                self.logger.info(f"[{spec.name}] submitted run #{run_id}")
+                self.logger.info(f"[{pair.name}] submitted run #{run_id}")
             if asynchronous:
                 # > I was hoping of not using thread here but only async. comment on the difficulty to have a async rewrite
                 thread = threading.Thread(
-                    target=self.auditor.go, name=spec.name, kwargs=kwargs
+                    target=self.auditor.go, name=pair.name, kwargs=kwargs
                 )
                 thread.start()
             else:
                 self.auditor.go(**kwargs)
 
-    def _validate_specs(self, specs: Iterable[OrderSpec]) -> None:
-        """Validate obvious Kraken instrument constraints before sending any order."""
+    def run_orders(self, pairs: Iterable[OrderPairSpec], asynchronous: bool = True) -> None:
+        """Compatibilite: accepte directement une liste de paires canoniques."""
+        self.run_strategy(StrategySpec(name="compat", pairs=tuple(pairs)), asynchronous=asynchronous)
+
+    def _validate_pairs(self, pairs: Iterable[OrderPairSpec]) -> None:
+        """Valide les contraintes instrument Kraken avant envoi."""
         if self.config.exchange.lower() != "kraken" or self.exchange_config is None:
             return
         adapter_cls = get_adapter("kraken")
@@ -287,33 +291,37 @@ class BotService:
             if isinstance(raw_min_qty, (int, float, str)) and raw_min_qty
             else 1.0
         )
-        for spec in specs:
-            if "qA" in spec.amount_type and spec.head.quantity is not None and float(spec.head.quantity) < min_qty:
+        for pair in pairs:
+            if (
+                pair.head_quantity_type == "qA"
+                and pair.head_quantity is not None
+                and float(pair.head_quantity) < min_qty
+            ):
                 raise ValueError(
-                    f"Strategy '{spec.name}' quantity {spec.head.quantity} is below "
+                    f"Strategy '{pair.name}' quantity {pair.head_quantity} is below "
                     f"the minimum quantity {min_qty:g} for {self.config.symbol}."
                 )
 
-    def _spec_to_kwargs(self, spec: OrderSpec) -> AuditorGoKwargs:
-        """Translate OrderSpec into kwargs accepted by MarketAuditor.go."""
+    def _pair_to_kwargs(self, pair: OrderPairSpec) -> AuditorGoKwargs:
+        """Traduit une paire canonique vers le contrat historic de go()."""
         return {
-            "tps_run": (spec.window.start_minutes, spec.window.end_minutes),
-            "prix": spec.head.price_interval,
-            "essais": 1 if spec.attempts is None else spec.attempts,
-            "side": spec.head.side.value,
-            "q": spec.head.quantity,
-            "tp": 0.0 if spec.tail.price is None else spec.tail.price,
-            "atype": spec.amount_type,
-            "oType": spec.head.order_type,
-            "nameT": spec.name,
+            "tps_run": (pair.window.start_minutes, pair.window.end_minutes),
+            "prix": pair.head_price,
+            "essais": pair.try_num,
+            "side": pair.head.side.value,
+            "q": pair.head_quantity,
+            "tp": 0.0 if pair.tail_price_spec is None else pair.tail_price_spec,
+            "atype": pair.amount_type,
+            "oType": pair.head.order_type,
+            "nameT": pair.name,
             "updatepause": self.config.updatepause,
             "logpause": self.config.logpause,
-            "dr_pause": spec.pause_minutes,
-            "tType": spec.tail.order_type,
-            "timeout": spec.timeout_minutes,
-            "oDelta": spec.head.delta,
-            "tDelta": spec.tail.delta,
-            "hook": spec.hook or None,
+            "dr_pause": pair.dr_pause,
+            "tType": pair.tail.order_type,
+            "timeout": pair.timeout,
+            "oDelta": pair.head.delta,
+            "tDelta": pair.tail.delta,
+            "hook": pair.hook_name,
         }
 
 

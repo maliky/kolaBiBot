@@ -36,7 +36,7 @@ def resolve_head_price(pair: OrderPairSpec, market: PublicMarketState) -> float 
     if order_type in {"m", "market"}:
         return None
     reference = to_decimal(reference_price(pair.head.side, market))
-    lower, upper = pair.head.price_interval
+    lower, upper = pair.head_price
     if "pA" in pair.amount_type:
         return decimal_to_float(lower if pair.head.side == Side.BUY else upper)
     if "p%" in pair.amount_type:

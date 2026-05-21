@@ -1,5 +1,17 @@
-"""Parsers for legacy TSV-based strategy definitions."""
+"""Parsers for canonical strategy definitions built from legacy TSV input."""
 
-from .parser import OrderSpec, read_strategy_file
+from .parser import (
+    order_pair_from_legacy_values,
+    read_strategy_file,
+    strategy_from_pairs,
+    strategy_from_run_once_args,
+    strategy_to_pretty_dict,
+)
 
-__all__ = ["OrderSpec", "read_strategy_file"]
+__all__ = [
+    "order_pair_from_legacy_values",
+    "read_strategy_file",
+    "strategy_from_pairs",
+    "strategy_from_run_once_args",
+    "strategy_to_pretty_dict",
+]

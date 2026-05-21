@@ -23,9 +23,9 @@ class RecordingAuditor:
         self.calls.append(kwargs)
 
 
-def test_demo_ada_orders_parsed_and_dispatched(tmp_path: Path) -> None:
-    specs = read_strategy_file(Path("orders/demo_ada.tsv"))
-    assert len(specs) >= 2
+def test_demo_ada_strategy_parsed_and_dispatched(tmp_path: Path) -> None:
+    strategy = read_strategy_file(Path("orders/demo_ada.tsv"))
+    assert len(strategy.pairs) >= 2
 
     auditor = RecordingAuditor()
     service = BotService(
@@ -33,11 +33,12 @@ def test_demo_ada_orders_parsed_and_dispatched(tmp_path: Path) -> None:
         auditor=auditor,  # type: ignore[arg-type]
         indicators=DummyIndicatorClient({"ma": 42}),
     )
-    service.run_orders(specs, asynchronous=False)
+    service.run_strategy(strategy, asynchronous=False)
 
     assert auditor.started
-    assert len(auditor.calls) == len(specs)
+    assert len(auditor.calls) == len(strategy.pairs)
     first = auditor.calls[0]
+    first_pair = strategy.pairs[0]
     assert set(first.keys()) == {
         "tps_run",
         "prix",
@@ -57,12 +58,12 @@ def test_demo_ada_orders_parsed_and_dispatched(tmp_path: Path) -> None:
         "tDelta",
         "hook",
     }
-    assert first["nameT"] == specs[0].name
-    assert first["side"] == specs[0].side
-    assert first["prix"] == specs[0].prix
+    assert first["nameT"] == first_pair.name
+    assert first["side"] == first_pair.head.side.value
+    assert first["prix"] == first_pair.head_price
 
 
-def test_kraken_run_orders_rejects_too_small_absolute_quantity(monkeypatch) -> None:
+def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) -> None:
     class FakeKrakenAdapter:
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
@@ -70,7 +71,7 @@ def test_kraken_run_orders_rejects_too_small_absolute_quantity(monkeypatch) -> N
         def instrument_rules(self, symbol: str):
             return {"symbol": symbol, "minQuantity": 30.0}
 
-    specs = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
+    strategy = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
     auditor = RecordingAuditor()
     service = BotService(
         BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False),
@@ -87,7 +88,7 @@ def test_kraken_run_orders_rejects_too_small_absolute_quantity(monkeypatch) -> N
     monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _: FakeKrakenAdapter)
 
     try:
-        service.run_orders(specs, asynchronous=False)
+        service.run_strategy(strategy, asynchronous=False)
     except ValueError as exc:
         assert "below the minimum quantity 30" in str(exc)
     else:

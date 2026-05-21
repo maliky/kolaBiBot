@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 from sqlalchemy.orm import Session
 
-from kolabi.bot.tsv import OrderSpec
+from kolabi.bot.domain import OrderPairSpec
 from kolabi.shared.persistence import OrderEvent, OrderRun, get_sessionmaker
 
 
@@ -19,17 +19,17 @@ class OrderRecorder:
         self.config = config
         self._sessionmaker = get_sessionmaker(config.db_url)
 
-    def start_run(self, spec: OrderSpec, indicators: Dict[str, Any]) -> OrderRun:
+    def start_run(self, pair: OrderPairSpec, indicators: Dict[str, Any]) -> OrderRun:
         session: Session = self._sessionmaker()
         run = OrderRun(
-            name=spec.name,
+            name=pair.name,
             exchange="",
             symbol="",
             strategy={
-                "tps_run": (spec.window.start_minutes, spec.window.end_minutes),
-                "prix": spec.head.price_interval,
-                "otype": spec.head.order_type,
-                "atype": spec.amount_type,
+                "tps_run": (pair.window.start_minutes, pair.window.end_minutes),
+                "prix": pair.head_price,
+                "otype": pair.head.order_type,
+                "atype": pair.amount_type,
                 "indicators": indicators,
             },
             status="submitted",

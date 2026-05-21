@@ -1,15 +1,16 @@
 """Bot domain model and tagged state vocabulary.
 
-Purpose: define pure domain enums/dataclasses for pair lifecycle, strategy
-state, and reducer events used by the active pair-cycle runtime.
+Purpose: define pure domain enums/dataclasses for strategy parsing, pair
+lifecycle, and reducer events used by the active pair-cycle runtime.
 Inputs: normalized side/order/reason strings and strategy fields.
 Outputs: typed domain records and pure classification helpers.
 Side effects: none.
-Important types: `HeadState`, `TailState`, `TailMode`, `OrderReason`,
-`ExecutionOutcome`, `OrderPairSpec`, `PairCycleState`, `EggMove`,
+Important types: `StrategySpec`, `OrderPairSpec`, `OrderState`, `TailMode`,
+`OrderReason`, `ExecutionOutcome`, `EggMove`, `PairCycleState`,
 `StrategyState`.
 Role: pure logic.
-Transitional: no compatibility alias for `OrderState`; use `HeadState`.
+Transitional: yes, legacy pair properties remain available while the active
+runtime shell still consumes historic names.
 """
 from __future__ import annotations
 
@@ -24,8 +25,8 @@ from kolabi.shared.core.runtime_types import Side
 NumberPair = tuple[float, float]
 
 
-class LatentEggState(StrEnum):
-    """Transport/confirmation before strategic state."""
+class OrderState(StrEnum):
+    """Lifecycle state shared by head and tail orders."""
 
     LATENT = "latent"
     HOOKED = "hooked"
@@ -33,63 +34,55 @@ class LatentEggState(StrEnum):
     UNADMITTED = "unadmitted"
     ADMITTED = "admitted"
     CONFIRMED = "confirmed"
-
-
-class EggState(StrEnum):
-    """Strategic class after confirmation."""
-
     NEW = "new"
-    FAILED = "failed"
     LIVING = "living"
     CLOSED = "closed"
+    FAILED = "failed"
 
 
-class PairRole(StrEnum):
+HeadState = OrderState
+TailState = OrderState
+
+
+class OrderRole(StrEnum):
     """Pair role labels."""
 
     HEAD = "head"
     TAIL = "tail"
 
 
-class HeadState(StrEnum):
-    """Head base state within the pair lifecycle."""
-
-    LATENT = LatentEggState.LATENT.value
-    HOOKED = LatentEggState.HOOKED.value
-    SUBMITTED = LatentEggState.SUBMITTED.value
-    UNADMITTED = LatentEggState.UNADMITTED.value
-    CONFIRMED = LatentEggState.CONFIRMED.value
-    ADMITTED = LatentEggState.ADMITTED.value
-    NEW = EggState.NEW.value
-    LIVING = EggState.NEW.value
-    FAILED = EggState.NEW.value
-    CLOSED = EggState.CLOSED.value
-
-
-class TailState(StrEnum):
-    """Tail base state within the pair lifecycle."""
-
-    LATENT = LatentEggState.LATENT.value
-    HOOKED = LatentEggState.HOOKED.value
-    SUBMITTED = LatentEggState.SUBMITTED.value
-    UNADMITTED = LatentEggState.UNADMITTED.value
-    ADMITTED = LatentEggState.ADMITTED.value
-    CONFIRMED = LatentEggState.CONFIRMED.value
-    NEW = EggState.NEW.value
-    LIVING = EggState.LIVING.value
-    FAILED = EggState.FAILED.value
-    CLOSED = EggState.CLOSED.value
+PairRole = OrderRole
 
 
 class TailMode(StrEnum):
-    """tail-relative mode driven by head state."""
+    """Tail relative mode driven by head state."""
 
     FLAPPING = "flapping"
     FLYING = "flying"
 
 
-# Compatibility alias used by current runtime call sites.
 TailRole = TailMode
+
+
+class OrderMove(StrEnum):
+    """Canonical transition vocabulary for lifecycle events."""
+
+    LATENT_TO_HOOKED = "latent_to_hooked"
+    HOOKED_TO_SUBMITTED = "hooked_to_submitted"
+    SUBMITTED_TO_UNADMITTED = "submitted_to_unadmitted"
+    SUBMITTED_TO_ADMITTED = "submitted_to_admitted"
+    ADMITTED_TO_CONFIRMED = "admitted_to_confirmed"
+    CONFIRMED_TO_NEW = "confirmed_to_new"
+    CONFIRMED_TO_LIVING = "confirmed_to_living"
+    CONFIRMED_TO_CLOSED = "confirmed_to_closed"
+    CONFIRMED_TO_FAILED = "confirmed_to_failed"
+    NEW_TO_FAILED = "new_to_failed"
+    NEW_TO_LIVING = "new_to_living"
+    NEW_TO_NEW = "new_to_new"
+    NEW_TO_CLOSED = "new_to_closed"
+    LIVING_TO_FAILED = "living_to_failed"
+    LIVING_TO_LIVING = "living_to_living"
+    LIVING_TO_CLOSE = "living_to_close"
 
 
 class OrderReason(StrEnum):
@@ -126,7 +119,7 @@ class EggMoveKind(StrEnum):
     HEAD_HOOKED = "head_hooked"
     HEAD_SUBMITTED = "head_submitted"
     HEAD_UNADMITTED = "head_unadmitted"
-    HEAD_ADMITTED = "head_unadmitted"    
+    HEAD_ADMITTED = "head_admitted"
     HEAD_FAILED = "head_failed"
     HEAD_CANCELED_ZERO_FILL = "head_canceled_zero_fill"
     HEAD_CANCELED_AFTER_FILL = "head_canceled_after_fill"
@@ -159,31 +152,59 @@ class TimeWindow:
 class HeadSpec:
     side: Side
     order_type: str
-    price_interval: NumberPair
-    quantity: int | None
-    delta: float | None
+    delta: float | None = None
 
 
 @dataclass(frozen=True)
 class TailSpec:
+    side: Side
     order_type: str
-    price: float | None
-    delta: float | None
+    delta: float | None = None
 
 
 @dataclass(frozen=True)
 class OrderPairSpec:
     name: str
     window: TimeWindow
-    attempts: int
-    pause_minutes: float | None
-    timeout_minutes: int | None
+    try_num: int
+    dr_pause: float | None
+    timeout: int | None
     head: HeadSpec
+    head_price: NumberPair
+    head_price_type: str
+    head_quantity: int | None
+    head_quantity_type: str
     tail: TailSpec
+    tail_price_spec: float | None
+    tail_price_spec_type: str
     amount_type: str
-    hook: str | None = None
+    hook_name: str | None = None
+
+    @property
+    def attempts(self) -> int:
+        return self.try_num
+
+    @property
+    def pause_minutes(self) -> float | None:
+        return self.dr_pause
+
+    @property
+    def timeout_minutes(self) -> int | None:
+        return self.timeout
+
+    @property
+    def hook(self) -> str | None:
+        return self.hook_name
+
+    @property
+    def price_interval(self) -> NumberPair:
+        return self.head_price
 
 
+@dataclass(frozen=True)
+class StrategySpec:
+    name: str
+    pairs: tuple[OrderPairSpec, ...]
 
 
 @dataclass(frozen=True)
@@ -204,7 +225,7 @@ class ConfirmedOrder:
 
     @property
     def is_played(self) -> bool:
-        """Played is semantic strategy fulfilment and may have zero fill."""
+        """Le jeu est rempli semantiquement, meme avec zero fill."""
         return self.reason in PLAYED_REASONS
 
     @property
@@ -268,6 +289,13 @@ def normalize_side(raw: str) -> Side:
     if value == "sell":
         return Side.SELL
     raise ValueError(f"Unsupported side '{raw}'")
+
+
+def opposite_side(side: Side) -> Side:
+    """Retourne le cote oppose pour le tail de fermeture."""
+    if side == Side.BUY:
+        return Side.SELL
+    return Side.BUY
 
 
 def normalize_reason(raw: str | None) -> OrderReason:
