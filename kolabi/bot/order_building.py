@@ -33,6 +33,7 @@ def head_order_dict(pair: OrderPairSpec, *, client_order_id: str | None = None) 
     order: OrderDict = {
         "side": pair.head.side.value,
         "ordType": pair.head.order_type,
+        "pair_name": pair.name,
     }
     if pair.head_quantity is not None:
         order["orderQty"] = cast(OrderQty, to_decimal(pair.head_quantity))
@@ -54,6 +55,7 @@ def tail_order_dict(state: PairCycleState) -> OrderDict:
     order: OrderDict = {
         "side": opposite_side(pair.head.side).value,
         "ordType": pair.tail.order_type,
+        "pair_name": pair.name,
     }
     quantity = resolve_tail_quantity(state)
     if quantity is not None:

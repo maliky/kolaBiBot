@@ -243,6 +243,19 @@ class PairCycleState:
     tail_identity: OrderIdentity | None = None
     played_quantity: Decimal | None = None
     latest_commands: dict[str, tuple[str, ...]] | None = None
+    pair_id: str | None = None
+    last_processed_private_event_id: str | None = None
+    last_processed_private_event_ts: datetime | None = None
+    last_emitted_command_id: str | None = None
+    last_emitted_command_ts: datetime | None = None
+
+    @property
+    def head_client_order_id(self) -> str | None:
+        return None if self.head_identity is None else self.head_identity.client_order_id
+
+    @property
+    def tail_client_order_id(self) -> str | None:
+        return None if self.tail_identity is None else self.tail_identity.client_order_id
 
 
 @dataclass(frozen=True)
@@ -255,6 +268,8 @@ class EggMove:
     order: Mapping[str, object] | None = None
     reply: Mapping[str, object] | None = None
     event_id: str | None = None
+    pair_name: str | None = None
+    is_private: bool = False
 
 
 @dataclass(frozen=True)
@@ -263,7 +278,9 @@ class StrategyState:
 
     launched_at: datetime
     pairs: dict[str, PairCycleState]
+    strategy_id: str | None = None
     last_event_id: str | None = None
+    last_event_ts: datetime | None = None
 
 
 @dataclass(frozen=True)

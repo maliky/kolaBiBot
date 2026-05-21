@@ -135,6 +135,7 @@ class RuntimeCommandKind(StrEnum):
 
 
 class OrderDict(TypedDict, total=False):
+    pair_name: str
     side: str
     action: str
     orderQty: Quantity

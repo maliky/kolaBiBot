@@ -382,6 +382,13 @@ def intents_to_commands(
             )
         elif intent.kind == PairIntentKind.AMEND_TAIL:
             if state.tail_identity is None:
+                commands.append(
+                    tail_command(
+                        state,
+                        symbol=symbol,
+                        kind=RuntimeCommandKind.PLACE,
+                    )
+                )
                 continue
             if not state.tail_identity.client_order_id or not state.tail_identity.exchange_order_id:
                 raise ValueError("tail amend requires both client and exchange order IDs")
