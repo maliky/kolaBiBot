@@ -1,0 +1,206 @@
+* Isis Supervisor Test-Development Rules
+
+** 1. Layer responsibility rules
+
+*** Rule 1.1 — Isis shall consume already-targeted strategy events.
+
+Isis receives typed events whose target pair has already been resolved by Chronos or a Chronos helper.
+
+*** Rule 1.2 — Isis shall not own pair-name resolution.
+
+Resolution from =pair_name=, =clOrdID=, or =orderID= belongs outside Isis. Isis may reject or report contradictory targeted events, but it shall not perform supervisor-side identity recovery.
+
+*** Rule 1.3 — Isis shall update strategy state.
+
+Isis applies:
+
+#+begin_src text
+StrategyState + EggMove -> StrategyState + Intent(s)
+#+end_src
+
+*** Rule 1.4 — Isis shall delegate pair lifecycle semantics to =step_pair()=.
+
+Isis must not decide whether a head is played, failed, closed, canceled, or whether a tail should activate. Those meanings belong to the pair reducer.
+
+*** Rule 1.5 — Isis shall stop at intent emission.
+
+Isis must not translate intents into =RuntimeCommand= values. Intent-to-command translation belongs to Janus.
+
+*** Rule 1.6 — Isis shall not execute commands.
+
+Exchange execution belongs to Ogun and exchange adapters, not Isis.
+
+*** Rule 1.7 — Isis shall not perform supervisor-side behavior.
+
+Deduplication, precedence handling, pending-identity timeout, dependency scheduling, and event batching belong to Chronos.
+
+** 2. Strategy-state replacement rules
+
+*** Rule 2.1 — =step_strategy()= shall always return a fresh top-level =StrategyState=.
+
+Even ignored or unresolved events should return a new top-level state object if that is the chosen invariant.
+
+*** Rule 2.2 — Isis shall replace only the targeted pair state.
+
+When one pair is updated, unrelated pair states should preserve Python object identity.
+
+*** Rule 2.3 — Isis shall not create missing pair entries.
+
+If an event targets a pair absent from =StrategyState.pairs=, Isis must not create a latent pair shell.
+
+*** Rule 2.4 — Isis shall not migrate changed pair specifications.
+
+Pair-spec migration, if needed, belongs to strategy loading, validation, or another migration layer, not Isis.
+
+*** Rule 2.5 — Legacy-preservation tests shall not block clean Isis architecture.
+
+Tests that exist only to preserve old migration or compatibility behavior should be removed or moved outside Isis.
+
+** 3. Targeting and contradiction rules
+
+*** Rule 3.1 — Chronos shall provide the canonical =pair_name= before Isis.
+
+The normal Isis path assumes =event.pair_name= is already valid.
+
+*** Rule 3.2 — Unresolved pair targets shall not be routed.
+
+If no valid pair is resolved before Isis, the event should produce deterministic metadata or diagnostics only, according to the adopted policy.
+
+*** Rule 3.3 — Contradictory targeted events shall behave deterministically.
+
+Given the same =StrategyState= and same contradictory =EggMove=, Isis must always return the same state and same diagnostics/intents.
+
+*** Rule 3.4 — Identity conflict diagnostics shall be explicit.
+
+If an event carries inconsistent pair identity information, the test should expect a diagnostic or rejection path, not silent correction.
+
+** 4. Metadata rules
+
+*** Rule 4.1 — Top-level event metadata shall update only for resolved pair events.
+
+=last_event_id= and =last_event_ts= should update only when a pair is successfully resolved and routed.
+
+*** Rule 4.2 — Unresolved events shall not pretend to be processed pair events.
+
+An unresolved event may produce diagnostics, but it must not update pair-level metadata.
+
+*** Rule 4.3 — Private pair metadata shall update only for private events.
+
+=last_processed_private_event_id= and =last_processed_private_event_ts= must not change after public events.
+
+*** Rule 4.4 — =pair_id= shall be written on first successful routed event.
+
+Ignored or unresolved events must not set =pair_id=.
+
+*** Rule 4.5 — Intent metadata shall follow the last emitted intent.
+
+If several intents are emitted, Isis records the identity of the last emitted intent only, unless a different explicit policy is adopted.
+
+*** Rule 4.6 — Intent timestamp shall use intent creation time.
+
+Intent timestamps should not be copied blindly from event timestamps.
+
+** 5. Intent boundary rules
+
+*** Rule 5.1 — Isis shall emit intents, not =RuntimeCommand= values.
+
+Tests must not expect exchange-ready commands from Isis.
+
+*** Rule 5.2 — Isis shall preserve reducer intent order exactly.
+
+If =step_pair()= emits multiple intents, Isis must preserve their order before Chronos or Janus applies later filtering or deduplication.
+
+*** Rule 5.3 — Runtime command translation failure is not an Isis concern.
+
+Tests about failed translation from intent to =RuntimeCommand= belong to Janus.
+
+*** Rule 5.4 — Isis shall not emit persistence or supervision commands.
+
+Persistence, logging, diagnostics, scheduling, and supervision notices belong outside the intent stream unless explicitly modeled as separate diagnostic output.
+
+** 6. Hook and validation rules
+
+*** Rule 6.1 — Missing hook targets shall be validation errors before Isis.
+
+If a hook references a pair absent from the strategy, that should be rejected during strategy validation.
+
+*** Rule 6.2 — Isis shall not interpret hook rules.
+
+Isis consumes already-routed =EggMove= values. It must not inspect or evaluate hook dependency semantics.
+
+*** Rule 6.3 — Dependency activation shall remain outside Isis.
+
+Activation scheduling belongs to Chronos or the pair lifecycle reducer, depending on the final architecture.
+
+** 7. Test placement rules
+
+*** Rule 7.1 — Isis unit tests shall focus on reducer guarantees.
+
+Unit tests should cover state replacement, targeted routing, metadata propagation, missing-pair behavior, deterministic contradiction handling, and intent ordering.
+
+*** Rule 7.2 — Chronos tests shall cover supervision behavior.
+
+Tests for deduplication, precedence, identity resolution, pending identity timeout, event batching, and scheduling belong to Chronos.
+
+*** Rule 7.3 — =step_pair()= tests shall cover pair lifecycle semantics.
+
+Tests for played, failed, closed, canceled, head/tail activation, partial fill, zero-fill cancel, and strategy failure belong to =step_pair()=.
+
+*** Rule 7.4 — Janus and Ogun tests shall split planning from execution.
+
+Tests for translating intents into =RuntimeCommand= values and preserving command order belong to Janus.
+Tests for calling adapters, receiving acknowledgements, and handling exchange errors belong to Ogun.
+
+*** Rule 7.5 — BDD tests shall cover operator-visible Isis behavior only.
+
+BDD scenarios should be reserved for routed event handling, deterministic failure, intent ordering, and visible strategy-state effects.
+
+** 8. Removal and revision rules
+
+*** Rule 8.1 — Remove Isis tests for pair-spec migration.
+
+Migration is outside Isis and should not constrain its clean reducer design.
+
+*** Rule 8.2 — Remove Isis tests for command translation failure.
+
+After the intent boundary change, command translation failure belongs to Janus.
+
+*** Rule 8.3 — Remove Isis tests that require exchange payload knowledge.
+
+Isis must remain exchange-agnostic.
+
+*** Rule 8.4 — Revise routing tests to assume targeted events.
+
+If pair-name resolution is moved to Chronos, Isis routing tests should no longer test =clOrdID= or =orderID= lookup.
+
+*** Rule 8.5 — Keep only contradiction tests that protect invariants.
+
+Contradictory input tests should verify deterministic rejection or diagnostics, not hidden recovery.
+
+** 9. Acceptance rules
+
+*** Rule 9.1 — Isis tests shall encode strategy-state semantics only.
+
+A passing Isis test suite should prove that Isis updates =StrategyState= correctly and emits ordered intents.
+
+*** Rule 9.2 — Isis tests shall not duplicate Chronos tests.
+
+If a test depends on event ordering, deduplication, timeout, precedence, or identity-cache behavior, it belongs to Chronos.
+
+*** Rule 9.3 — Isis tests shall not duplicate =step_pair()= tests.
+
+If a test depends on the meaning of order lifecycle states, it belongs to =step_pair()=.
+
+*** Rule 9.4 — Isis tests shall not duplicate Janus or Ogun tests.
+
+If a test depends on =RuntimeCommand= construction, it belongs to Janus.
+If a test depends on exchange execution, it belongs to Ogun.
+
+*** Rule 9.5 — The final Isis boundary shall remain narrow.
+
+The intended Isis contract is:
+
+#+begin_src text
+already-targeted EggMove + StrategyState
+  -> fresh StrategyState + ordered Intent(s) + optional diagnostics
+#+end_src

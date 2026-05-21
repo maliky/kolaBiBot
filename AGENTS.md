@@ -43,5 +43,7 @@ Metaphors are allowed when they name a black box for human complexity, orchestra
 
 Keep intentional metaphors: =Chronos= =Bargain= =Dragon= =head= =tail= =hook= =flying= =flapping= =market= =MarketAuditor=
 
-Welcome, let's Swing and Jazz  !
+Keep Isis narrow: it consumes already targeted strategy events, updates/replaces StrategyState, delegates pair lifecycle semantics to step_pair(), and emits ordered intents only. Pair-name resolution, deduplication, precedence, pending-identity timeout, dependency activation, RuntimeCommand translation, and exchange execution belong outside Isis, mainly to Chronos or Ogun.
 
+
+Welcome, let's Swing and Jazz  !
