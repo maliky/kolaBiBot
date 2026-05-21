@@ -64,6 +64,12 @@ class TailMode(StrEnum):
 TailRole = TailMode
 
 
+class PairIntentKind(StrEnum):
+    PLACE_HEAD = "place_head"
+    PLACE_TAIL = "place_tail"
+    AMEND_TAIL = "amend_tail"
+
+
 class OrderMove(StrEnum):
     """Canonical transition vocabulary for lifecycle events."""
 
@@ -272,6 +278,11 @@ class EggMove:
     event_id: str | None = None
     pair_name: str | None = None
     is_private: bool = False
+
+
+@dataclass(frozen=True)
+class PairIntent:
+    kind: PairIntentKind
 
 
 @dataclass(frozen=True)

@@ -19,7 +19,7 @@ from kolabi.shared.core.runtime_types import decimal_to_float, to_decimal
 from kolabi.shared.runtime_state import PublicMarketState
 
 
-def pair_window_is_active(
+def pair_window_is_open(
     pair: OrderPairSpec,
     *,
     launched_at: datetime,

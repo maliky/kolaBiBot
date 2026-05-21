@@ -17,7 +17,6 @@ import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
-from enum import StrEnum
 from typing import Protocol, cast
 
 from kolabi.bot.domain import (
@@ -28,6 +27,8 @@ from kolabi.bot.domain import (
     HeadState,
     OrderIdentity,
     OrderPairSpec,
+    PairIntent,
+    PairIntentKind,
     OrderReason,
     PairCycleEvent,
     PairCycleState,
@@ -38,29 +39,12 @@ from kolabi.bot.domain import (
     normalize_reason,
 )
 from kolabi.bot.ids import head_client_order_id
-from kolabi.bot.order_building import head_order_dict, tail_command
-from kolabi.bot.pricing import pair_window_is_active, resolve_head_price
+from kolabi.bot.janus import plan_runtime_commands
+from kolabi.bot.order_building import head_order_dict
+from kolabi.bot.pricing import pair_window_is_open, resolve_head_price
 from kolabi.shared.core.models import OrderAck
-from kolabi.shared.core.runtime_types import (
-    BrokerReply,
-    OrderRole,
-    RuntimeCommand,
-    RuntimeCommandKind,
-    Symbol,
-    to_decimal,
-)
+from kolabi.shared.core.runtime_types import BrokerReply, Symbol, to_decimal
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, PublicMarketState
-
-class PairIntentKind(StrEnum):
-    NOOP = "noop"
-    PLACE_HEAD = "place_head"
-    PLACE_TAIL = "place_tail"
-    AMEND_TAIL = "amend_tail"
-
-
-@dataclass(frozen=True)
-class PairIntent:
-    kind: PairIntentKind
 
 
 class ExchangeGateway(Protocol):
@@ -121,7 +105,7 @@ class PairCycleRunner:
         events: list[PairCycleEvent] = []
         market = self._market_state()
         assert self.strategy_state is not None
-        if not pair_window_is_active(pair, launched_at=self.strategy_state.launched_at, now=current_time):
+        if not pair_window_is_open(pair, launched_at=self.strategy_state.launched_at, now=current_time):
             return self._result(state, events, "pair outside time window")
         if market is None or not market.ready:
             return self._result(state, events, "public market state is not ready")
@@ -139,7 +123,7 @@ class PairCycleRunner:
             self._save_pair_state(pair.name, hooked)
             return self._result(hooked, events, "dry run stopped before submission")
 
-        commands = intents_to_commands(hooked, intents, symbol=cast(Symbol, self.symbol))
+        commands = plan_runtime_commands(hooked, intents, symbol=cast(Symbol, self.symbol))
         if not commands:
             self._save_pair_state(pair.name, hooked)
             return self._result(hooked, events, "no command emitted")
@@ -316,54 +300,6 @@ def _next_closed_tail_state(state: PairCycleState) -> TailState:
     if state.tail_state in {TailState.SUBMITTED, TailState.LIVING}:
         return TailState.LIVING
     return TailState.HOOKED
-
-
-def intents_to_commands(
-    state: PairCycleState,
-    intents: tuple[PairIntent, ...],
-    *,
-    symbol: Symbol,
-) -> tuple[RuntimeCommand, ...]:
-    """Translate pure reducer intents into exchange command payloads."""
-    commands: list[RuntimeCommand] = []
-    for intent in intents:
-        if intent.kind == PairIntentKind.PLACE_HEAD:
-            commands.append(
-                RuntimeCommand(
-                    kind=RuntimeCommandKind.PLACE,
-                    symbol=symbol,
-                    order=head_order_dict(state.pair),
-                    reason=OrderRole.HEAD.value,
-                )
-            )
-        elif intent.kind == PairIntentKind.PLACE_TAIL:
-            commands.append(
-                tail_command(
-                    state,
-                    symbol=symbol,
-                    kind=RuntimeCommandKind.PLACE,
-                )
-            )
-        elif intent.kind == PairIntentKind.AMEND_TAIL:
-            if state.tail_identity is None:
-                commands.append(
-                    tail_command(
-                        state,
-                        symbol=symbol,
-                        kind=RuntimeCommandKind.PLACE,
-                    )
-                )
-                continue
-            if not state.tail_identity.client_order_id or not state.tail_identity.exchange_order_id:
-                raise ValueError("tail amend requires both client and exchange order IDs")
-            commands.append(
-                tail_command(
-                    state,
-                    symbol=symbol,
-                    kind=RuntimeCommandKind.AMEND,
-                )
-            )
-    return tuple(commands)
 
 
 def resolve_quantity(pair: OrderPairSpec) -> float:

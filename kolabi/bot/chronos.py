@@ -18,7 +18,8 @@ from enum import StrEnum
 from typing import Iterable
 
 from kolabi.bot.domain import EggMove, EggMoveKind, HeadState, StrategyState, TailState
-from kolabi.bot.isis import resolve_pair_name, step_strategy
+from kolabi.bot.isis import step_strategy
+from kolabi.bot.janus import plan_runtime_commands
 from kolabi.shared.core.runtime_types import RuntimeCommand, RuntimeCommandKind
 
 
@@ -139,7 +140,13 @@ class Chronos:
                     return ()
                 self._seen_fallback_keys.add(fallback_key)
 
-        self.state, commands = step_strategy(self.state, event)
+        self.state, intents = step_strategy(self.state, _with_target_pair(event, pair_name))
+        pair_state = self.state.pairs.get(pair_name) if pair_name is not None else None
+        commands = () if pair_state is None else plan_runtime_commands(
+            pair_state,
+            intents,
+            symbol=event.symbol,
+        )
         chained_commands = self._activate_dependent_pairs(event)
         return tuple(commands) + chained_commands
 
@@ -269,9 +276,30 @@ class Chronos:
                 event_id=None if event.event_id is None else f"{event.event_id}:hook:{pair_name}",
                 pair_name=pair_name,
             )
-            self.state, commands = step_strategy(self.state, synthetic_event)
+            self.state, intents = step_strategy(self.state, synthetic_event)
+            next_pair_state = self.state.pairs.get(pair_name)
+            commands = () if next_pair_state is None else plan_runtime_commands(
+                next_pair_state,
+                intents,
+                symbol=event.symbol,
+            )
             emitted.extend(commands)
         return self._dedupe_commands(emitted)
+
+
+def _with_target_pair(event: EggMove, pair_name: str | None) -> EggMove:
+    if pair_name is None or event.pair_name == pair_name:
+        return event
+    return EggMove(
+        kind=event.kind,
+        occurred_at=event.occurred_at,
+        symbol=event.symbol,
+        order=event.order,
+        reply=event.reply,
+        event_id=event.event_id,
+        pair_name=pair_name,
+        is_private=event.is_private,
+    )
 
 
 def _command_pair_name(command: RuntimeCommand) -> str | None:
@@ -286,6 +314,48 @@ def _command_client_order_id(command: RuntimeCommand) -> str | None:
         return None
     candidate = command.order.get("clOrdID")
     return candidate if isinstance(candidate, str) and candidate else None
+
+
+def resolve_pair_name(state: StrategyState, event: EggMove) -> str | None:
+    """Resout la paire cible avant delegation au reducer Isis."""
+    if event.pair_name and event.pair_name in state.pairs:
+        return event.pair_name
+
+    for payload in (event.order, event.reply):
+        candidate = _string_or_none(None if payload is None else payload.get("pair_name"))
+        if candidate and candidate in state.pairs:
+            return candidate
+
+    client_order_id = _identity_field(event, "clOrdID")
+    exchange_order_id = _identity_field(event, "orderID")
+    if client_order_id is None and exchange_order_id is None:
+        return None
+
+    for pair_name, pair_state in state.pairs.items():
+        for identity in (pair_state.head_identity, pair_state.tail_identity):
+            if identity is None:
+                continue
+            if client_order_id and identity.client_order_id == client_order_id:
+                return pair_name
+            if exchange_order_id and identity.exchange_order_id == exchange_order_id:
+                return pair_name
+    return None
+
+
+def _identity_field(event: EggMove, field: str) -> str | None:
+    for payload in (event.order, event.reply):
+        if payload is None:
+            continue
+        candidate = _string_or_none(payload.get(field))
+        if candidate:
+            return candidate
+    return None
+
+
+def _string_or_none(value: object) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None
 
 
 def _command_precedence(command: RuntimeCommand) -> int:
