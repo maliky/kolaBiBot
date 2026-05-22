@@ -11,7 +11,13 @@ from kolabi.bot.indicators import (
 )
 from kolabi.bot.domain import OrderPairSpec, StrategySpec
 from kolabi.bot.persistence import OrderRecorder, PersistenceConfig
-from kolabi.bot.runtime.auditor import MarketAuditor
+from kolabi.bot.strategy_runtime import (
+    LegacyOgunExecutor,
+    SimulatedExecutor,
+    StrategyRunResult,
+    StrategyRuntime,
+)
+from kolabi.shared.core.bargain import Bargain
 from kolabi.shared.config import load_exchange_config
 from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.kraken_futures import kraken_futures_environment
@@ -23,26 +29,6 @@ from kolabi.tree.account import (
     KrakenFuturesPrivateStream,
     credentials_from_env,
 )
-
-
-class AuditorGoKwargs(TypedDict):
-    tps_run: tuple[float, float]
-    prix: tuple[float, float]
-    essais: int
-    side: str
-    q: float | int | None
-    tp: float | int
-    atype: str
-    oType: str
-    nameT: str
-    updatepause: int
-    logpause: int
-    dr_pause: float | None
-    tType: str
-    timeout: int | None
-    oDelta: float | None
-    tDelta: float | None
-    hook: str | None
 
 
 class InstrumentRulesExchange(Protocol):
@@ -77,42 +63,17 @@ class BotService:
     def __init__(
         self,
         config: BotConfig,
-        auditor: MarketAuditor | None = None,
         indicators: IndicatorClient | None = None,
     ) -> None:
         self.config = config
         self.logger = setup_logging(config.log_level)
-        self._manage_runtime_services = auditor is None
-        self.exchange_config = (
-            load_exchange_config(
-                config.exchange,
-                symbol=config.symbol,
-                environment=config.environment,
-            )
-            if auditor is None
-            else None
-        )
+        self.exchange_config = None
         market_db_url = config.market_db_url
         account_db_url = config.account_db_url
         if config.exchange.lower() == "kraken":
             env_cfg = kraken_futures_environment(config.environment)
             market_db_url = market_db_url or env_cfg.public_db_url
             account_db_url = account_db_url or env_cfg.private_db_url
-            if self.exchange_config is not None:
-                self.exchange_config.adapter_kwargs.setdefault(
-                    "public_db_url", market_db_url
-                )
-                self.exchange_config.adapter_kwargs.setdefault(
-                    "account_db_url", account_db_url
-                )
-        self.auditor = auditor or MarketAuditor(
-            exchange=config.exchange,
-            symbol=config.symbol,
-            live=False,
-            dbo=None,
-            logger=self.logger,
-            config=self.exchange_config,
-        )
         self.indicators: IndicatorClient = indicators or (
             KrakenDbIndicatorClient(
                 # > should probably use global constant here instead of string
@@ -131,7 +92,7 @@ class BotService:
             else None
         )
         self._server_started = False
-        self._account_thread: threading.Thread | None = None
+        self._account_thread: Any = None
         self._account_db_url = account_db_url
         self._market_db_url = market_db_url
         self.runtime_state: KrakenRuntimeStateClient | None = None
@@ -156,7 +117,6 @@ class BotService:
         if not self._server_started:
             self._start_kraken_private_stream()
             self._wait_until_ready()
-            self.auditor.start_server()
             self._server_started = True
 
     def preflight(self) -> dict[str, object]:
@@ -176,8 +136,7 @@ class BotService:
 
     def _start_kraken_private_stream(self) -> None:
         if (
-            not self._manage_runtime_services
-            or self.config.exchange.lower() != "kraken"
+            self.config.exchange.lower() != "kraken"
             or self._account_thread is not None
         ):
             return
@@ -243,11 +202,19 @@ class BotService:
             f"{self.config.ready_timeout_seconds:.0f}s: {reasons}"
         )
 
-    def run_strategy(self, strategy: StrategySpec, asynchronous: bool = True) -> None:
-        """Lance une strategie canonique en iterant ses paires."""
+    def run_strategy(
+        self,
+        strategy: StrategySpec,
+        *,
+        dry_run: bool = False,
+        simulate: bool = False,
+    ) -> StrategyRunResult:
+        """Execute the active typed runtime path in the foreground."""
         pair_list = list(strategy.pairs)
-        self._validate_pairs(pair_list)
-        self.start()
+        if not dry_run or self.exchange_config is not None:
+            self._validate_pairs(pair_list)
+        if not dry_run and not simulate:
+            self.start()
         for pair in pair_list:
             kwargs = self._pair_to_kwargs(pair)
             snapshot = self.indicators.fetch_snapshot(self.config.symbol)
@@ -256,23 +223,34 @@ class BotService:
                 run = self.recorder.start_run(pair, snapshot)
                 run_id = run.id
                 self.logger.info(f"[{pair.name}] submitted run #{run_id}")
-            if asynchronous:
-                # > I was hoping of not using thread here but only async. comment on the difficulty to have a async rewrite
-                thread = threading.Thread(
-                    target=self.auditor.go, name=pair.name, kwargs=kwargs
-                )
-                thread.start()
-            else:
-                self.auditor.go(**kwargs)
+            del kwargs, run_id
+        runtime = StrategyRuntime(
+            strategy=strategy,
+            symbol=self.config.symbol,
+            executor=None if dry_run else self._build_executor(simulate=simulate),
+            simulate=simulate,
+        )
+        import asyncio
 
-    def run_orders(self, pairs: Iterable[OrderPairSpec], asynchronous: bool = True) -> None:
+        if dry_run:
+            return asyncio.run(runtime.plan())
+        return asyncio.run(runtime.run())
+
+    def run_orders(self, pairs: Iterable[OrderPairSpec], *, dry_run: bool = False, simulate: bool = False) -> StrategyRunResult:
         """Compatibilite: accepte directement une liste de paires canoniques."""
-        self.run_strategy(StrategySpec(name="compat", pairs=tuple(pairs)), asynchronous=asynchronous)
+        return self.run_strategy(
+            StrategySpec(name="compat", pairs=tuple(pairs)),
+            dry_run=dry_run,
+            simulate=simulate,
+        )
 
     def _validate_pairs(self, pairs: Iterable[OrderPairSpec]) -> None:
         """Valide les contraintes instrument Kraken avant envoi."""
         if self.config.exchange.lower() != "kraken" or self.exchange_config is None:
-            return
+            if self.config.exchange.lower() != "kraken":
+                return
+            self._ensure_exchange_config()
+        assert self.exchange_config is not None
         adapter_cls = get_adapter("kraken")
         adapter = cast(
             InstrumentRulesExchange,
@@ -302,27 +280,35 @@ class BotService:
                     f"the minimum quantity {min_qty:g} for {self.config.symbol}."
                 )
 
-    def _pair_to_kwargs(self, pair: OrderPairSpec) -> AuditorGoKwargs:
-        """Traduit une paire canonique vers le contrat historic de go()."""
+    def _pair_to_kwargs(self, pair: OrderPairSpec) -> dict[str, object]:
+        """Conserve un resume local pour journaux/tests de transition."""
         return {
-            "tps_run": (pair.window.start_minutes, pair.window.end_minutes),
-            "prix": pair.head_price,
-            "essais": pair.try_num,
-            "side": pair.head.side.value,
-            "q": pair.head_quantity,
-            "tp": 0.0 if pair.tail_price_spec is None else pair.tail_price_spec,
-            "atype": pair.amount_type,
-            "oType": pair.head.order_type,
             "nameT": pair.name,
-            "updatepause": self.config.updatepause,
-            "logpause": self.config.logpause,
-            "dr_pause": pair.dr_pause,
-            "tType": pair.tail.order_type,
-            "timeout": pair.timeout,
-            "oDelta": pair.head.delta,
-            "tDelta": pair.tail.delta,
-            "hook": pair.hook_name,
+            "side": pair.head.side.value,
+            "prix": pair.head_price,
         }
+
+    def _build_executor(self, *, simulate: bool):
+        if simulate:
+            return SimulatedExecutor()
+        self._ensure_exchange_config()
+        if self.exchange_config is None:
+            raise RuntimeError("Exchange configuration is required for active execution")
+        bargain = Bargain(self.config.exchange, self.exchange_config)
+        return LegacyOgunExecutor(bargain)
+
+    def _ensure_exchange_config(self) -> None:
+        if self.exchange_config is not None:
+            return
+        self.exchange_config = load_exchange_config(
+            self.config.exchange,
+            symbol=self.config.symbol,
+            environment=self.config.environment,
+        )
+        if self._market_db_url is not None:
+            self.exchange_config.adapter_kwargs.setdefault("public_db_url", self._market_db_url)
+        if self._account_db_url is not None:
+            self.exchange_config.adapter_kwargs.setdefault("account_db_url", self._account_db_url)
 
 
 async def _run_private_stack(

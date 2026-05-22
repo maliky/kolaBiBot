@@ -26,7 +26,15 @@ from kolabi.runtime.kola.orders.orders import (
     place_stop,
 )
 from kolabi.shared.core.runtime_commands import command_order_type
-from kolabi.shared.core.runtime_types import OrderDict, RuntimeCommand, RuntimeCommandKind, decimal_to_float
+from kolabi.shared.core.runtime_types import (
+    AmendOrderCommandRequest,
+    CancelOrderCommandRequest,
+    OrderDict,
+    PlaceOrderCommandRequest,
+    RuntimeCommand,
+    RuntimeCommandKind,
+    decimal_to_float,
+)
 
 
 def execute_runtime_command(
@@ -35,7 +43,7 @@ def execute_runtime_command(
     *,
     amend_absdelta: float,
 ) -> Any:
-    order = cast(OrderDict, dict(command.order or {}))
+    order = _legacy_order_from_command(command)
     if command.kind not in {
         RuntimeCommandKind.PLACE,
         RuntimeCommandKind.AMEND,
@@ -109,6 +117,54 @@ def execute_runtime_command(
         price = _as_float_price(order.pop("price"))
         return place_LIT(cast(Any, brg), side, order_qty, stop_px, price, **opts)
     raise ValueError(f"Action type '{ord_type}' pas prise en compte")
+
+
+def _legacy_order_from_command(command: RuntimeCommand) -> OrderDict:
+    if command.request is None:
+        return cast(OrderDict, dict(command.order or {}))
+    request = command.request
+    if isinstance(request, CancelOrderCommandRequest):
+        return {
+            "pair_name": request.pair_name,
+            "ordType": request.ordType,
+            "clOrdID": request.clOrdID,
+        }
+    if isinstance(request, AmendOrderCommandRequest):
+        order: OrderDict = {
+            "pair_name": request.pair_name,
+            "ordType": request.ordType,
+            "side": request.side,
+            "orderID": request.orderID,
+        }
+        if request.clOrdID is not None:
+            order["clOrdID"] = request.clOrdID
+        if request.newPrice is not None:
+            order["newPrice"] = request.newPrice
+        if request.newQty is not None:
+            order["newQty"] = request.newQty
+        if request.text is not None:
+            order["text"] = request.text
+        return order
+    order = {
+        "pair_name": request.pair_name,
+        "ordType": request.ordType,
+        "side": request.side,
+    }
+    if request.orderQty is not None:
+        order["orderQty"] = request.orderQty
+    if request.price is not None:
+        order["price"] = request.price
+    if request.stopPx is not None:
+        order["stopPx"] = request.stopPx
+    if request.execInst is not None:
+        order["execInst"] = request.execInst
+    if request.clOrdID is not None:
+        order["clOrdID"] = request.clOrdID
+    if request.text is not None:
+        order["text"] = request.text
+    if request.oDelta is not None:
+        order["oDelta"] = request.oDelta
+    return cast(OrderDict, order)
 
 
 def _quantity_from_order(order: OrderDict) -> Any:

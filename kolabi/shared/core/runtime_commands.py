@@ -16,7 +16,10 @@ from decimal import Decimal
 from typing import Any, cast
 
 from kolabi.shared.core.runtime_types import (
+    AmendOrderCommandRequest,
+    CancelOrderCommandRequest,
     HeadCommandPayload,
+    PlaceOrderCommandRequest,
     OrderDict,
     OrderRole,
     RuntimeCommand,
@@ -38,15 +41,48 @@ def runtime_command_from_order(
     if ord_type == "cancel":
         kind = RuntimeCommandKind.CANCEL
         command_reason = reason or OrderRole.CANCEL.value
+        request = CancelOrderCommandRequest(
+            pair_name=str(normalized.get("pair_name", "")),
+            clOrdID=str(normalized["clOrdID"]),
+        )
+        role = OrderRole.CANCEL
     elif ord_type.startswith("amend"):
         kind = RuntimeCommandKind.AMEND
         command_reason = reason or OrderRole.AMEND.value
+        request = AmendOrderCommandRequest(
+            pair_name=str(normalized.get("pair_name", "")),
+            side=str(normalized["side"]),
+            ordType=ord_type,
+            orderID=str(normalized["orderID"]),
+            clOrdID=str(normalized.get("clOrdID", "")) or None,
+            newPrice=_maybe_float_price(normalized.get("newPrice")),
+            newQty=normalized.get("newQty"),
+            text=str(normalized.get("text", "")) or None,
+        )
+        role = OrderRole.AMEND
     else:
         kind = RuntimeCommandKind.PLACE
         command_reason = reason or OrderRole.HEAD.value
+        request = PlaceOrderCommandRequest(
+            pair_name=str(normalized.get("pair_name", "")),
+            side=str(normalized["side"]),
+            ordType=ord_type,
+            orderQty=normalized.get("orderQty", normalized.get("quantity")),
+            price=_maybe_float_price(normalized.get("price")),
+            stopPx=_maybe_float_price(normalized.get("stopPx")),
+            execInst=str(normalized.get("execInst", "")) or None,
+            clOrdID=str(normalized.get("clOrdID", "")) or None,
+            text=str(normalized.get("text", "")) or None,
+            oDelta=normalized.get("oDelta"),
+        )
+        role = OrderRole.HEAD if command_reason == OrderRole.HEAD.value else OrderRole.TAIL
     return RuntimeCommand(
         kind=kind,
         symbol=Symbol(symbol),
+        request=request,
+        pair_name=str(normalized.get("pair_name", "")) or None,
+        role=role,
+        legacy_order=normalized,
         order=normalized,
         reason=command_reason,
     )
@@ -77,6 +113,8 @@ def validation_conditions_for(
 
 
 def command_order_type(command: RuntimeCommand) -> str:
+    if command.request is not None:
+        return command.request.ordType
     return str((command.order or {}).get("ordType", ""))
 
 
@@ -85,26 +123,29 @@ def command_payload_for_role(
     *,
     role: OrderRole,
 ) -> HeadCommandPayload | TailCommandPayload:
-    order = cast(OrderDict, dict(command.order or {}))
-    if command.kind == RuntimeCommandKind.CANCEL:
-        request: dict[str, object] = {
-            "ordType": "cancel",
-            "clOrdID": str(order["clOrdID"]),
-        }
-    elif command.kind == RuntimeCommandKind.AMEND:
-        amend_request: dict[str, object] = {
-            "ordType": str(order["ordType"]),
-            "side": str(order["side"]),
-            "orderID": str(order["orderID"]),
-            "text": str(order.get("text", "")),
-        }
-        if "newPrice" in order:
-            amend_request["newPrice"] = _as_float_price(order["newPrice"])
-        if "newQty" in order:
-            amend_request["newQty"] = order["newQty"]
-        request = amend_request
+    if command.request is not None:
+        request = _request_dict_from_record(command.request)
     else:
-        request = _new_order_request_from(command)
+        order = cast(OrderDict, dict(command.order or {}))
+        if command.kind == RuntimeCommandKind.CANCEL:
+            request = {
+                "ordType": "cancel",
+                "clOrdID": str(order["clOrdID"]),
+            }
+        elif command.kind == RuntimeCommandKind.AMEND:
+            amend_request: dict[str, object] = {
+                "ordType": str(order["ordType"]),
+                "side": str(order["side"]),
+                "orderID": str(order["orderID"]),
+                "text": str(order.get("text", "")),
+            }
+            if "newPrice" in order:
+                amend_request["newPrice"] = _as_float_price(order["newPrice"])
+            if "newQty" in order:
+                amend_request["newQty"] = order["newQty"]
+            request = amend_request
+        else:
+            request = _new_order_request_from(command)
     payload = {
         "role": role.value,
         "command": command.kind,
@@ -131,12 +172,58 @@ def _new_order_request_from(command: RuntimeCommand) -> dict[str, object]:
     return request
 
 
+def _request_dict_from_record(
+    request: PlaceOrderCommandRequest | AmendOrderCommandRequest | CancelOrderCommandRequest,
+) -> dict[str, object]:
+    if isinstance(request, CancelOrderCommandRequest):
+        return {"ordType": request.ordType, "clOrdID": request.clOrdID}
+    if isinstance(request, AmendOrderCommandRequest):
+        payload: dict[str, object] = {
+            "ordType": request.ordType,
+            "side": request.side,
+            "orderID": request.orderID,
+            "text": request.text or "",
+        }
+        if request.newPrice is not None:
+            payload["newPrice"] = _as_float_price(request.newPrice)
+        if request.newQty is not None:
+            payload["newQty"] = request.newQty
+        if request.clOrdID is not None:
+            payload["clOrdID"] = request.clOrdID
+        return payload
+    payload = {
+        "ordType": request.ordType,
+        "side": request.side,
+    }
+    if request.orderQty is not None:
+        payload["orderQty"] = request.orderQty
+    if request.price is not None:
+        payload["price"] = _as_float_price(request.price)
+    if request.stopPx is not None:
+        payload["stopPx"] = _as_float_price(request.stopPx)
+    if request.execInst is not None:
+        payload["execInst"] = request.execInst
+    if request.clOrdID is not None:
+        payload["clOrdID"] = request.clOrdID
+    if request.text is not None:
+        payload["text"] = request.text
+    if request.oDelta is not None:
+        payload["oDelta"] = request.oDelta
+    return payload
+
+
 def _as_float_price(value: object) -> float:
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, (int, float, str)):
         return float(Decimal(str(value)))
     raise TypeError(f"Unsupported price value type: {type(value)!r}")
+
+
+def _maybe_float_price(value: object | None) -> float | None:
+    if value is None:
+        return None
+    return _as_float_price(value)
 
 
 __all__ = [

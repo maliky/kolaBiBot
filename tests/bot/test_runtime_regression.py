@@ -1,66 +1,31 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List
 
 from kolabi.bot.indicators import DummyIndicatorClient
-from kolabi.bot.runtime.auditor import MarketAuditor
 from kolabi.bot.service import BotConfig, BotService
+from kolabi.bot.strategy_runtime import StrategyRunResult
 from kolabi.bot.tsv import read_strategy_file
-from kolabi.runtime.kola.multi_kola import KolaMarketAuditor
 from kolabi.shared.config import ExchangeConfig
 
 
-class RecordingAuditor:
-    def __init__(self) -> None:
-        self.started = False
-        self.calls: List[dict] = []
-
-    def start_server(self) -> None:
-        self.started = True
-
-    def go(self, **kwargs) -> None:
-        self.calls.append(kwargs)
-
-
-def test_demo_ada_strategy_parsed_and_dispatched(tmp_path: Path) -> None:
+def test_demo_ada_strategy_parsed_and_planned_on_active_runtime() -> None:
     strategy = read_strategy_file(Path("orders/demo_ada.tsv"))
     assert len(strategy.pairs) >= 2
 
-    auditor = RecordingAuditor()
     service = BotService(
         BotConfig(symbol="XBTUSD", require_ready=False),
-        auditor=auditor,  # type: ignore[arg-type]
         indicators=DummyIndicatorClient({"ma": 42}),
     )
-    service.run_strategy(strategy, asynchronous=False)
+    result = service.run_strategy(strategy, dry_run=True)
 
-    assert auditor.started
-    assert len(auditor.calls) == len(strategy.pairs)
-    first = auditor.calls[0]
+    assert isinstance(result, StrategyRunResult)
+    assert len(result.commands) == len(strategy.pairs)
+    first = result.commands[0]
     first_pair = strategy.pairs[0]
-    assert set(first.keys()) == {
-        "tps_run",
-        "prix",
-        "essais",
-        "side",
-        "q",
-        "tp",
-        "atype",
-        "oType",
-        "nameT",
-        "updatepause",
-        "logpause",
-        "dr_pause",
-        "tType",
-        "timeout",
-        "oDelta",
-        "tDelta",
-        "hook",
-    }
-    assert first["nameT"] == first_pair.name
-    assert first["side"] == first_pair.head.side.value
-    assert first["prix"] == first_pair.head_price
+    assert first.pair_name == first_pair.name
+    assert first.role is not None and first.role.value == "head"
+    assert first.request is not None
 
 
 def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) -> None:
@@ -72,10 +37,8 @@ def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) ->
             return {"symbol": symbol, "minQuantity": 30.0}
 
     strategy = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
-    auditor = RecordingAuditor()
     service = BotService(
         BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False),
-        auditor=auditor,  # type: ignore[arg-type]
         indicators=DummyIndicatorClient({"ma": 42}),
     )
     service.exchange_config = ExchangeConfig(
@@ -88,12 +51,13 @@ def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) ->
     monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _: FakeKrakenAdapter)
 
     try:
-        service.run_strategy(strategy, asynchronous=False)
+        service.run_strategy(strategy, dry_run=True)
     except ValueError as exc:
         assert "below the minimum quantity 30" in str(exc)
     else:
         raise AssertionError("Expected quantity validation to fail before dispatch")
 
 
-def test_active_market_auditor_no_longer_subclasses_multi_kola() -> None:
-    assert KolaMarketAuditor not in MarketAuditor.__mro__
+def test_active_runtime_no_longer_depends_on_market_auditor() -> None:
+    source = Path("kolabi/bot/service.py").read_text()
+    assert "MarketAuditor" not in source

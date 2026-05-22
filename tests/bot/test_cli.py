@@ -83,6 +83,22 @@ def test_run_once_command_dry_run_prints_canonical_structure(capsys) -> None:
         Hook="",
         dry_run=True,
         sync=False,
+        simulate=False,
+        exchange="kraken",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        db_url=None,
+        market_db_url=None,
+        account_db_url=None,
+        skip_ready_check=True,
+        ready_timeout_seconds=45.0,
+        ready_poll_seconds=1.0,
+        max_public_age_seconds=15.0,
+        max_private_age_seconds=30.0,
+        max_reconcile_age_seconds=300.0,
+        log_level="INFO",
+        update_pause=10,
+        log_pause=60,
     )
 
     exit_code = run_once_command(args)
@@ -90,18 +106,27 @@ def test_run_once_command_dry_run_prints_canonical_structure(capsys) -> None:
     assert exit_code == 0
     output = capsys.readouterr().out
     assert '"name": "XSellTail"' in output
-    assert '"head_price_spec"' in output
-    assert '"tail_price_spec": 0.5' in output
     assert '"pairs"' in output
+    assert '"commands"' in output
+    assert '"kind": "place"' in output
 
 
 def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
     class RecordingService:
         def __init__(self) -> None:
-            self.calls: list[tuple[StrategySpec, bool]] = []
+            self.calls: list[tuple[StrategySpec, bool, bool]] = []
 
-        def run_strategy(self, strategy: StrategySpec, *, asynchronous: bool) -> None:
-            self.calls.append((strategy, asynchronous))
+        def run_strategy(self, strategy: StrategySpec, *, dry_run: bool, simulate: bool):
+            from kolabi.bot.strategy_runtime import StrategyRunResult
+            from kolabi.bot.domain import StrategyState, PairCycleState
+            from datetime import datetime, timezone
+
+            self.calls.append((strategy, dry_run, simulate))
+            state = StrategyState(
+                launched_at=datetime.now(timezone.utc),
+                pairs={pair.name: PairCycleState(pair=pair) for pair in strategy.pairs},
+            )
+            return StrategyRunResult(state=state, commands=(), notices=())
 
     service = RecordingService()
     strategy = read_strategy_file("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")
@@ -113,6 +138,7 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
         strategy="orders/demo_ada.tsv",
         dry_run=False,
         sync=True,
+        simulate=False,
     )
     run_once_args = argparse.Namespace(
         name="XSellTail",
@@ -132,6 +158,7 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
         Hook="",
         dry_run=False,
         sync=True,
+        simulate=False,
     )
 
     assert run_command(run_args) == 0
@@ -141,3 +168,5 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
     assert len(service.calls[1][0].pairs) == 1
     assert service.calls[0][1] is False
     assert service.calls[1][1] is False
+    assert service.calls[0][2] is False
+    assert service.calls[1][2] is False

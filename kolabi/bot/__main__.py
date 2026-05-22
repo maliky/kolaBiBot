@@ -74,7 +74,12 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Parse the strategy file and print orders without submitting them",
+        help="Plan the strategy through Orange/Chronos/Isis/Janus without calling Ogun",
+    )
+    parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Run the async supervisor path with simulated execution and confirmations",
     )
 
 
@@ -340,19 +345,20 @@ def run_command(args: argparse.Namespace) -> int:
         print("No strategies found in file.", file=sys.stderr)
         return 1
 
-    if args.dry_run:
-        print(json.dumps(strategy_to_pretty_dict(strategy), indent=2, sort_keys=True, default=str))
-        return 0
-
     service = build_service(args)
-    service.run_strategy(strategy, asynchronous=not args.sync)
-    if args.sync:
-        print(f"Executed {len(strategy.pairs)} order(s) synchronously.")
-    else:
+    result = service.run_strategy(strategy, dry_run=args.dry_run, simulate=args.simulate)
+    if args.dry_run:
+        payload = {
+            "strategy": strategy_to_pretty_dict(strategy),
+            "commands": [_command_to_pretty_dict(command) for command in result.commands],
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    elif args.simulate:
         print(
-            f"Submitted {len(strategy.pairs)} order(s). "
-            "Threads running in background; monitor logs for progress."
+            f"Simulated {len(strategy.pairs)} order pair(s) through the async supervisor path."
         )
+    else:
+        print(f"Executed {len(strategy.pairs)} order pair(s) through the async supervisor path.")
     return 0
 
 
@@ -360,17 +366,36 @@ def run_once_command(args: argparse.Namespace) -> int:
     """Run one command-line strategy row using the compatibility parameter names."""
     strategy = build_single_strategy(args)
 
-    if args.dry_run:
-        print(json.dumps(strategy_to_pretty_dict(strategy), indent=2, sort_keys=True, default=str))
-        return 0
-
     service = build_service(args)
-    service.run_strategy(strategy, asynchronous=not args.sync)
-    if args.sync:
-        print("Executed 1 order pair synchronously.")
+    result = service.run_strategy(strategy, dry_run=args.dry_run, simulate=args.simulate)
+    if args.dry_run:
+        payload = {
+            "strategy": strategy_to_pretty_dict(strategy),
+            "commands": [_command_to_pretty_dict(command) for command in result.commands],
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+    elif args.simulate:
+        print("Simulated 1 order pair through the async supervisor path.")
     else:
-        print("Submitted 1 order pair. Threads running in background; monitor logs for progress.")
+        print("Executed 1 order pair through the async supervisor path.")
     return 0
+
+
+def _command_to_pretty_dict(command) -> dict[str, object]:
+    payload = {
+        "kind": command.kind.value,
+        "symbol": str(command.symbol),
+        "pair_name": command.pair_name,
+        "role": None if command.role is None else command.role.value,
+        "reason": command.reason,
+    }
+    if command.request is not None:
+        payload["request"] = command.request.__dict__
+    elif command.order is not None:
+        payload["request"] = dict(command.order)
+    else:
+        payload["request"] = None
+    return payload
 
 
 def preflight_command(args: argparse.Namespace) -> int:

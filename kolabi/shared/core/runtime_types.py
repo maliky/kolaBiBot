@@ -186,6 +186,44 @@ class CancelOrderRequest(TypedDict):
 OrderRequest = NewOrderRequest | AmendOrderRequest | CancelOrderRequest
 
 
+@dataclass(frozen=True)
+class PlaceOrderCommandRequest:
+    pair_name: str
+    side: str
+    ordType: str
+    orderQty: Quantity | None = None
+    price: Price | float | None = None
+    stopPx: StopPrice | float | None = None
+    execInst: str | None = None
+    clOrdID: str | None = None
+    text: str | None = None
+    oDelta: PriceOffset | float | None = None
+
+
+@dataclass(frozen=True)
+class AmendOrderCommandRequest:
+    pair_name: str
+    side: str
+    ordType: str
+    orderID: str
+    clOrdID: str | None = None
+    newPrice: LimitPrice | float | None = None
+    newQty: Quantity | None = None
+    text: str | None = None
+
+
+@dataclass(frozen=True)
+class CancelOrderCommandRequest:
+    pair_name: str
+    clOrdID: str
+    ordType: str = "cancel"
+
+
+CommandRequestRecord = (
+    PlaceOrderCommandRequest | AmendOrderCommandRequest | CancelOrderCommandRequest
+)
+
+
 class OrderLoad(TypedDict):
     sender: object
     timeOut: object
@@ -343,6 +381,10 @@ class RuntimeEvent:
 class RuntimeCommand:
     kind: RuntimeCommandKind
     symbol: Symbol
+    request: CommandRequestRecord | None = None
+    pair_name: str | None = None
+    role: OrderRole | None = None
+    legacy_order: OrderDict | None = None
     order: OrderDict | None = None
     reason: str | None = None
 

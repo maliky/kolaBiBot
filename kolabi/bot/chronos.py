@@ -303,6 +303,10 @@ def _with_target_pair(event: EggMove, pair_name: str | None) -> EggMove:
 
 
 def _command_pair_name(command: RuntimeCommand) -> str | None:
+    if command.pair_name:
+        return command.pair_name
+    if command.request is not None:
+        return command.request.pair_name or None
     if command.order is None:
         return None
     pair_name = command.order.get("pair_name")
@@ -310,6 +314,8 @@ def _command_pair_name(command: RuntimeCommand) -> str | None:
 
 
 def _command_client_order_id(command: RuntimeCommand) -> str | None:
+    if command.request is not None:
+        return getattr(command.request, "clOrdID", None)
     if command.order is None:
         return None
     candidate = command.order.get("clOrdID")

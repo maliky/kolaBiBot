@@ -11,7 +11,7 @@ Role: pure logic.
 from __future__ import annotations
 
 from kolabi.bot.domain import PairCycleState, PairIntent, PairIntentKind
-from kolabi.bot.order_building import head_order_dict, tail_command
+from kolabi.bot.order_building import head_order_dict, head_place_request, tail_command
 from kolabi.shared.core.runtime_types import OrderRole, RuntimeCommand, RuntimeCommandKind, Symbol
 
 
@@ -29,6 +29,10 @@ def plan_runtime_commands(
                 RuntimeCommand(
                     kind=RuntimeCommandKind.PLACE,
                     symbol=symbol,
+                    request=head_place_request(state.pair),
+                    pair_name=state.pair.name,
+                    role=OrderRole.HEAD,
+                    legacy_order=head_order_dict(state.pair),
                     order=head_order_dict(state.pair),
                     reason=OrderRole.HEAD.value,
                 )

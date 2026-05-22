@@ -1,23 +1,19 @@
-"""Pair-cycle reducer and runner bridge for the active bot runtime.
+"""Pure pair-cycle reducer for the active bot runtime.
 
 Purpose: evaluate one head/tail pair lifecycle through typed reducer moves and
-emit typed command intents, while keeping exchange IO in a thin runner shell.
-Inputs: `OrderPairSpec`, `StrategyState`, `EggMove`, market snapshots, and
-exchange acknowledgements.
-Outputs: `PairCycleResult`, updated strategy memory, and command intents.
-Side effects: exchange submission in runner methods and async/thread IO bridging.
-Important types: `PairCycleState`, `StrategyState`, `EggMove`, `PairIntent`,
-`RuntimeCommand`, `OrderAck`.
-Role: interpreter shell plus pure reducer core.
-Transitional: yes, still bridges legacy payloads at boundary helpers.
+emit ordered command intents without side effects.
+Inputs: `PairCycleState` and one typed `EggMove`.
+Outputs: next immutable `PairCycleState` and ordered `PairIntent` values.
+Side effects: none.
+Important types: `PairCycleState`, `EggMove`, `PairIntent`.
+Role: pure logic.
 """
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Protocol, cast
+from typing import cast
 
 from kolabi.bot.domain import (
     classify_confirmed_move,
@@ -30,175 +26,12 @@ from kolabi.bot.domain import (
     PairIntent,
     PairIntentKind,
     OrderReason,
-    PairCycleEvent,
     PairCycleState,
-    Side,
-    StrategyState,
     TailMode,
     TailState,
-    normalize_reason,
 )
-from kolabi.bot.ids import head_client_order_id
-from kolabi.bot.janus import plan_runtime_commands
-from kolabi.bot.order_building import head_order_dict
-from kolabi.bot.pricing import pair_window_is_open, resolve_head_price
-from kolabi.shared.core.models import OrderAck
-from kolabi.shared.core.runtime_types import BrokerReply, Symbol, to_decimal
-from kolabi.shared.runtime_state import KrakenRuntimeStateClient, PublicMarketState
-
-
-class ExchangeGateway(Protocol):
-    """Exchange write boundary used by the runner shell."""
-
-    def place_order(
-        self,
-        side: str,
-        orderQty: float,
-        price: float | None = None,
-        stopPx: float | None = None,
-        type_: str = "LIMIT",
-        **params: object,
-    ) -> OrderAck: ...
-
-    def amend_order(self, order_id: str, **params: float) -> OrderAck: ...
-
-    def instrument_rules(self, symbol: str | None = None) -> dict[str, object]: ...
-
-
-@dataclass(frozen=True)
-class PairCycleResult:
-    """Runner result payload for one pair pass."""
-
-    state: PairCycleState
-    events: tuple[PairCycleEvent, ...]
-
-
-class PairCycleRunner:
-    """Run one typed pair cycle against DB state and an exchange boundary."""
-
-    def __init__(
-        self,
-        *,
-        exchange: ExchangeGateway,
-        runtime_state: KrakenRuntimeStateClient | None,
-        symbol: str,
-        dry_run: bool = False,
-    ) -> None:
-        self.exchange = exchange
-        self.runtime_state = runtime_state
-        self.symbol = symbol
-        self.dry_run = dry_run
-        self.strategy_state: StrategyState | None = None
-
-    async def run_pairs_once(self, pairs: list[OrderPairSpec]) -> list[PairCycleResult]:
-        now = datetime.now(timezone.utc)
-        return await asyncio.gather(*(self.run_pair_once(pair, now=now) for pair in pairs))
-
-    async def run_pair_once(
-        self,
-        pair: OrderPairSpec,
-        *,
-        now: datetime | None = None,
-    ) -> PairCycleResult:
-        current_time = now or datetime.now(timezone.utc)
-        state = self._state_for_pair(pair, current_time)
-        events: list[PairCycleEvent] = []
-        market = self._market_state()
-        assert self.strategy_state is not None
-        if not pair_window_is_open(pair, launched_at=self.strategy_state.launched_at, now=current_time):
-            return self._result(state, events, "pair outside time window")
-        if market is None or not market.ready:
-            return self._result(state, events, "public market state is not ready")
-
-        hooked, intents = step_pair(
-            state,
-            EggMove(
-                kind=EggMoveKind.HEAD_HOOKED,
-                occurred_at=current_time,
-                symbol=self.symbol,
-            ),
-        )
-        events.append(PairCycleEvent(pair.name, hooked, "head hooked"))
-        if self.dry_run:
-            self._save_pair_state(pair.name, hooked)
-            return self._result(hooked, events, "dry run stopped before submission")
-
-        commands = plan_runtime_commands(hooked, intents, symbol=cast(Symbol, self.symbol))
-        if not commands:
-            self._save_pair_state(pair.name, hooked)
-            return self._result(hooked, events, "no command emitted")
-
-        client_order_id = head_client_order_id(pair, at=current_time)
-        submission_ack = await asyncio.to_thread(
-            self._submit_head,
-            pair,
-            market,
-            client_order_id,
-        )
-        submitted, _ = step_pair(
-            hooked,
-            EggMove(
-                kind=EggMoveKind.HEAD_SUBMITTED,
-                occurred_at=datetime.now(timezone.utc),
-                symbol=self.symbol,
-                order=head_order_dict(pair, client_order_id=client_order_id),
-                reply=broker_reply_from_ack(submission_ack, client_order_id=client_order_id),
-            ),
-        )
-        events.append(PairCycleEvent(pair.name, submitted, "head submitted"))
-        self._save_pair_state(pair.name, submitted)
-        return self._result(submitted, events, "head submitted; awaiting private confirmation")
-
-    def _state_for_pair(self, pair: OrderPairSpec, now: datetime) -> PairCycleState:
-        if self.strategy_state is None:
-            self.strategy_state = StrategyState(launched_at=now, pairs={})
-        existing = self.strategy_state.pairs.get(pair.name)
-        if existing is None:
-            initial = PairCycleState(pair=pair)
-            self._save_pair_state(pair.name, initial)
-            return initial
-        if existing.pair != pair:
-            migrated = replace(existing, pair=pair)
-            self._save_pair_state(pair.name, migrated)
-            return migrated
-        return existing
-
-    def _save_pair_state(self, pair_name: str, state: PairCycleState) -> None:
-        assert self.strategy_state is not None
-        self.strategy_state = replace(
-            self.strategy_state,
-            pairs={**self.strategy_state.pairs, pair_name: state},
-        )
-
-    def _market_state(self) -> PublicMarketState | None:
-        if self.runtime_state is None:
-            return None
-        return self.runtime_state.fetch_market_state(self.symbol)
-
-    def _submit_head(
-        self,
-        pair: OrderPairSpec,
-        market: PublicMarketState,
-        client_order_id: str,
-    ) -> OrderAck:
-        price = resolve_head_price(pair, market)
-        quantity = resolve_quantity(pair)
-        return self.exchange.place_order(
-            side=pair.head.side.value,
-            orderQty=quantity,
-            price=price,
-            type_=pair.head.order_type,
-            clOrdID=client_order_id,
-        )
-
-    @staticmethod
-    def _result(
-        state: PairCycleState,
-        events: list[PairCycleEvent],
-        message: str,
-    ) -> PairCycleResult:
-        events.append(PairCycleEvent(state.pair.name, state, message))
-        return PairCycleResult(state=state, events=tuple(events))
+from kolabi.bot.orange import reason_from_status_or_reason
+from kolabi.shared.core.runtime_types import to_decimal
 
 
 def step_pair(
@@ -309,28 +142,6 @@ def resolve_quantity(pair: OrderPairSpec) -> float:
     return float(to_decimal(quantity))
 
 
-def broker_reply_from_ack(
-    ack: OrderAck,
-    *,
-    client_order_id: str | None = None,
-) -> BrokerReply:
-    reply: BrokerReply = {
-        "orderID": ack.order_id,
-        "ordStatus": ack.status,
-    }
-    if client_order_id is not None:
-        reply["clOrdID"] = client_order_id
-    if ack.side is not None:
-        reply["side"] = ack.side
-    if ack.price is not None:
-        reply["price"] = ack.price
-    if ack.executed_qty is not None:
-        reply["cumQty"] = float(to_decimal(ack.executed_qty))  # type: ignore[typeddict-unknown-key]
-    if ack.orig_qty is not None:
-        reply["orderQty"] = float(to_decimal(ack.orig_qty))  # type: ignore[typeddict-unknown-key]
-    return reply
-
-
 def head_identity_from_move(
     state: PairCycleState,
     move: EggMove,
@@ -382,13 +193,4 @@ def egg_move_from_confirmed_head(
 
 
 def reason_from_status(status: str) -> OrderReason:
-    normalized = status.replace(" ", "_").replace("-", "_").lower()
-    if normalized in {"partiallyfilled", "partial_fill"}:
-        return OrderReason.PARTIAL_FILL
-    if normalized in {"filled", "full_fill"}:
-        return OrderReason.FULL_FILL
-    if normalized in {"canceled", "cancelled"}:
-        return OrderReason.CANCELLED_BY_USER
-    if normalized in {"new", "open"}:
-        return OrderReason.NEW_PLACED_ORDER_BY_USER
-    return normalize_reason(normalized)
+    return reason_from_status_or_reason(status, None)

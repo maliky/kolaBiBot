@@ -19,7 +19,12 @@ from kolabi.bot.domain import (
     TimeWindow,
 )
 from kolabi.bot.janus import plan_runtime_commands
-from kolabi.shared.core.runtime_types import RuntimeCommandKind, Symbol
+from kolabi.shared.core.runtime_types import (
+    AmendOrderCommandRequest,
+    PlaceOrderCommandRequest,
+    RuntimeCommandKind,
+    Symbol,
+)
 
 
 def sample_pair(name: str, *, tail_order_type: str = "Stop") -> OrderPairSpec:
@@ -100,12 +105,12 @@ def test_place_head_translates_to_one_head_place_command() -> None:
     assert len(commands) == 1
     assert commands[0].kind == RuntimeCommandKind.PLACE
     assert commands[0].reason == "head"
-    assert commands[0].order == {
-        "side": "buy",
-        "ordType": "Limit",
-        "pair_name": "pair-a",
-        "orderQty": Decimal("2"),
-    }
+    assert commands[0].request == PlaceOrderCommandRequest(
+        pair_name="pair-a",
+        side="buy",
+        ordType="Limit",
+        orderQty=Decimal("2"),
+    )
 
 
 def test_place_tail_translates_to_one_tail_place_command() -> None:
@@ -118,14 +123,14 @@ def test_place_tail_translates_to_one_tail_place_command() -> None:
     assert len(commands) == 1
     assert commands[0].kind == RuntimeCommandKind.PLACE
     assert commands[0].reason == "tail"
-    assert commands[0].order == {
-        "side": "sell",
-        "ordType": "Stop",
-        "pair_name": "pair-a",
-        "orderQty": Decimal("2"),
-        "stopPx": Decimal("99.0"),
-        "oDelta": Decimal("0.5"),
-    }
+    assert commands[0].request == PlaceOrderCommandRequest(
+        pair_name="pair-a",
+        side="sell",
+        ordType="Stop",
+        orderQty=Decimal("2"),
+        stopPx=Decimal("99.0"),
+        oDelta=Decimal("0.5"),
+    )
 
 
 def test_amend_tail_with_full_identity_translates_to_one_amend_command() -> None:
@@ -148,18 +153,15 @@ def test_amend_tail_with_full_identity_translates_to_one_amend_command() -> None
     assert len(commands) == 1
     assert commands[0].kind == RuntimeCommandKind.AMEND
     assert commands[0].reason == "tail"
-    assert commands[0].order == {
-        "side": "sell",
-        "ordType": "Stop",
-        "pair_name": "pair-a",
-        "orderQty": Decimal("1"),
-        "stopPx": Decimal("99.0"),
-        "oDelta": Decimal("0.5"),
-        "clOrdID": "CID-T",
-        "orderID": "OID-T",
-        "newPrice": Decimal("99.0"),
-        "newQty": Decimal("1"),
-    }
+    assert commands[0].request == AmendOrderCommandRequest(
+        pair_name="pair-a",
+        side="sell",
+        ordType="Stop",
+        orderID="OID-T",
+        clOrdID="CID-T",
+        newPrice=Decimal("99.0"),
+        newQty=Decimal("1"),
+    )
 
 
 def test_amend_tail_without_identity_raises() -> None:
