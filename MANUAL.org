@@ -386,7 +386,8 @@ options:
   --update-pause UPDATE_PAUSE
   --log-pause LOG_PAUSE
   --sync                Run orders synchronously (blocking) instead of spawning threads
-  --dry-run             Parse the strategy file and print orders without submitting them
+  --dry-run             Plan the strategy through Orange/Chronos/Isis/Janus without calling Ogun
+  --simulate            Run the async supervisor path with simulated execution and confirmations
   --tps_run, -t TPS_RUN TPS_RUN
                         Strategy validity window in minutes from launch, as start end. Example: -t 0 60 means active now for one hour.
   --name, -m NAME       Internal order name shown in logs.

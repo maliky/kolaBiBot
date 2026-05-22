@@ -133,7 +133,11 @@ kolabi/
 |  |- indicators.py               # reads indicator snapshots from the public DB
 |  |- persistence.py              # optional bot-run persistence
 |  |- runtime/
-|  |  `- auditor.py                 # active MarketAuditor shell used by kolabi.bot
+|  |  |- orange.py                  # event normalizer/translator into reducer moves
+|  |  |- chronos.py                 # async supervisor over strategy state
+|  |  |- isis.py                    # pure strategy reducer
+|  |  |- janus.py                   # pure intent-to-command planner
+|  |  `- strategy_runtime.py        # active async foreground runtime path
 |  `- tsv/
 |     `- parser.py                # TSV parser and OrderSpec normalisation
 |- kraken_contract/
