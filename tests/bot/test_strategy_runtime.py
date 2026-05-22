@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from kolabi.bot.domain import HeadSpec, OrderPairSpec, Side, TailSpec, TimeWindow, TailState
-from kolabi.bot.strategy_runtime import SimulatedExecutor, StrategyRuntime
+from kolabi.bot.strategy_runtime import SimulatedExecutor, StrategyRuntime, plan_strategy_once
 
 
 def sample_strategy() -> tuple[OrderPairSpec, ...]:
@@ -27,15 +27,13 @@ def sample_strategy() -> tuple[OrderPairSpec, ...]:
     )
 
 
-def test_strategy_runtime_plans_with_chronos_path() -> None:
+def test_plan_strategy_once_uses_the_chronos_path() -> None:
     from kolabi.bot.domain import StrategySpec
 
-    runtime = StrategyRuntime(
+    result = plan_strategy_once(
         strategy=StrategySpec(name="demo", pairs=sample_strategy()),
         symbol="PI_XBTUSD",
-        executor=None,
     )
-    result = asyncio.run(runtime.plan())
 
     assert result.commands
     assert result.commands[0].pair_name == "pair-a"
