@@ -15,8 +15,8 @@ import kolabi.bot.domain
 import kolabi.bot.pricing
 import kolabi.bot.pair_cycle
 import kolabi.bot.isis
-import kolabi.bot.janus
-import kolabi.bot.orange
+import kolabi.bot.horus
+import kolabi.bot.dragon
 
 banned = sorted(
     name

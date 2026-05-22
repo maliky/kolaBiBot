@@ -21,7 +21,7 @@ from kolabi.bot.domain import (
     TailSpec,
     TimeWindow,
 )
-from kolabi.shared.core.runtime_types import BotCommand
+from kolabi.shared.core.runtime_types import DragonSong
 
 
 @scenario("features/chronos_supervisor.feature", "Event routing changes only pair B")
@@ -163,7 +163,7 @@ def given_closed_tail_and_dependent_pair() -> tuple[Chronos, EggMove]:
 
 
 @when("a private event for pair B is processed by Chronos", target_fixture="result")
-def when_private_event_for_pair_b(chronos: Chronos) -> tuple[Chronos, tuple[BotCommand, ...], StrategyState]:
+def when_private_event_for_pair_b(chronos: Chronos) -> tuple[Chronos, tuple[DragonSong, ...], StrategyState]:
     before = chronos.state
     commands = chronos.process_event(
         EggMove(
@@ -179,7 +179,7 @@ def when_private_event_for_pair_b(chronos: Chronos) -> tuple[Chronos, tuple[BotC
 
 
 @when("the same private fill event is processed twice", target_fixture="result")
-def when_same_private_fill_twice(chronos: Chronos) -> tuple[Chronos, tuple[BotCommand, ...], tuple[BotCommand, ...]]:
+def when_same_private_fill_twice(chronos: Chronos) -> tuple[Chronos, tuple[DragonSong, ...], tuple[DragonSong, ...]]:
     move = EggMove(
         kind=EggMoveKind.PLAYED_AND_CANCELED,
         occurred_at=datetime(2026, 5, 21, 12, 1, tzinfo=timezone.utc),
@@ -195,7 +195,7 @@ def when_same_private_fill_twice(chronos: Chronos) -> tuple[Chronos, tuple[BotCo
 
 
 @when("Chronos processes the same-cycle event batch", target_fixture="result")
-def when_process_same_cycle_batch(payload: tuple[Chronos, list[EggMove]]) -> tuple[Chronos, tuple[BotCommand, ...]]:
+def when_process_same_cycle_batch(payload: tuple[Chronos, list[EggMove]]) -> tuple[Chronos, tuple[DragonSong, ...]]:
     chronos, events = payload
     return chronos, chronos.process_events(events)
 
@@ -209,13 +209,13 @@ def when_pending_identity_timeout_expires(payload: tuple[Chronos, EggMove]) -> t
 
 
 @when("Chronos processes the upstream private closing event", target_fixture="result")
-def when_chronos_processes_upstream_private_closing_event(payload: tuple[Chronos, EggMove]) -> tuple[Chronos, tuple[BotCommand, ...]]:
+def when_chronos_processes_upstream_private_closing_event(payload: tuple[Chronos, EggMove]) -> tuple[Chronos, tuple[DragonSong, ...]]:
     chronos, move = payload
     return chronos, chronos.process_event(move)
 
 
 @then("only pair B state should change")
-def then_only_pair_b_changes(result: tuple[Chronos, tuple[BotCommand, ...], StrategyState]) -> None:
+def then_only_pair_b_changes(result: tuple[Chronos, tuple[DragonSong, ...], StrategyState]) -> None:
     chronos, _commands, before = result
     assert chronos.state.pairs["pair-a"] == before.pairs["pair-a"]
     assert chronos.state.pairs["pair-c"] == before.pairs["pair-c"]
@@ -223,33 +223,33 @@ def then_only_pair_b_changes(result: tuple[Chronos, tuple[BotCommand, ...], Stra
 
 
 @then("pairs A and C should emit no commands")
-def then_pairs_a_and_c_emit_no_commands(result: tuple[Chronos, tuple[BotCommand, ...], StrategyState]) -> None:
+def then_pairs_a_and_c_emit_no_commands(result: tuple[Chronos, tuple[DragonSong, ...], StrategyState]) -> None:
     _chronos, commands, _before = result
     assert commands == ()
 
 
 @then("Chronos should emit commands only once for that logical event")
-def then_emit_commands_only_once(result: tuple[Chronos, tuple[BotCommand, ...], tuple[BotCommand, ...]]) -> None:
+def then_emit_commands_only_once(result: tuple[Chronos, tuple[DragonSong, ...], tuple[DragonSong, ...]]) -> None:
     _chronos, first, second = result
     assert first
     assert second == ()
 
 
 @then("Chronos should record DuplicateEventIgnored")
-def then_record_duplicate_event_ignored(result: tuple[Chronos, tuple[BotCommand, ...], tuple[BotCommand, ...]]) -> None:
+def then_record_duplicate_event_ignored(result: tuple[Chronos, tuple[DragonSong, ...], tuple[DragonSong, ...]]) -> None:
     chronos, _first, _second = result
     assert chronos.notices[-1].kind == ChronosNoticeKind.DUPLICATE_EVENT_IGNORED
 
 
 @then("the private terminal event should win")
-def then_private_terminal_wins(result: tuple[Chronos, tuple[BotCommand, ...]]) -> None:
+def then_private_terminal_wins(result: tuple[Chronos, tuple[DragonSong, ...]]) -> None:
     chronos, commands = result
     assert commands == ()
     assert chronos.state.pairs["pair-b"].head_state == HeadState.FAILED
 
 
 @then("the public trigger should be recorded as ignored")
-def then_public_trigger_recorded_as_ignored(result: tuple[Chronos, tuple[BotCommand, ...]]) -> None:
+def then_public_trigger_recorded_as_ignored(result: tuple[Chronos, tuple[DragonSong, ...]]) -> None:
     chronos, _commands = result
     assert any(notice.kind == ChronosNoticeKind.PUBLIC_EVENT_IGNORED for notice in chronos.notices)
 
@@ -268,13 +268,13 @@ def then_no_exchange_command(result: tuple[Chronos, tuple[ChronosNotice, ...]]) 
 
 
 @then("the dependent pair should become hooked")
-def then_dependent_pair_hooked(result: tuple[Chronos, tuple[BotCommand, ...]]) -> None:
+def then_dependent_pair_hooked(result: tuple[Chronos, tuple[DragonSong, ...]]) -> None:
     chronos, _commands = result
     assert chronos.state.pairs["pair-y"].head_state == HeadState.HOOKED
 
 
 @then("Chronos should forward the next typed runtime command")
-def then_forward_next_typed_runtime_command(result: tuple[Chronos, tuple[BotCommand, ...]]) -> None:
+def then_forward_next_typed_runtime_command(result: tuple[Chronos, tuple[DragonSong, ...]]) -> None:
     _chronos, commands = result
     assert commands
-    assert all(isinstance(command, BotCommand.__args__) for command in commands)
+    assert all(isinstance(command, DragonSong.__args__) for command in commands)

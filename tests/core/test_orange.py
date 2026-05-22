@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from kolabi.bot.domain import EggMoveKind
-from kolabi.bot.orange import (
+from kolabi.bot.dragon import (
     PrivateOrderFact,
     head_submitted_from_ack,
     head_move_from_private_fact,

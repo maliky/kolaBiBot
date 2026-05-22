@@ -18,7 +18,7 @@ from kolabi.bot.domain import (
     TailState,
     TimeWindow,
 )
-from kolabi.bot.janus import plan_runtime_commands
+from kolabi.bot.horus import plan_runtime_commands
 from kolabi.shared.core.runtime_types import (
     AmendOrderCommandRequest,
     AmendTailCommand,
