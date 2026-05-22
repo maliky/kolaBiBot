@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.kraken_contract import build_send_order_contract
 from kolabi.shared.core.models import OrderAck, Position
+from kolabi.shared.core.runtime_types import OrderQty, Price, StopPrice
 from kolabi.shared.core.types import ExchangeABC
 from kolabi.shared.kraken_futures import kraken_futures_environment
 from kolabi.shared.persistence import (
@@ -522,19 +523,19 @@ class KrakenFuturesAdapter(ExchangeABC):
     def place_order(
         self,
         side: str,
-        orderQty: float,
-        price: Optional[float] = None,
-        stopPx: Optional[float] = None,
+        orderQty: OrderQty | float,
+        price: Price | float | None = None,
+        stopPx: StopPrice | float | None = None,
         type_: str = "LIMIT",
         **params: Any,
     ) -> OrderAck:
         exec_inst = "ReduceOnly" if params.pop("reduceOnly", False) else ""
         response = self.place(
-            orderQty=orderQty,
+            orderQty=float(orderQty),
             side=side,
             ordType=type_,
-            price=price,
-            stopPx=stopPx,
+            price=float(price) if price is not None else None,
+            stopPx=float(stopPx) if stopPx is not None else None,
             execInst=exec_inst,
             **params,
         )

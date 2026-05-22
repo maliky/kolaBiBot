@@ -57,6 +57,7 @@ def test_bitmex_adapter_wraps_client() -> None:
 
     ack = adapter.place_order("buy", 1, price=100, type_="limit")
     assert ack.order_id == "abc"
+    assert _FakeBitmexClient.last_instance is not None
     assert _FakeBitmexClient.last_instance.last_place["ordType"] == "Limit"
 
     ack = adapter.amend_order("abc", price=101)

@@ -247,8 +247,8 @@ def check_args(func):
     def new_func(*args):
         assert len(args) > 1
         assert all([isinstance(g, (int, float, str)) for g in args])
-        args = [int(x) for x in args]
-        return func(*args)
+        coerced_args = [int(x) for x in args]
+        return func(*coerced_args)
 
     return new_func
 
@@ -350,7 +350,9 @@ def price_type_trad(exType_, side=None):
     execInst = ""
     priceType = None
     decrypt = r"(?P<majs>[A-Z]+)?(?P<mins>[a-z]+)?(?P<extra>.+)?"
-    matchDict = re.search(decrypt, exType_).groupdict()
+    match = re.search(decrypt, exType_)
+    assert match is not None, f"Invalid order shorthand exType_={exType_!r}"
+    matchDict = match.groupdict()
     # mlogger.debug(f'MatchDict={matchDict}')
 
     ordType = set_order_type(matchDict["majs"], exType_)

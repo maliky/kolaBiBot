@@ -10,9 +10,9 @@ def set_new_price(base: priceT, per: float, symbol="XBTUSD") -> priceT:
     """Crée un prix à partir d'un prix de base et d'un pourcentage."""
     logging.info(f"Setting a new price with a percentage < 1% {per}. Are you sure?")
 
-    def _round(x):
+    def _round(x: float) -> float:
         """Set default symbol"""
-        return round_sprice(x, symbol)
+        return float(round_sprice(x, symbol))
 
     return _round(base * (1 + per / 100))
 
@@ -27,21 +27,23 @@ def get_prices(refPrice: priceT, prix: bipriceT, atype, symbol=None) -> bipriceT
 
     if "p%" in atype:
         # prix inf et prix sup
-        newPrix = (
+        new_prix: bipriceT = (
             set_new_price(refPrice, prix[0], symbol),
             set_new_price(refPrice, prix[1], symbol),
         )
-    elif "pA" in atype:
+        return new_prix
+    if "pA" in atype:
         # prix en absolue
-        newPrix = prix[0], prix[1]
-    elif "pD" in atype:
+        return prix[0], prix[1]
+    if "pD" in atype:
         # prix en différentiel par rapport au prix de référence
-        newPrix = _round(refPrice + prix[0]), _round(refPrice + prix[1])
+        new_prix = _round(refPrice + prix[0]), _round(refPrice + prix[1])
         logging.debug(
-            f"refPrice={refPrice}, prix={prix}, newPrix={newPrix}, symbol={symbol}"
+            f"refPrice={refPrice}, prix={prix}, newPrix={new_prix}, symbol={symbol}"
         )
+        return new_prix
 
-    return newPrix
+    raise ValueError(f"Unsupported price mode in atype={atype}")
 
 
 def setdef_stopPrice(

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Type
+from typing import Any, Callable, Dict, Optional
 
 from kolabi.runtime.kola.bitmex_api.custom_api import BitMEX
 from kolabi.shared.core.models import OrderAck, Position
+from kolabi.shared.core.runtime_types import OrderQty, Price, StopPrice
 from kolabi.shared.core.types import ExchangeABC
 
 
@@ -30,7 +31,7 @@ class BitmexAdapter(ExchangeABC):
         base_url: str,
         symbol: str,
         *,
-        client_factory: Type[BitMEX] | None = None,
+        client_factory: Callable[..., Any] | None = None,
         **client_kwargs: Any,
     ) -> None:
         super().__init__(api_key, api_secret, base_url, symbol)
@@ -61,8 +62,9 @@ class BitmexAdapter(ExchangeABC):
     @staticmethod
     def _first(payload: Any) -> Dict[str, Any]:
         if isinstance(payload, list) and payload:
-            return payload[0]
-        return payload or {}
+            first = payload[0]
+            return first if isinstance(first, dict) else {}
+        return payload if isinstance(payload, dict) else {}
 
     @staticmethod
     def _build_ack(data: Dict[str, Any]) -> OrderAck:
@@ -81,17 +83,19 @@ class BitmexAdapter(ExchangeABC):
     def place_order(
         self,
         side: str,
-        orderQty: float,
-        price: Optional[float] = None,
-        stopPx: Optional[float] = None,
+        orderQty: OrderQty | float,
+        price: Price | float | None = None,
+        stopPx: StopPrice | float | None = None,
         type_: str = "LIMIT",
+        **params: Any,
     ) -> OrderAck:
         opts: Dict[str, Any] = {"ordType": self._normalize_type(type_)}
         if price is not None:
-            opts["price"] = price
+            opts["price"] = float(price)
         if stopPx is not None:
-            opts["stopPx"] = stopPx
-        response = self.client.place(orderQty, side=side.lower(), asBulk=False, **opts)
+            opts["stopPx"] = float(stopPx)
+        opts.update(params)
+        response = self.client.place(float(orderQty), side=side.lower(), asBulk=False, **opts)
         return self._build_ack(self._first(response))
 
     def amend_order(self, order_id: str, **params: Any) -> OrderAck:

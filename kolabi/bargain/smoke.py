@@ -58,6 +58,8 @@ def extract_min_quantity(instrument: dict[str, Any]) -> float:
     ):
         value = instrument.get(key)
         if value not in (None, ""):
+            if not isinstance(value, (int, float, str)):
+                raise RuntimeError(f"Unsupported minimum quantity type for {key}: {type(value)!r}")
             return max(float(value), 1.0)
     return 1.0
 
@@ -67,9 +69,13 @@ def extract_reference_price(adapter: Any, symbol: str) -> float:
     instrument = adapter.instrument(symbol)
     mark = instrument.get("markPrice")
     if mark not in (None, ""):
+        if not isinstance(mark, (int, float, str)):
+            raise RuntimeError(f"Unsupported markPrice type: {type(mark)!r}")
         return float(mark)
     last = instrument.get("lastPrice")
     if last not in (None, ""):
+        if not isinstance(last, (int, float, str)):
+            raise RuntimeError(f"Unsupported lastPrice type: {type(last)!r}")
         return float(last)
     bid = float(instrument.get("bidPrice", 0.0) or 0.0)
     ask = float(instrument.get("askPrice", 0.0) or 0.0)

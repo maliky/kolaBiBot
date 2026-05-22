@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any, cast
 
 from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.exchanges.kraken_adapter import (
@@ -82,7 +83,7 @@ def test_place_maps_limit_order_to_sendorder(tmp_path):
         symbol="PI_XBTUSD",
         environment="demo",
         account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
-        session=session,
+        session=cast(Any, session),
     )
 
     reply = adapter.place(
@@ -130,7 +131,7 @@ def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):
         symbol="PI_XBTUSD",
         environment="demo",
         account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
-        session=session,
+        session=cast(Any, session),
     )
 
     ack = adapter.place_order(
@@ -192,7 +193,7 @@ def test_open_orders_reads_private_db(tmp_path):
         symbol="PI_XBTUSD",
         environment="demo",
         account_db_url=db_url,
-        session=DummySession([]),
+        session=cast(Any, DummySession([])),
     )
     Base.metadata.create_all(adapter._engine)
     with Session(adapter._engine) as session:
@@ -256,7 +257,7 @@ def test_validate_symbol_suggests_pi_for_pf_prefix(tmp_path):
         symbol="PF_ADAUSD",
         environment="demo",
         account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
-        session=session,
+        session=cast(Any, session),
     )
 
     try:
@@ -292,7 +293,7 @@ def test_amend_maps_to_editorder(tmp_path):
         symbol="PI_XBTUSD",
         environment="demo",
         account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
-        session=session,
+        session=cast(Any, session),
     )
 
     ack = adapter.amend_order("OID-1", price=80100, orderQty=3)
@@ -330,7 +331,7 @@ def test_validate_symbol_syncs_instrument_rules_to_public_db(tmp_path):
         environment="demo",
         account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
         public_db_url=f"sqlite:///{tmp_path / 'pub.sqlite'}",
-        session=session,
+        session=cast(Any, session),
     )
 
     adapter.validate_symbol("PI_XBTUSD")

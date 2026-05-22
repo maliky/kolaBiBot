@@ -1,6 +1,7 @@
 
 import pytest
 import responses
+from typing import Any, cast
 from kolabi.shared.exchanges.binance_adapter import BinanceAdapter
 
 EXCHANGE_INFO = {
@@ -18,7 +19,7 @@ EXCHANGE_INFO = {
 
 
 @responses.activate
-def test_order_round_trip() -> None:
+def test_order_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     base = "https://test"
     responses.add(
         responses.GET,
@@ -70,10 +71,10 @@ def test_order_round_trip() -> None:
 
     # avoid real network call during client initialisation
     from binance.client import Client
-    Client.ping = lambda self: {}
+    monkeypatch.setattr(Client, "ping", lambda self: {})
 
     adapter = BinanceAdapter("k", "s", base, "BTCUSDT")
-    adapter._throttle = lambda *a, **k: None  # disable sleep in tests
+    monkeypatch.setattr(adapter, "_throttle", lambda *a, **k: None)  # disable sleep in tests
 
     ack1 = adapter.place_order("BUY", 0.0012345, price=10000.123)
     assert ack1.order_id == "1"
@@ -88,19 +89,28 @@ def test_order_round_trip() -> None:
     from urllib.parse import parse_qs
 
     first_call = responses.calls[1].request  # POST order
-    q = parse_qs(first_call.body)
+    body = first_call.body
+    if isinstance(body, bytes):
+        body_text = body.decode("utf-8")
+    elif isinstance(body, str):
+        body_text = body
+    else:
+        body_text = ""
+    q = parse_qs(body_text)
     assert float(q["quantity"][0]) == pytest.approx(0.001234)
     assert float(q["price"][0]) == pytest.approx(10000.12)
 
 
 @responses.activate
-def test_validate_precision_edge() -> None:
+def test_validate_precision_edge(monkeypatch: pytest.MonkeyPatch) -> None:
     base = "https://test"
     responses.add(responses.GET, f"{base}/v3/exchangeInfo", json=EXCHANGE_INFO)
+    from binance.client import Client
+    monkeypatch.setattr(Client, "ping", lambda self: {})
     adapter = BinanceAdapter("k", "s", base, "BTCUSDT")
-    adapter._throttle = lambda *a, **k: None
+    monkeypatch.setattr(adapter, "_throttle", lambda *a, **k: None)
     data = adapter.validate_order({"quantity": 0.0023456, "price": 10000.1234})
-    assert data["quantity"] == 0.002345
-    assert data["price"] == 10000.12
+    assert cast(float, data["quantity"]) == 0.002345
+    assert cast(float, data["price"]) == 10000.12
     with pytest.raises(ValueError):
         adapter.validate_order({"quantity": 0.000001, "price": 1})

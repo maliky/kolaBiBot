@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 from binance.client import Client  # type: ignore[import-untyped]
 
 from kolabi.shared.core.models import OrderAck, Position
+from kolabi.shared.core.runtime_types import OrderQty, Price, StopPrice
 from kolabi.shared.core.types import ExchangeABC
 
 
@@ -96,21 +97,23 @@ class BinanceAdapter(ExchangeABC):
     def place_order(
         self,
         side: str,
-        orderQty: float,
-        price: Optional[float] = None,
-        stopPx: Optional[float] = None,
+        orderQty: OrderQty | float,
+        price: Price | float | None = None,
+        stopPx: StopPrice | float | None = None,
         type_: str = "LIMIT",
+        **params: Any,
     ) -> OrderAck:
         data: Dict[str, Any] = {
             "symbol": self.symbol,
             "side": side.upper(),
             "type": type_.upper(),
-            "quantity": orderQty,
+            "quantity": float(orderQty),
         }
         if price is not None:
-            data["price"] = price
+            data["price"] = float(price)
         if stopPx is not None:
-            data["stopPrice"] = stopPx
+            data["stopPrice"] = float(stopPx)
+        data.update(params)
         data = self.validate_order(data)
         self._throttle()
         resp = self.client.create_order(**data)

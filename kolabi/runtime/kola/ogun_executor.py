@@ -16,10 +16,13 @@ from typing import Any, Protocol, cast
 
 from kolabi.shared.core.runtime_commands import command_order_type
 from kolabi.shared.core.runtime_types import (
+    AmendOrderCommandRequest,
     AmendTailCommand,
     BotCommand,
+    CancelOrderCommandRequest,
     CancelCommand,
     OrderDict,
+    PlaceOrderCommandRequest,
     PlaceHeadCommand,
     PlaceTailCommand,
     RuntimeCommandKind,
@@ -204,48 +207,50 @@ def execute_runtime_command(
 
 
 def _legacy_order_from_command(command: BotCommand) -> OrderDict:
-    request = command.request
     if isinstance(command, CancelCommand):
+        cancel_request: CancelOrderCommandRequest = command.request
         return {
-            "pair_name": request.pair_name,
-            "ordType": request.ordType,
-            "clOrdID": request.clOrdID,
+            "pair_name": cancel_request.pair_name,
+            "ordType": cancel_request.ordType,
+            "clOrdID": cancel_request.clOrdID,
         }
     if isinstance(command, AmendTailCommand):
-        order: OrderDict = {
-            "pair_name": request.pair_name,
-            "ordType": request.ordType,
-            "side": request.side,
-            "orderID": request.orderID,
+        amend_request: AmendOrderCommandRequest = command.request
+        amend_order: OrderDict = {
+            "pair_name": amend_request.pair_name,
+            "ordType": amend_request.ordType,
+            "side": amend_request.side,
+            "orderID": amend_request.orderID,
         }
-        if request.clOrdID is not None:
-            order["clOrdID"] = request.clOrdID
-        if request.newPrice is not None:
-            order["newPrice"] = request.newPrice
-        if request.newQty is not None:
-            order["newQty"] = request.newQty
-        if request.text is not None:
-            order["text"] = request.text
-        return order
+        if amend_request.clOrdID is not None:
+            amend_order["clOrdID"] = amend_request.clOrdID
+        if amend_request.newPrice is not None:
+            amend_order["newPrice"] = amend_request.newPrice
+        if amend_request.newQty is not None:
+            amend_order["newQty"] = amend_request.newQty
+        if amend_request.text is not None:
+            amend_order["text"] = amend_request.text
+        return amend_order
+    place_request: PlaceOrderCommandRequest = command.request
     order: OrderDict = {
-        "pair_name": request.pair_name,
-        "ordType": request.ordType,
-        "side": request.side,
+        "pair_name": place_request.pair_name,
+        "ordType": place_request.ordType,
+        "side": place_request.side,
     }
-    if request.orderQty is not None:
-        order["orderQty"] = request.orderQty
-    if request.price is not None:
-        order["price"] = request.price
-    if request.stopPx is not None:
-        order["stopPx"] = request.stopPx
-    if request.execInst is not None:
-        order["execInst"] = request.execInst
-    if request.clOrdID is not None:
-        order["clOrdID"] = request.clOrdID
-    if request.text is not None:
-        order["text"] = request.text
-    if request.oDelta is not None:
-        order["oDelta"] = request.oDelta
+    if place_request.orderQty is not None:
+        order["orderQty"] = place_request.orderQty
+    if place_request.price is not None:
+        order["price"] = place_request.price
+    if place_request.stopPx is not None:
+        order["stopPx"] = place_request.stopPx
+    if place_request.execInst is not None:
+        order["execInst"] = place_request.execInst
+    if place_request.clOrdID is not None:
+        order["clOrdID"] = place_request.clOrdID
+    if place_request.text is not None:
+        order["text"] = place_request.text
+    if place_request.oDelta is not None:
+        order["oDelta"] = place_request.oDelta
     return order
 
 

@@ -91,7 +91,10 @@ def get_balance(client: Any, symbol: str | None = None) -> Any:
         account = cast(_SupportsBinanceAccount, client).get_account()
         if symbol:
             base = symbol[:-4] if symbol.endswith("USDT") else symbol[:-3]
-            for balance in account.get("balances", []):
+            balances = account.get("balances", [])
+            if not isinstance(balances, list):
+                return account
+            for balance in balances:
                 if isinstance(balance, dict) and balance.get("asset") == base:
                     return float(balance.get("free", 0))
         return account
@@ -107,9 +110,13 @@ def get_prices(client: Any, symbol: str) -> dict[str, Any]:
         return {key: value for key, value in data.items() if "rice" in key}
     if _is_binance(client):
         ticker = cast(_SupportsBinanceTicker, client).get_orderbook_ticker(symbol=symbol)
+        bid = ticker.get("bidPrice")
+        ask = ticker.get("askPrice")
+        if not isinstance(bid, (int, float, str)) or not isinstance(ask, (int, float, str)):
+            raise ValueError("Unsupported Binance ticker payload")
         return {
-            "bidPrice": float(ticker["bidPrice"]),
-            "askPrice": float(ticker["askPrice"]),
+            "bidPrice": float(bid),
+            "askPrice": float(ask),
         }
     if _is_kraken(client):
         return cast(dict[str, Any], cast(_SupportsInstrument, client).instrument(symbol))

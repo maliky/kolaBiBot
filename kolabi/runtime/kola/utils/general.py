@@ -92,7 +92,7 @@ def log_args(logopt=None, level="INFO"):
             # Voir comment récupérer le nom de la fonction qui est décorée
             # pour qu'elle soit logger
             if isinstance(logopt, logging.RootLogger):
-                logger = logopt
+                logger: Logger | RootLogger = logopt
             elif isinstance(logopt, str):
                 assert logopt not in LOGLEVELS, "utiliser level to set log level"
                 logger = logging.getLogger(logopt)
@@ -304,7 +304,7 @@ def threaded(f, daemon=False):
         t = threading.Thread(target=wrapped_f, args=(q,) + args, kwargs=kwargs)
         t.daemon = daemon
         t.start()
-        t.result_queue = q
+        setattr(t, "result_queue", q)
         return t
 
     return wrap
