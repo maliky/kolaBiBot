@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from pytest_bdd import given, scenario, then, when
 
-from kolabi.bot.chronos import Chronos, ChronosNoticeKind
+from kolabi.bot.chronos import Chronos, ChronosNotice, ChronosNoticeKind
 from kolabi.bot.domain import (
     EggMove,
     EggMoveKind,
@@ -201,7 +201,7 @@ def when_process_same_cycle_batch(payload: tuple[Chronos, list[EggMove]]) -> tup
 
 
 @when("the pending identity timeout expires", target_fixture="result")
-def when_pending_identity_timeout_expires(payload: tuple[Chronos, EggMove]) -> tuple[Chronos, tuple[RuntimeCommand, ...]]:
+def when_pending_identity_timeout_expires(payload: tuple[Chronos, EggMove]) -> tuple[Chronos, tuple[ChronosNotice, ...]]:
     chronos, move = payload
     chronos.process_event(move, now=move.occurred_at)
     notices = chronos.expire_pending(now=move.occurred_at + timedelta(seconds=31))
@@ -255,14 +255,14 @@ def then_public_trigger_recorded_as_ignored(result: tuple[Chronos, tuple[Runtime
 
 
 @then("Chronos should emit a typed pending identity timeout notice")
-def then_pending_identity_timeout_notice(result: tuple[Chronos, tuple[object, ...]]) -> None:
+def then_pending_identity_timeout_notice(result: tuple[Chronos, tuple[ChronosNotice, ...]]) -> None:
     _chronos, notices = result
     assert len(notices) == 1
     assert notices[0].kind == ChronosNoticeKind.PENDING_IDENTITY_TIMEOUT
 
 
 @then("no exchange command should be emitted")
-def then_no_exchange_command(result: tuple[Chronos, tuple[object, ...]]) -> None:
+def then_no_exchange_command(result: tuple[Chronos, tuple[ChronosNotice, ...]]) -> None:
     chronos, _notices = result
     assert chronos.command_queue.empty()
 

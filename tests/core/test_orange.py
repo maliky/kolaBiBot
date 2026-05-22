@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from kolabi.bot.domain import EggMoveKind
 from kolabi.bot.orange import (
@@ -34,8 +35,8 @@ def test_private_partial_fill_maps_to_played_not_canceled() -> None:
         client_order_id="CID-1",
         status="PartiallyFilled",
         reason="partial_fill",
-        filled_quantity=1,
-        total_quantity=2,
+        filled_quantity=Decimal("1"),
+        total_quantity=Decimal("2"),
         occurred_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
     )
 

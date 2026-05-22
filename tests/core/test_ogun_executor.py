@@ -6,22 +6,22 @@ from typing import Any, cast
 import pytest
 
 from kolabi.runtime.kola.ogun_executor import execute_runtime_command
-from kolabi.shared.core.runtime_types import RuntimeCommand, RuntimeCommandKind, Symbol
+from kolabi.shared.core.runtime_types import OrderDict, RuntimeCommand, RuntimeCommandKind, Symbol
 
 
 def place_command(ord_type: str, **order: object) -> RuntimeCommand:
-    payload = {"ordType": ord_type, "side": "sell", "orderQty": Decimal("2")}
+    payload: dict[str, object] = {"ordType": ord_type, "side": "sell", "orderQty": Decimal("2")}
     payload.update(order)
     return RuntimeCommand(
         kind=RuntimeCommandKind.PLACE,
         symbol=Symbol("PI_XBTUSD"),
-        order=payload,
+        order=cast(OrderDict, payload),
         reason="tail",
     )
 
 
 def amend_command(**order: object) -> RuntimeCommand:
-    payload = {
+    payload: dict[str, object] = {
         "ordType": "Stop",
         "side": "sell",
         "orderID": "OID-T",
@@ -31,7 +31,7 @@ def amend_command(**order: object) -> RuntimeCommand:
     return RuntimeCommand(
         kind=RuntimeCommandKind.AMEND,
         symbol=Symbol("PI_XBTUSD"),
-        order=payload,
+        order=cast(OrderDict, payload),
         reason="tail",
     )
 
@@ -51,12 +51,12 @@ class _FakeBargain:
 
 
 def cancel_command(**order: object) -> RuntimeCommand:
-    payload = {"clOrdID": "CID-T"}
+    payload: dict[str, object] = {"clOrdID": "CID-T"}
     payload.update(order)
     return RuntimeCommand(
         kind=RuntimeCommandKind.CANCEL,
         symbol=Symbol("PI_XBTUSD"),
-        order=payload,
+        order=cast(OrderDict, payload),
         reason="tail",
     )
 
@@ -140,6 +140,7 @@ def test_execute_stop_family_dispatches_to_the_right_helper(
     monkeypatch.setattr(f"kolabi.runtime.kola.ogun_executor.{helper_name}", fake_helper)
     command = place_command(ord_type, stopPx=Decimal("99.0"))
     if ord_type in {"StopLimit", "LimitIfTouched"}:
+        assert command.order is not None
         command.order["price"] = Decimal("100.0")
 
     result = execute_runtime_command(object(), command, amend_absdelta=0.5)

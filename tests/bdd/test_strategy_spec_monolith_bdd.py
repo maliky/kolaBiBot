@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any, cast
 
 from pytest_bdd import given, scenario, then, when
 
@@ -121,7 +122,7 @@ def when_payload_is_normalized(payload: object) -> object:
     if isinstance(payload, argparse.Namespace):
         return build_single_strategy(payload)
     try:
-        return order_pair_from_legacy_values(**payload)
+        return order_pair_from_legacy_values(**cast(Any, payload))
     except ValueError as exc:
         return exc
 

@@ -7,6 +7,7 @@ import pytest
 from kolabi.shared.config import ExchangeConfig
 from kolabi.shared.core.bargain import Bargain
 from kolabi.shared.core.models import OrderAck, Position
+from kolabi.shared.core.runtime_types import OrderQty, Price, StopPrice
 from kolabi.shared.core.types import ExchangeABC
 from kolabi.shared.persistence import Base, ExchangeConnection, MarketSnapshot
 from sqlalchemy import create_engine
@@ -34,10 +35,11 @@ class _FakeAdapter(ExchangeABC):
     def place_order(
         self,
         side: str,
-        orderQty: float,
-        price: Optional[float] = None,
-        stopPx: Optional[float] = None,
+        orderQty: OrderQty | float,
+        price: Price | float | None = None,
+        stopPx: StopPrice | float | None = None,
         type_: str = "LIMIT",
+        **params: Any,
     ) -> OrderAck:
         raise NotImplementedError
 

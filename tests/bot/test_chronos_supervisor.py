@@ -24,6 +24,7 @@ from kolabi.bot.domain import (
 from kolabi.shared.core.runtime_types import RuntimeCommand
 from kolabi.shared.core.runtime_types import RuntimeCommandKind
 from kolabi.shared.core.runtime_types import PlaceOrderCommandRequest
+from kolabi.shared.core.runtime_types import Symbol
 
 
 def sample_pair(name: str) -> OrderPairSpec:
@@ -118,7 +119,7 @@ def test_chronos_dedupes_duplicate_command() -> None:
     commands = [
         RuntimeCommand(
             kind=kind,
-            symbol="PI_XBTUSD",
+            symbol=Symbol("PI_XBTUSD"),
             request=PlaceOrderCommandRequest(
                 pair_name="pair-b",
                 side="buy",
