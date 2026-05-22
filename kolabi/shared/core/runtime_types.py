@@ -6,7 +6,7 @@ Inputs: none (type declarations only).
 Outputs: exported `NewType`s, enums, typed dicts, dataclasses, and protocols.
 Side effects: none.
 Important types: scalar families (`Price`, `OrderQty`, IDs, times), command and
-event enums, `RuntimeCommand`, `RuntimeEvent`, `OrderDict`.
+event enums, algebraic bot commands, `RuntimeEvent`, `OrderDict`.
 Role: pure logic (type contract module).
 Transitional: yes, includes compatibility aliases while legacy surfaces migrate.
 """
@@ -323,6 +323,16 @@ class PublicIndicatorRecord:
 class PrivateOrderRecord:
     symbol: str
     status: str
+    exchange_order_id: str | None = None
+    client_order_id: str | None = None
+    side: str | None = None
+    order_type: str | None = None
+    price: float | None = None
+    quantity: float | None = None
+    filled_quantity: float | None = None
+    source_timestamp: str | None = None
+    local_timestamp: str | None = None
+    local_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -379,7 +389,72 @@ class RuntimeEvent:
 
 
 @dataclass(frozen=True)
+class PlaceHeadCommand:
+    kind: RuntimeCommandKind
+    symbol: Symbol
+    pair_name: str
+    request: PlaceOrderCommandRequest
+    role: OrderRole = OrderRole.HEAD
+    reason: str = OrderRole.HEAD.value
+    legacy_order: OrderDict | None = None
+
+    def __post_init__(self) -> None:
+        if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
+            object.__setattr__(self, "legacy_order", MappingProxyType(dict(self.legacy_order)))
+
+
+@dataclass(frozen=True)
+class PlaceTailCommand:
+    kind: RuntimeCommandKind
+    symbol: Symbol
+    pair_name: str
+    request: PlaceOrderCommandRequest
+    role: OrderRole = OrderRole.TAIL
+    reason: str = OrderRole.TAIL.value
+    legacy_order: OrderDict | None = None
+
+    def __post_init__(self) -> None:
+        if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
+            object.__setattr__(self, "legacy_order", MappingProxyType(dict(self.legacy_order)))
+
+
+@dataclass(frozen=True)
+class AmendTailCommand:
+    kind: RuntimeCommandKind
+    symbol: Symbol
+    pair_name: str
+    request: AmendOrderCommandRequest
+    role: OrderRole = OrderRole.TAIL
+    reason: str = OrderRole.TAIL.value
+    legacy_order: OrderDict | None = None
+
+    def __post_init__(self) -> None:
+        if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
+            object.__setattr__(self, "legacy_order", MappingProxyType(dict(self.legacy_order)))
+
+
+@dataclass(frozen=True)
+class CancelCommand:
+    kind: RuntimeCommandKind
+    symbol: Symbol
+    pair_name: str
+    request: CancelOrderCommandRequest
+    role: OrderRole = OrderRole.CANCEL
+    reason: str = OrderRole.CANCEL.value
+    legacy_order: OrderDict | None = None
+
+    def __post_init__(self) -> None:
+        if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
+            object.__setattr__(self, "legacy_order", MappingProxyType(dict(self.legacy_order)))
+
+
+BotCommand = PlaceHeadCommand | PlaceTailCommand | AmendTailCommand | CancelCommand
+
+
+@dataclass(frozen=True)
 class RuntimeCommand:
+    """Legacy permissive command carrier kept only for non-bot transitional code."""
+
     kind: RuntimeCommandKind
     symbol: Symbol
     request: CommandRequestRecord | None = None
@@ -388,6 +463,12 @@ class RuntimeCommand:
     legacy_order: OrderDict | None = None
     order: OrderDict | None = None
     reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
+            object.__setattr__(self, "legacy_order", MappingProxyType(dict(self.legacy_order)))
+        if self.order is not None and not isinstance(self.order, MappingProxyType):
+            object.__setattr__(self, "order", MappingProxyType(dict(self.order)))
 
 
 @dataclass(frozen=True)

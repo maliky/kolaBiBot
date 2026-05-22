@@ -21,7 +21,10 @@ from kolabi.bot.domain import (
 from kolabi.bot.janus import plan_runtime_commands
 from kolabi.shared.core.runtime_types import (
     AmendOrderCommandRequest,
+    AmendTailCommand,
+    PlaceHeadCommand,
     PlaceOrderCommandRequest,
+    PlaceTailCommand,
     RuntimeCommandKind,
     Symbol,
 )
@@ -103,6 +106,7 @@ def test_place_head_translates_to_one_head_place_command() -> None:
     )
 
     assert len(commands) == 1
+    assert isinstance(commands[0], PlaceHeadCommand)
     assert commands[0].kind == RuntimeCommandKind.PLACE
     assert commands[0].reason == "head"
     assert commands[0].request == PlaceOrderCommandRequest(
@@ -121,6 +125,7 @@ def test_place_tail_translates_to_one_tail_place_command() -> None:
     )
 
     assert len(commands) == 1
+    assert isinstance(commands[0], PlaceTailCommand)
     assert commands[0].kind == RuntimeCommandKind.PLACE
     assert commands[0].reason == "tail"
     assert commands[0].request == PlaceOrderCommandRequest(
@@ -151,6 +156,7 @@ def test_amend_tail_with_full_identity_translates_to_one_amend_command() -> None
     )
 
     assert len(commands) == 1
+    assert isinstance(commands[0], AmendTailCommand)
     assert commands[0].kind == RuntimeCommandKind.AMEND
     assert commands[0].reason == "tail"
     assert commands[0].request == AmendOrderCommandRequest(

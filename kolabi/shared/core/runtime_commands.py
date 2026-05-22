@@ -17,6 +17,7 @@ from typing import Any, cast
 
 from kolabi.shared.core.runtime_types import (
     AmendOrderCommandRequest,
+    BotCommand,
     CancelOrderCommandRequest,
     CommandRequestRecord,
     HeadCommandPayload,
@@ -91,7 +92,7 @@ def runtime_command_from_order(
     )
 
 
-def timeout_override_minutes_for(command: RuntimeCommand) -> int | None:
+def timeout_override_minutes_for(command: RuntimeCommand | BotCommand) -> int | None:
     ord_type = command_order_type(command)
     if ord_type == "Market":
         return 5
@@ -101,7 +102,7 @@ def timeout_override_minutes_for(command: RuntimeCommand) -> int | None:
 
 
 def validation_conditions_for(
-    command: RuntimeCommand,
+    command: RuntimeCommand | BotCommand,
     *,
     trailstop_sender: bool = False,
 ) -> tuple[ValidationCondition, ...]:
@@ -115,7 +116,7 @@ def validation_conditions_for(
     return ({"exectype": "Trade", "orderstatus": "Filled"},)
 
 
-def command_order_type(command: RuntimeCommand) -> str:
+def command_order_type(command: RuntimeCommand | BotCommand) -> str:
     if command.request is not None:
         return command.request.ordType
     return str((command.order or {}).get("ordType", ""))

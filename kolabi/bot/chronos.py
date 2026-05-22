@@ -3,9 +3,9 @@
 Purpose: own persistent strategy cache, apply event ordering and deduplication,
 and forward typed runtime commands to the execution layer.
 Inputs: typed `EggMove` values from market/private/account listeners.
-Outputs: typed `RuntimeCommand` values and supervisor notices.
+Outputs: typed bot commands and supervisor notices.
 Side effects: async queue IO only.
-Important types: `StrategyState`, `EggMove`, `RuntimeCommand`,
+Important types: `StrategyState`, `EggMove`, bot command union,
 `ChronosNotice`.
 Role: interpreter shell.
 """
@@ -20,7 +20,7 @@ from typing import Iterable
 from kolabi.bot.domain import EggMove, EggMoveKind, HeadState, StrategyState, TailState
 from kolabi.bot.isis import step_strategy
 from kolabi.bot.janus import plan_runtime_commands
-from kolabi.shared.core.runtime_types import RuntimeCommand, RuntimeCommandKind, Symbol
+from kolabi.shared.core.runtime_types import BotCommand, RuntimeCommandKind, Symbol
 
 
 class ChronosNoticeKind(StrEnum):
@@ -51,14 +51,14 @@ class Chronos:
     state: StrategyState
     pending_timeout: timedelta = timedelta(seconds=30)
     event_queue: asyncio.Queue[EggMove | None] = field(default_factory=asyncio.Queue)
-    command_queue: asyncio.Queue[RuntimeCommand] = field(default_factory=asyncio.Queue)
+    command_queue: asyncio.Queue[BotCommand] = field(default_factory=asyncio.Queue)
     notices: list[ChronosNotice] = field(default_factory=list)
     pending: dict[str, PendingEggMove] = field(default_factory=dict)
     _seen_event_keys: set[tuple[str, str]] = field(default_factory=set)
     _seen_fallback_keys: set[tuple[str, str, int]] = field(default_factory=set)
     _seen_command_keys: set[tuple[str, str, str | None]] = field(default_factory=set)
 
-    async def run_once(self) -> tuple[RuntimeCommand, ...]:
+    async def run_once(self) -> tuple[BotCommand, ...]:
         """Traite le lot courant d'evenements deja en file."""
         batch = await self._drain_batch()
         commands = self.process_events(batch)
@@ -71,7 +71,7 @@ class Chronos:
         events: Iterable[EggMove],
         *,
         now: datetime | None = None,
-    ) -> tuple[RuntimeCommand, ...]:
+    ) -> tuple[BotCommand, ...]:
         """Applique precedence et routage sur un lot d'evenements."""
         current_time = now or datetime.now(timezone.utc)
         selected: list[EggMove] = []
@@ -106,7 +106,7 @@ class Chronos:
                 )
             )
 
-        emitted: list[RuntimeCommand] = []
+        emitted: list[BotCommand] = []
         for event in selected:
             emitted.extend(self.process_event(event, now=current_time))
         return self._dedupe_commands(emitted)
@@ -116,7 +116,7 @@ class Chronos:
         event: EggMove,
         *,
         now: datetime | None = None,
-    ) -> tuple[RuntimeCommand, ...]:
+    ) -> tuple[BotCommand, ...]:
         """Traite un evenement unique avec deduplication et attente d'identite."""
         current_time = now or datetime.now(timezone.utc)
         if self._needs_pending_identity(event):
@@ -234,12 +234,10 @@ class Chronos:
 
     def _dedupe_commands(
         self,
-        commands: Iterable[RuntimeCommand],
-    ) -> tuple[RuntimeCommand, ...]:
-        per_pair: dict[str, RuntimeCommand] = {}
+        commands: Iterable[BotCommand],
+    ) -> tuple[BotCommand, ...]:
+        per_pair: dict[str, BotCommand] = {}
         for command in commands:
-            if not isinstance(command, RuntimeCommand):
-                raise TypeError("Chronos forwards typed RuntimeCommand values only")
             pair_name = _command_pair_name(command)
             if pair_name is None:
                 continue
@@ -252,7 +250,7 @@ class Chronos:
                 per_pair[pair_name] = command
         return tuple(per_pair.values())
 
-    def _activate_dependent_pairs(self, event: EggMove) -> tuple[RuntimeCommand, ...]:
+    def _activate_dependent_pairs(self, event: EggMove) -> tuple[BotCommand, ...]:
         """Active les paires dependantes apres une fermeture significative."""
         origin_pair = resolve_pair_name(self.state, event) or event.pair_name
         if origin_pair is None:
@@ -260,7 +258,7 @@ class Chronos:
         if not _may_activate_dependency(self.state, origin_pair, event):
             return ()
 
-        emitted: list[RuntimeCommand] = []
+        emitted: list[BotCommand] = []
         for pair_name, pair_state in self.state.pairs.items():
             if pair_name == origin_pair:
                 continue
@@ -302,24 +300,12 @@ def _with_target_pair(event: EggMove, pair_name: str | None) -> EggMove:
     )
 
 
-def _command_pair_name(command: RuntimeCommand) -> str | None:
-    if command.pair_name:
-        return command.pair_name
-    if command.request is not None:
-        return command.request.pair_name or None
-    if command.order is None:
-        return None
-    pair_name = command.order.get("pair_name")
-    return pair_name if isinstance(pair_name, str) and pair_name else None
+def _command_pair_name(command: BotCommand) -> str | None:
+    return command.pair_name or None
 
 
-def _command_client_order_id(command: RuntimeCommand) -> str | None:
-    if command.request is not None:
-        return getattr(command.request, "clOrdID", None)
-    if command.order is None:
-        return None
-    candidate = command.order.get("clOrdID")
-    return candidate if isinstance(candidate, str) and candidate else None
+def _command_client_order_id(command: BotCommand) -> str | None:
+    return getattr(command.request, "clOrdID", None)
 
 
 def resolve_pair_name(state: StrategyState, event: EggMove) -> str | None:
@@ -364,7 +350,7 @@ def _string_or_none(value: object) -> str | None:
     return None
 
 
-def _command_precedence(command: RuntimeCommand) -> int:
+def _command_precedence(command: BotCommand) -> int:
     if command.kind == RuntimeCommandKind.CANCEL:
         return 30
     if command.kind == RuntimeCommandKind.AMEND:

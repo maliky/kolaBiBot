@@ -1,64 +1,148 @@
 """Ogun command interpreter for exchange side effects.
 
-Purpose: execute typed runtime commands against exchange-facing legacy order
+Purpose: execute typed bot commands against exchange-facing legacy order
 functions while the runtime migrates toward pure reducers plus boundary shells.
-Inputs: `RuntimeCommand` values and exchange/bargain object.
+Inputs: bot command values and exchange/bargain object.
 Outputs: exchange acknowledgement payloads.
 Side effects: network/exchange calls and order submissions/amend/cancel actions.
-Important types: `RuntimeCommand`, `RuntimeCommandKind`, `OrderDict`.
+Important types: algebraic bot commands, `OrderDict`.
 Role: interpreter shell.
-Transitional: yes, still calls legacy order helpers.
+Transitional: yes, legacy order helpers are isolated behind a lazy adapter.
 """
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
-from kolabi.runtime.kola.orders.orders import (
-    amend_prices,
-    amend_orderQty,
-    cancel_order,
-    place,
-    place_at_market,
-    place_LIT,
-    place_MIT,
-    place_SL,
-    place_stop,
-)
 from kolabi.shared.core.runtime_commands import command_order_type
 from kolabi.shared.core.runtime_types import (
-    AmendOrderCommandRequest,
-    CancelOrderCommandRequest,
+    AmendTailCommand,
+    BotCommand,
+    CancelCommand,
     OrderDict,
-    PlaceOrderCommandRequest,
-    RuntimeCommand,
+    PlaceHeadCommand,
+    PlaceTailCommand,
     RuntimeCommandKind,
     decimal_to_float,
 )
 
 
+class LegacyOrderAdapterLike(Protocol):
+    def place_at_market(self, brg: object, order_qty: float, side: str, **opts: object) -> Any: ...
+    def place(self, brg: object, side: str, order_qty: float, price: float, **opts: object) -> Any: ...
+    def place_stop(self, brg: object, side: str, order_qty: float, stop_px: float, **opts: object) -> Any: ...
+    def place_sl(self, brg: object, side: str, order_qty: float, stop_px: float, price: float, **opts: object) -> Any: ...
+    def place_mit(self, brg: object, side: str, order_qty: float, stop_px: float, **opts: object) -> Any: ...
+    def place_lit(self, brg: object, side: str, order_qty: float, stop_px: float, price: float, **opts: object) -> Any: ...
+    def amend_prices(
+        self,
+        brg: object,
+        order_id: str,
+        new_price: float,
+        ord_type: str,
+        side: str,
+        *,
+        absdelta: float,
+        text: str,
+    ) -> Any: ...
+    def amend_order_qty(self, brg: object, order: dict[str, object], new_qty: float) -> Any: ...
+    def cancel_order(self, brg: object, order: dict[str, object]) -> Any: ...
+
+
+class LegacyOrderAdapter:
+    """Lazy bridge to the legacy order helper module.
+
+    This keeps the active bot path importable even when old helper dependencies
+    are absent. Imports happen only at method call time.
+    """
+
+    def place_at_market(self, brg: object, order_qty: float, side: str, **opts: object) -> Any:
+        from kolabi.runtime.kola.orders.orders import place_at_market
+
+        return place_at_market(cast(Any, brg), order_qty, side, **opts)
+
+    def place(self, brg: object, side: str, order_qty: float, price: float, **opts: object) -> Any:
+        from kolabi.runtime.kola.orders.orders import place
+
+        return place(cast(Any, brg), side, order_qty, price, **opts)
+
+    def place_stop(self, brg: object, side: str, order_qty: float, stop_px: float, **opts: object) -> Any:
+        from kolabi.runtime.kola.orders.orders import place_stop
+
+        return place_stop(cast(Any, brg), side, order_qty, stop_px, **opts)
+
+    def place_sl(self, brg: object, side: str, order_qty: float, stop_px: float, price: float, **opts: object) -> Any:
+        from kolabi.runtime.kola.orders.orders import place_SL
+
+        return place_SL(cast(Any, brg), side, order_qty, stop_px, price, **opts)
+
+    def place_mit(self, brg: object, side: str, order_qty: float, stop_px: float, **opts: object) -> Any:
+        from kolabi.runtime.kola.orders.orders import place_MIT
+
+        return place_MIT(cast(Any, brg), side, order_qty, stop_px, **opts)
+
+    def place_lit(self, brg: object, side: str, order_qty: float, stop_px: float, price: float, **opts: object) -> Any:
+        from kolabi.runtime.kola.orders.orders import place_LIT
+
+        return place_LIT(cast(Any, brg), side, order_qty, stop_px, price, **opts)
+
+    def amend_prices(
+        self,
+        brg: object,
+        order_id: str,
+        new_price: float,
+        ord_type: str,
+        side: str,
+        *,
+        absdelta: float,
+        text: str,
+    ) -> Any:
+        from kolabi.runtime.kola.orders.orders import amend_prices
+
+        return amend_prices(
+            cast(Any, brg),
+            order_id,
+            new_price,
+            ord_type,
+            side,
+            absdelta=absdelta,
+            text=text,
+        )
+
+    def amend_order_qty(self, brg: object, order: dict[str, object], new_qty: float) -> Any:
+        from kolabi.runtime.kola.orders.orders import amend_orderQty
+
+        return amend_orderQty(cast(Any, brg), order, new_qty)
+
+    def cancel_order(self, brg: object, order: dict[str, object]) -> Any:
+        from kolabi.runtime.kola.orders.orders import cancel_order
+
+        return cancel_order(cast(Any, brg), order)
+
+
 def execute_runtime_command(
     brg: object,
-    command: RuntimeCommand,
+    command: BotCommand,
     *,
     amend_absdelta: float,
+    adapter: LegacyOrderAdapterLike | None = None,
 ) -> Any:
-    order = _legacy_order_from_command(command)
     if command.kind not in {
         RuntimeCommandKind.PLACE,
         RuntimeCommandKind.AMEND,
         RuntimeCommandKind.CANCEL,
     }:
         raise ValueError(f"Unsupported runtime command kind: {command.kind!r}")
-
+    adapter = adapter or LegacyOrderAdapter()
+    order = _legacy_order_from_command(command)
     ord_type = command_order_type(command)
     order.pop("ordType", None)
 
-    if command.kind == RuntimeCommandKind.CANCEL:
+    if isinstance(command, CancelCommand):
         cl_ord_id = str(order["clOrdID"])
-        return cancel_order(cast(Any, brg), {"clOrdID": cl_ord_id})
+        return adapter.cancel_order(brg, {"clOrdID": cl_ord_id})
 
-    if command.kind == RuntimeCommandKind.AMEND:
+    if isinstance(command, AmendTailCommand):
         order_id = str(order["orderID"])
         side = str(order["side"])
         text = str(order.get("text", ""))
@@ -78,7 +162,7 @@ def execute_runtime_command(
                 text=text,
             )
         if new_price is not None:
-            return amend_prices(
+            return adapter.amend_prices(
                 brg,
                 order_id,
                 new_price,
@@ -87,10 +171,10 @@ def execute_runtime_command(
                 absdelta=amend_absdelta,
                 text=text,
             )
-        return amend_orderQty(
-            cast(Any, brg),
+        return adapter.amend_order_qty(
+            brg,
             {"orderID": order_id, "orderQty": new_qty},
-            new_qty,
+            cast(float, new_qty),
         )
 
     side = str(order.pop("side"))
@@ -98,38 +182,36 @@ def execute_runtime_command(
     opts = cast(dict[str, Any], order)
 
     if ord_type == "Market":
-        return place_at_market(cast(Any, brg), order_qty, side, **opts)
+        return adapter.place_at_market(brg, order_qty, side, **opts)
     if ord_type == "Limit":
         price = _as_float_price(order.pop("price"))
-        return place(cast(Any, brg), side, order_qty, price, **opts)
+        return adapter.place(brg, side, order_qty, price, **opts)
     if ord_type == "Stop":
         stop_px = _as_float_price(order.pop("stopPx"))
-        return place_stop(cast(Any, brg), side, order_qty, stop_px, **opts)
+        return adapter.place_stop(brg, side, order_qty, stop_px, **opts)
     if ord_type == "StopLimit":
         stop_px = _as_float_price(order.pop("stopPx"))
         price = _as_float_price(order.pop("price"))
-        return place_SL(cast(Any, brg), side, order_qty, stop_px, price, **opts)
+        return adapter.place_sl(brg, side, order_qty, stop_px, price, **opts)
     if ord_type == "MarketIfTouched":
         stop_px = _as_float_price(order.pop("stopPx"))
-        return place_MIT(cast(Any, brg), side, order_qty, stop_px, **opts)
+        return adapter.place_mit(brg, side, order_qty, stop_px, **opts)
     if ord_type == "LimitIfTouched":
         stop_px = _as_float_price(order.pop("stopPx"))
         price = _as_float_price(order.pop("price"))
-        return place_LIT(cast(Any, brg), side, order_qty, stop_px, price, **opts)
+        return adapter.place_lit(brg, side, order_qty, stop_px, price, **opts)
     raise ValueError(f"Action type '{ord_type}' pas prise en compte")
 
 
-def _legacy_order_from_command(command: RuntimeCommand) -> OrderDict:
-    if command.request is None:
-        return cast(OrderDict, dict(command.order or {}))
+def _legacy_order_from_command(command: BotCommand) -> OrderDict:
     request = command.request
-    if isinstance(request, CancelOrderCommandRequest):
+    if isinstance(command, CancelCommand):
         return {
             "pair_name": request.pair_name,
             "ordType": request.ordType,
             "clOrdID": request.clOrdID,
         }
-    if isinstance(request, AmendOrderCommandRequest):
+    if isinstance(command, AmendTailCommand):
         order: OrderDict = {
             "pair_name": request.pair_name,
             "ordType": request.ordType,
@@ -145,7 +227,7 @@ def _legacy_order_from_command(command: RuntimeCommand) -> OrderDict:
         if request.text is not None:
             order["text"] = request.text
         return order
-    order = {
+    order: OrderDict = {
         "pair_name": request.pair_name,
         "ordType": request.ordType,
         "side": request.side,
@@ -164,7 +246,7 @@ def _legacy_order_from_command(command: RuntimeCommand) -> OrderDict:
         order["text"] = request.text
     if request.oDelta is not None:
         order["oDelta"] = request.oDelta
-    return cast(OrderDict, order)
+    return order
 
 
 def _quantity_from_order(order: OrderDict) -> Any:

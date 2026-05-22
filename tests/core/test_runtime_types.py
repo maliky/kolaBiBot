@@ -22,6 +22,8 @@ from kolabi.shared.core.runtime_types import (
     ExchangeName,
     OrderRole,
     OrderStatus,
+    PlaceHeadCommand,
+    PlaceOrderCommandRequest,
     RuntimeCommand,
     RuntimeCommandKind,
     RuntimeEvent,
@@ -47,10 +49,15 @@ def test_runtime_event_and_command_types_are_typed_values() -> None:
         symbol=symbol,
         note="head scheduled",
     )
-    command = RuntimeCommand(
+    command = PlaceHeadCommand(
         kind=RuntimeCommandKind.PLACE,
         symbol=symbol,
-        reason=OrderRole.HEAD.value,
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="buy",
+            ordType="Limit",
+        ),
     )
 
     assert event.kind == RuntimeEventKind.ORDER_REQUESTED

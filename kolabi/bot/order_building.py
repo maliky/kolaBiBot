@@ -18,13 +18,15 @@ from typing import cast
 from kolabi.bot.domain import OrderPairSpec, PairCycleState, Side, opposite_side
 from kolabi.shared.core.runtime_types import (
     AmendOrderCommandRequest,
+    AmendTailCommand,
     CancelOrderCommandRequest,
     OrderDict,
     OrderQty,
     OrderRole,
+    PlaceHeadCommand,
     PlaceOrderCommandRequest,
+    PlaceTailCommand,
     PriceOffset,
-    RuntimeCommand,
     RuntimeCommandKind,
     StopPrice,
     Symbol,
@@ -148,7 +150,7 @@ def tail_command(
     *,
     symbol: Symbol,
     kind: RuntimeCommandKind,
-) -> RuntimeCommand:
+) -> PlaceTailCommand | AmendTailCommand:
     """Build a tail command for placement or amendment from runtime state."""
     request: PlaceOrderCommandRequest | AmendOrderCommandRequest
     if kind == RuntimeCommandKind.AMEND:
@@ -157,15 +159,20 @@ def tail_command(
     else:
         request = tail_place_request(state)
         order = tail_order_dict(state)
-    return RuntimeCommand(
+    if kind == RuntimeCommandKind.AMEND:
+        return AmendTailCommand(
+            kind=kind,
+            symbol=symbol,
+            request=cast(AmendOrderCommandRequest, request),
+            pair_name=state.pair.name,
+            legacy_order=order,
+        )
+    return PlaceTailCommand(
         kind=kind,
         symbol=symbol,
-        request=request,
+        request=cast(PlaceOrderCommandRequest, request),
         pair_name=state.pair.name,
-        role=OrderRole.TAIL,
         legacy_order=order,
-        order=order,
-        reason=OrderRole.TAIL.value,
     )
 
 

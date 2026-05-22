@@ -21,7 +21,8 @@ from kolabi.bot.domain import (
     TailState,
     TimeWindow,
 )
-from kolabi.shared.core.runtime_types import RuntimeCommand
+from kolabi.shared.core.runtime_types import BotCommand
+from kolabi.shared.core.runtime_types import PlaceHeadCommand
 from kolabi.shared.core.runtime_types import RuntimeCommandKind
 from kolabi.shared.core.runtime_types import PlaceOrderCommandRequest
 from kolabi.shared.core.runtime_types import Symbol
@@ -116,8 +117,8 @@ def test_chronos_private_terminal_precedence() -> None:
 
 def test_chronos_dedupes_duplicate_command() -> None:
     chronos = Chronos(state=sample_state())
-    commands = [
-        RuntimeCommand(
+    commands: list[BotCommand] = [
+        PlaceHeadCommand(
             kind=kind,
             symbol=Symbol("PI_XBTUSD"),
             request=PlaceOrderCommandRequest(
@@ -127,7 +128,6 @@ def test_chronos_dedupes_duplicate_command() -> None:
                 clOrdID="CID-B",
             ),
             pair_name="pair-b",
-            reason="head",
         )
         for kind in (RuntimeCommandKind.PLACE, RuntimeCommandKind.PLACE)
     ]
@@ -182,7 +182,7 @@ def test_chronos_emits_no_exchange_payloads_directly() -> None:
     commands = chronos.process_event(move)
 
     assert commands
-    assert all(isinstance(command, RuntimeCommand) for command in commands)
+    assert all(isinstance(command, BotCommand.__args__) for command in commands)
     assert all(not isinstance(command, dict) for command in commands)
 
 
@@ -199,12 +199,12 @@ def test_chronos_emits_typed_runtime_commands_only() -> None:
     commands = chronos.process_event(move)
 
     assert commands
-    assert all(isinstance(command, RuntimeCommand) for command in commands)
+    assert all(isinstance(command, BotCommand.__args__) for command in commands)
 
 
 def test_chronos_async_event_loop_routes_batch() -> None:
     chronos = Chronos(state=sample_state())
-    async def _run() -> tuple[RuntimeCommand, ...]:
+    async def _run() -> tuple[BotCommand, ...]:
         await chronos.event_queue.put(
             EggMove(
                 kind=EggMoveKind.HEAD_HOOKED,
@@ -220,7 +220,7 @@ def test_chronos_async_event_loop_routes_batch() -> None:
 
     assert commands
     queued = asyncio.run(chronos.command_queue.get())
-    assert isinstance(queued, RuntimeCommand)
+    assert isinstance(queued, BotCommand.__args__)
 
 
 def test_closed_tail_can_hook_dependent_pair() -> None:
