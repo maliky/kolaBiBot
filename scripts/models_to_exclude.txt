@@ -1,4 +1,3 @@
 kolabi.shared.logging
 kolabi.bot.runtime.orders
 kolabi.bot.indicators.DummyIndicatorClient
-kolabi.shared.core.types.ExchangeABC
