@@ -46,7 +46,8 @@ SubmissionTime = NewType("SubmissionTime", datetime)
 
 ClientOrderId = ClOrdID
 ExchangeOrderId = OrderID
-Quantity = OrderQty | FilledQty | RemainingQty | ContractSize | MinQty | float | int
+Quantity = OrderQty | FilledQty | RemainingQty | ContractSize | MinQty | Decimal | float | int
+PriceLike = Price | TriggerPrice | LimitPrice | StopPrice | PriceOffset | Decimal | float
 
 
 def to_decimal(value: DecimalLike) -> Decimal:
@@ -140,20 +141,20 @@ class OrderDict(TypedDict, total=False):
     action: str
     orderQty: Quantity
     quantity: Quantity
-    price: Price | float
-    stopPx: StopPrice | float
-    stopPrice: StopPrice | float
+    price: PriceLike
+    stopPx: StopPrice | Decimal | float
+    stopPrice: StopPrice | Decimal | float
     ordType: str
     execInst: str
     clOrdID: str
     orderID: str
-    newPrice: LimitPrice | float
+    newPrice: LimitPrice | StopPrice | Decimal | float
     newQty: Quantity
     text: str | None
-    oDelta: PriceOffset | float
-    cumQty: FilledQty | float
-    executedQty: FilledQty | float
-    filledQty: FilledQty | float
+    oDelta: PriceOffset | Decimal | float
+    cumQty: FilledQty | Decimal | float
+    executedQty: FilledQty | Decimal | float
+    filledQty: FilledQty | Decimal | float
 
 
 class NewOrderRequest(TypedDict, total=False):
@@ -161,19 +162,19 @@ class NewOrderRequest(TypedDict, total=False):
     ordType: str
     orderQty: Quantity
     quantity: Quantity
-    price: Price | float
-    stopPx: StopPrice | float
+    price: PriceLike
+    stopPx: StopPrice | Decimal | float
     execInst: str
     clOrdID: str
     text: str | None
-    oDelta: PriceOffset | float
+    oDelta: PriceOffset | Decimal | float
 
 
 class AmendOrderRequest(TypedDict, total=False):
     ordType: str
     side: str
     orderID: str
-    newPrice: LimitPrice | float
+    newPrice: LimitPrice | StopPrice | Decimal | float
     newQty: Quantity
     text: str | None
 
@@ -192,12 +193,12 @@ class PlaceOrderCommandRequest:
     side: str
     ordType: str
     orderQty: Quantity | None = None
-    price: Price | float | None = None
-    stopPx: StopPrice | float | None = None
+    price: PriceLike | None = None
+    stopPx: StopPrice | Decimal | float | None = None
     execInst: str | None = None
     clOrdID: str | None = None
     text: str | None = None
-    oDelta: PriceOffset | float | None = None
+    oDelta: PriceOffset | Decimal | float | None = None
 
 
 @dataclass(frozen=True)
@@ -207,7 +208,7 @@ class AmendOrderCommandRequest:
     ordType: str
     orderID: str
     clOrdID: str | None = None
-    newPrice: LimitPrice | float | None = None
+    newPrice: LimitPrice | StopPrice | Decimal | float | None = None
     newQty: Quantity | None = None
     text: str | None = None
 

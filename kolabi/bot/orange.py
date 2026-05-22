@@ -158,9 +158,8 @@ def simulated_private_fill_from_submission(
     reply = dict(submitted.reply or {})
     filled = to_decimal(played_quantity)
     reply["cumQty"] = float(filled)
-    reply["orderQty"] = float(
-        to_decimal(reply.get("orderQty", played_quantity if filled > 0 else 0))
-    )
+    total_qty = reply.get("orderQty", played_quantity if filled > 0 else 0)
+    reply["orderQty"] = float(_decimal_or_zero(total_qty))
     if closed:
         reply["ordStatus"] = HeadState.CLOSED.value
         reply["execType"] = OrderReason.FULL_FILL.value if filled > 0 else OrderReason.CANCELLED_BY_USER.value

@@ -20,7 +20,7 @@ from typing import Iterable
 from kolabi.bot.domain import EggMove, EggMoveKind, HeadState, StrategyState, TailState
 from kolabi.bot.isis import step_strategy
 from kolabi.bot.janus import plan_runtime_commands
-from kolabi.shared.core.runtime_types import RuntimeCommand, RuntimeCommandKind
+from kolabi.shared.core.runtime_types import RuntimeCommand, RuntimeCommandKind, Symbol
 
 
 class ChronosNoticeKind(StrEnum):
@@ -145,7 +145,7 @@ class Chronos:
         commands = () if pair_state is None else plan_runtime_commands(
             pair_state,
             intents,
-            symbol=event.symbol,
+            symbol=Symbol(event.symbol),
         )
         chained_commands = self._activate_dependent_pairs(event)
         return tuple(commands) + chained_commands
@@ -281,7 +281,7 @@ class Chronos:
             commands = () if next_pair_state is None else plan_runtime_commands(
                 next_pair_state,
                 intents,
-                symbol=event.symbol,
+                symbol=Symbol(event.symbol),
             )
             emitted.extend(commands)
         return self._dedupe_commands(emitted)

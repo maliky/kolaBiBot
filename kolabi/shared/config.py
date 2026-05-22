@@ -107,17 +107,17 @@ def load_exchange_config(
     if not base_url:
         key = f"{normalized.upper()}_{'TEST_' if testnet else ''}BASE_URL"
         default_url = defaults["test_base_url"] if testnet else defaults["base_url"]
-        base_url = env_mapping.get(key, default_url)
+        base_url = env_mapping.get(key) or str(default_url)
 
     key = overrides.pop("api_key", None)
     secret = overrides.pop("api_secret", None)
 
     if not key:
         key_var = defaults["test_key_var"] if testnet else defaults["key_var"]
-        key = env_mapping.get(key_var)
+        key = env_mapping.get(key_var) or ""
     if not secret:
         secret_var = defaults["test_secret_var"] if testnet else defaults["secret_var"]
-        secret = env_mapping.get(secret_var)
+        secret = env_mapping.get(secret_var) or ""
 
     if not key or not secret:
         raise ValueError(

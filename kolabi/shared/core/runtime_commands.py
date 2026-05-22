@@ -18,6 +18,7 @@ from typing import Any, cast
 from kolabi.shared.core.runtime_types import (
     AmendOrderCommandRequest,
     CancelOrderCommandRequest,
+    CommandRequestRecord,
     HeadCommandPayload,
     PlaceOrderCommandRequest,
     OrderDict,
@@ -38,6 +39,8 @@ def runtime_command_from_order(
 ) -> RuntimeCommand:
     normalized = cast(OrderDict, dict(order))
     ord_type = str(normalized.get("ordType", ""))
+    request: CommandRequestRecord
+    role: OrderRole
     if ord_type == "cancel":
         kind = RuntimeCommandKind.CANCEL
         command_reason = reason or OrderRole.CANCEL.value

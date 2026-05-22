@@ -14,11 +14,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from decimal import Decimal
 from itertools import count
-from typing import Protocol
+from typing import Protocol, cast
 
 from kolabi.bot.chronos import Chronos, ChronosNotice
-from kolabi.bot.domain import OrderPairSpec, PairCycleState, StrategySpec, StrategyState
+from kolabi.bot.domain import EggMove, OrderPairSpec, PairCycleState, StrategySpec, StrategyState
 from kolabi.bot.ids import head_client_order_id
 from kolabi.bot.orange import (
     head_hooked_event,
@@ -28,11 +29,15 @@ from kolabi.bot.orange import (
 from kolabi.shared.core.bargain import Bargain
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
+    OrderDict,
     OrderRole,
     PlaceOrderCommandRequest,
+    Price,
     RuntimeCommand,
     RuntimeCommandKind,
     Symbol,
+    OrderQty,
+    to_decimal,
 )
 from kolabi.runtime.kola.ogun_executor import execute_runtime_command
 
@@ -73,12 +78,12 @@ class SimulatedExecutor:
 
     async def execute(self, command: RuntimeCommand) -> OrderAck:
         request = command.request
-        qty = None
-        price = None
+        qty: OrderQty | float | None = None
+        price: Price | float | None = None
         side = None
         if isinstance(request, PlaceOrderCommandRequest):
-            qty = request.orderQty
-            price = request.price or request.stopPx
+            qty = _ack_quantity(request.orderQty)
+            price = _ack_price(request.price if request.price is not None else request.stopPx)
             side = request.side
         return OrderAck(
             order_id=f"SIM-{next(self._ids)}",
@@ -146,7 +151,7 @@ class StrategyRuntime:
             notices=tuple(self.chronos.notices),
         )
 
-    def _initial_events(self) -> list:
+    def _initial_events(self) -> list[EggMove]:
         current_time = datetime.now(timezone.utc)
         return [
             head_hooked_event(
@@ -171,10 +176,11 @@ class StrategyRuntime:
             request = replace(command.request, clOrdID=clordid)
             order = dict(command.order or {})
             order["clOrdID"] = clordid
-            return replace(command, request=request, order=order, legacy_order=order)
+            typed_order = _typed_order(order)
+            return replace(command, request=request, order=typed_order, legacy_order=typed_order)
         return command
 
-    def _followup_events(self, command: RuntimeCommand, ack: OrderAck) -> tuple:
+    def _followup_events(self, command: RuntimeCommand, ack: OrderAck) -> tuple[EggMove, ...]:
         if command.role != OrderRole.HEAD or command.kind != RuntimeCommandKind.PLACE:
             return ()
         pair_name = command.pair_name or (command.request.pair_name if command.request is not None else None)
@@ -222,3 +228,27 @@ def _played_quantity_from_request(request: object | None) -> float:
     if isinstance(request, PlaceOrderCommandRequest) and request.orderQty is not None:
         return float(request.orderQty)
     return 0.0
+
+
+def _ack_price(value: Price | float | object | None) -> Price | float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, (Decimal, str)):
+        return Price(to_decimal(value))
+    raise TypeError(f"Unsupported ack price value type: {type(value)!r}")
+
+
+def _ack_quantity(value: object | None) -> OrderQty | float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, (Decimal, str)):
+        return OrderQty(to_decimal(value))
+    raise TypeError(f"Unsupported ack quantity value type: {type(value)!r}")
+
+
+def _typed_order(order: dict[str, object]) -> OrderDict:
+    return cast(OrderDict, order)

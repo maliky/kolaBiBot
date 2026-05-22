@@ -150,6 +150,7 @@ def tail_command(
     kind: RuntimeCommandKind,
 ) -> RuntimeCommand:
     """Build a tail command for placement or amendment from runtime state."""
+    request: PlaceOrderCommandRequest | AmendOrderCommandRequest
     if kind == RuntimeCommandKind.AMEND:
         request = tail_amend_request(state)
         order = tail_amend_order_dict(state)

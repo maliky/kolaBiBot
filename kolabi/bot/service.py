@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Protocol, TypedDict, cast
@@ -18,7 +19,7 @@ from kolabi.bot.strategy_runtime import (
     StrategyRuntime,
 )
 from kolabi.shared.core.bargain import Bargain
-from kolabi.shared.config import load_exchange_config
+from kolabi.shared.config import ExchangeConfig, load_exchange_config
 from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.kraken_futures import kraken_futures_environment
 from kolabi.shared.logging import setup_logging
@@ -67,7 +68,7 @@ class BotService:
     ) -> None:
         self.config = config
         self.logger = setup_logging(config.log_level)
-        self.exchange_config = None
+        self.exchange_config: ExchangeConfig | None = None
         market_db_url = config.market_db_url
         account_db_url = config.account_db_url
         if config.exchange.lower() == "kraken":
@@ -157,8 +158,6 @@ class BotService:
             store.record_connection_status("rest_reconciler", "starting")
             asyncio.run(_run_private_stack(stream_config, store, credentials))
 
-        import asyncio
-
         self._account_thread = threading.Thread(
             target=_run_stream,
             name="kraken-private-stream",
@@ -230,8 +229,6 @@ class BotService:
             executor=None if dry_run else self._build_executor(simulate=simulate),
             simulate=simulate,
         )
-        import asyncio
-
         if dry_run:
             return asyncio.run(runtime.plan())
         return asyncio.run(runtime.run())
@@ -246,9 +243,9 @@ class BotService:
 
     def _validate_pairs(self, pairs: Iterable[OrderPairSpec]) -> None:
         """Valide les contraintes instrument Kraken avant envoi."""
-        if self.config.exchange.lower() != "kraken" or self.exchange_config is None:
-            if self.config.exchange.lower() != "kraken":
-                return
+        if self.config.exchange.lower() != "kraken":
+            return
+        if self.exchange_config is None:
             self._ensure_exchange_config()
         assert self.exchange_config is not None
         adapter_cls = get_adapter("kraken")
