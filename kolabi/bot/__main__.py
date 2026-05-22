@@ -76,7 +76,7 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Plan the strategy through Orange/Chronos/Isis/Janus without calling Ogun",
+        help="Plan the strategy through Dragon/Chronos/Isis/Horus without calling Ogun",
     )
     parser.add_argument(
         "--simulate",

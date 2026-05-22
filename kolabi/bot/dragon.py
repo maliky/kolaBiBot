@@ -1,4 +1,4 @@
-"""Orange : Pure event ingestion normalizer and translator.
+"""Dragon : Pure event ingestion normalizer and translator.
 
 Purpose: translate raw execution, confirmation, and synthetic runtime facts
 into reducer-ready `EggMove` values without supervisor side effects.

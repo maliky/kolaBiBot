@@ -30,7 +30,7 @@ from kolabi.bot.domain import (
     TailMode,
     TailState,
 )
-from kolabi.bot.orange import reason_from_status_or_reason
+from kolabi.bot.dragon import reason_from_status_or_reason
 from kolabi.shared.core.runtime_types import to_decimal
 
 

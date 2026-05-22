@@ -19,8 +19,8 @@ from typing import Iterable
 
 from kolabi.bot.domain import EggMove, EggMoveKind, HeadState, StrategyState, TailState
 from kolabi.bot.isis import step_strategy
-from kolabi.bot.janus import plan_runtime_commands
-from kolabi.shared.core.runtime_types import BotCommand, RuntimeCommandKind, Symbol
+from kolabi.bot.horus import plan_runtime_commands
+from kolabi.shared.core.runtime_types import DragonSong, RuntimeCommandKind, Symbol
 
 
 class ChronosNoticeKind(StrEnum):
@@ -51,14 +51,14 @@ class Chronos:
     state: StrategyState
     pending_timeout: timedelta = timedelta(seconds=30)
     event_queue: asyncio.Queue[EggMove | None] = field(default_factory=asyncio.Queue)
-    command_queue: asyncio.Queue[BotCommand] = field(default_factory=asyncio.Queue)
+    command_queue: asyncio.Queue[DragonSong] = field(default_factory=asyncio.Queue)
     notices: list[ChronosNotice] = field(default_factory=list)
     pending: dict[str, PendingEggMove] = field(default_factory=dict)
     _seen_event_keys: set[tuple[str, str]] = field(default_factory=set)
     _seen_fallback_keys: set[tuple[str, str, int]] = field(default_factory=set)
     _seen_command_keys: set[tuple[str, str, str | None]] = field(default_factory=set)
 
-    async def run_once(self) -> tuple[BotCommand, ...]:
+    async def run_once(self) -> tuple[DragonSong, ...]:
         """Traite le lot courant d'evenements deja en file."""
         batch = await self._drain_batch()
         commands = self.process_events(batch)
@@ -71,7 +71,7 @@ class Chronos:
         events: Iterable[EggMove],
         *,
         now: datetime | None = None,
-    ) -> tuple[BotCommand, ...]:
+    ) -> tuple[DragonSong, ...]:
         """Applique precedence et routage sur un lot d'evenements."""
         current_time = now or datetime.now(timezone.utc)
         selected: list[EggMove] = []
@@ -106,7 +106,7 @@ class Chronos:
                 )
             )
 
-        emitted: list[BotCommand] = []
+        emitted: list[DragonSong] = []
         for event in selected:
             emitted.extend(self.process_event(event, now=current_time))
         return self._dedupe_commands(emitted)
@@ -116,7 +116,7 @@ class Chronos:
         event: EggMove,
         *,
         now: datetime | None = None,
-    ) -> tuple[BotCommand, ...]:
+    ) -> tuple[DragonSong, ...]:
         """Traite un evenement unique avec deduplication et attente d'identite."""
         current_time = now or datetime.now(timezone.utc)
         if self._needs_pending_identity(event):
@@ -234,9 +234,9 @@ class Chronos:
 
     def _dedupe_commands(
         self,
-        commands: Iterable[BotCommand],
-    ) -> tuple[BotCommand, ...]:
-        per_pair: dict[str, BotCommand] = {}
+        commands: Iterable[DragonSong],
+    ) -> tuple[DragonSong, ...]:
+        per_pair: dict[str, DragonSong] = {}
         for command in commands:
             pair_name = _command_pair_name(command)
             if pair_name is None:
@@ -250,7 +250,7 @@ class Chronos:
                 per_pair[pair_name] = command
         return tuple(per_pair.values())
 
-    def _activate_dependent_pairs(self, event: EggMove) -> tuple[BotCommand, ...]:
+    def _activate_dependent_pairs(self, event: EggMove) -> tuple[DragonSong, ...]:
         """Active les paires dependantes apres une fermeture significative."""
         origin_pair = resolve_pair_name(self.state, event) or event.pair_name
         if origin_pair is None:
@@ -258,7 +258,7 @@ class Chronos:
         if not _may_activate_dependency(self.state, origin_pair, event):
             return ()
 
-        emitted: list[BotCommand] = []
+        emitted: list[DragonSong] = []
         for pair_name, pair_state in self.state.pairs.items():
             if pair_name == origin_pair:
                 continue
@@ -300,11 +300,11 @@ def _with_target_pair(event: EggMove, pair_name: str | None) -> EggMove:
     )
 
 
-def _command_pair_name(command: BotCommand) -> str | None:
+def _command_pair_name(command: DragonSong) -> str | None:
     return command.pair_name or None
 
 
-def _command_client_order_id(command: BotCommand) -> str | None:
+def _command_client_order_id(command: DragonSong) -> str | None:
     return getattr(command.request, "clOrdID", None)
 
 
@@ -350,7 +350,7 @@ def _string_or_none(value: object) -> str | None:
     return None
 
 
-def _command_precedence(command: BotCommand) -> int:
+def _command_precedence(command: DragonSong) -> int:
     if command.kind == RuntimeCommandKind.CANCEL:
         return 30
     if command.kind == RuntimeCommandKind.AMEND:

@@ -17,6 +17,7 @@ from typing import cast
 
 from kolabi.bot.domain import OrderPairSpec, PairCycleState, Side, opposite_side
 from kolabi.shared.core.runtime_types import (
+    AmendHeadCommand,
     AmendOrderCommandRequest,
     AmendTailCommand,
     CancelOrderCommandRequest,
@@ -142,6 +143,60 @@ def tail_amend_request(state: PairCycleState) -> AmendOrderCommandRequest:
         clOrdID=state.tail_identity.client_order_id,
         newPrice=cast(StopPrice, to_decimal(state.pair.tail_price_spec)),
         newQty=None if quantity is None else cast(OrderQty, to_decimal(quantity)),
+    )
+
+
+def head_amend_request(state: PairCycleState) -> AmendOrderCommandRequest:
+    if state.head_identity is None:
+        raise ValueError("head amend requires an existing head identity")
+    if not state.head_identity.exchange_order_id:
+        raise ValueError("head amend requires an exchange order ID")
+    return AmendOrderCommandRequest(
+        pair_name=state.pair.name,
+        side=state.pair.head.side.value,
+        ordType=state.pair.head.order_type,
+        orderID=state.head_identity.exchange_order_id,
+        clOrdID=state.head_identity.client_order_id,
+        text="head amend",
+    )
+
+
+def head_amend_order_dict(state: PairCycleState) -> OrderDict:
+    request = head_amend_request(state)
+    order: OrderDict = {
+        "pair_name": request.pair_name,
+        "ordType": request.ordType,
+        "side": request.side,
+        "orderID": request.orderID,
+    }
+    if request.clOrdID is not None:
+        order["clOrdID"] = request.clOrdID
+    if request.text is not None:
+        order["text"] = request.text
+    return order
+
+
+def head_command(
+    state: PairCycleState,
+    *,
+    symbol: Symbol,
+    kind: RuntimeCommandKind,
+) -> PlaceHeadCommand | AmendHeadCommand:
+    if kind == RuntimeCommandKind.AMEND:
+        request = head_amend_request(state)
+        return AmendHeadCommand(
+            kind=kind,
+            symbol=symbol,
+            request=request,
+            pair_name=state.pair.name,
+            legacy_order=head_amend_order_dict(state),
+        )
+    return PlaceHeadCommand(
+        kind=kind,
+        symbol=symbol,
+        request=head_place_request(state.pair),
+        pair_name=state.pair.name,
+        legacy_order=head_order_dict(state.pair),
     )
 
 

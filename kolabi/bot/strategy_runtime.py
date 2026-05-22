@@ -1,4 +1,4 @@
-"""Async persistent strategy runtime over Orange, Chronos, Janus, and Ogun.
+"""Async persistent strategy runtime over Dragon, Chronos, Horus, and Ogun.
 
 Purpose: own the active supervisor loop for simulated and live/demo execution
 through the typed bot stack.
@@ -21,7 +21,7 @@ from typing import Protocol, cast
 from kolabi.bot.chronos import Chronos, ChronosNotice
 from kolabi.bot.domain import EggMove, HeadState, OrderIdentity, StrategySpec, StrategyState
 from kolabi.bot.ids import head_client_order_id
-from kolabi.bot.orange import (
+from kolabi.bot.dragon import (
     MarketSnapshotFact,
     head_hooked_event,
     head_hooked_from_market_snapshot,
@@ -30,12 +30,9 @@ from kolabi.bot.orange import (
     private_order_fact_from_record,
     simulated_private_fill_from_submission,
 )
-from kolabi.shared.core.bargain import Bargain
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
-    AmendTailCommand,
-    BotCommand,
-    CancelCommand,
+    DragonSong,
     OrderDict,
     OrderQty,
     PlaceOrderCommandRequest,
@@ -46,11 +43,10 @@ from kolabi.shared.core.runtime_types import (
     to_decimal,
 )
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient
-from kolabi.runtime.kola.ogun_executor import execute_runtime_command
 
 
 class CommandExecutor(Protocol):
-    async def execute(self, command: BotCommand) -> OrderAck: ...
+    async def execute(self, command: DragonSong) -> OrderAck: ...
 
 
 class RuntimeEventSource(Protocol):
@@ -77,25 +73,8 @@ class StrategyRuntimeLike(RuntimeQueueLike, Protocol):
 @dataclass(frozen=True)
 class StrategyRunResult:
     state: StrategyState
-    commands: tuple[BotCommand, ...]
+    commands: tuple[DragonSong, ...]
     notices: tuple[ChronosNotice, ...]
-
-
-class LegacyOgunExecutor:
-    """Executor backed by Bargain plus legacy Ogun helper dispatch."""
-
-    def __init__(self, bargain: Bargain, *, amend_absdelta: float = 1.0) -> None:
-        self.bargain = bargain
-        self.amend_absdelta = amend_absdelta
-
-    async def execute(self, command: BotCommand) -> OrderAck:
-        reply = await asyncio.to_thread(
-            execute_runtime_command,
-            self.bargain,
-            command,
-            amend_absdelta=self.amend_absdelta,
-        )
-        return _ack_from_reply(reply, command)
 
 
 class SimulatedExecutor:
@@ -104,7 +83,7 @@ class SimulatedExecutor:
     def __init__(self) -> None:
         self._ids = count(1)
 
-    async def execute(self, command: BotCommand) -> OrderAck:
+    async def execute(self, command: DragonSong) -> OrderAck:
         qty: OrderQty | float | None = None
         price: Price | float | None = None
         side = None
@@ -248,7 +227,7 @@ class StrategyRuntime:
         )
         self.chronos = Chronos(state=self.state)
         self.event_queue: asyncio.Queue[EggMove] = asyncio.Queue()
-        self.commands: list[BotCommand] = []
+        self.commands: list[DragonSong] = []
         self.running = False
         self._tasks: list[asyncio.Task[None]] = []
 
@@ -326,7 +305,7 @@ class StrategyRuntime:
                 return True
         return False
 
-    def _prepare_command(self, command: BotCommand) -> BotCommand:
+    def _prepare_command(self, command: DragonSong) -> DragonSong:
         if isinstance(command, PlaceHeadCommand) and command.request.clOrdID is None:
             clordid = head_client_order_id(
                 self.state.pairs[command.request.pair_name].pair,
@@ -338,7 +317,7 @@ class StrategyRuntime:
             return replace(command, request=request, legacy_order=cast(OrderDict, order))
         return command
 
-    def _followup_events(self, command: BotCommand, ack: OrderAck) -> tuple[EggMove, ...]:
+    def _followup_events(self, command: DragonSong, ack: OrderAck) -> tuple[EggMove, ...]:
         if not isinstance(command, PlaceHeadCommand):
             return ()
         submitted = head_submitted_from_ack(
@@ -407,26 +386,6 @@ def _record_timestamp(record) -> datetime | None:
     if record.source_timestamp is not None:
         return datetime.fromisoformat(record.source_timestamp)
     return None
-
-
-def _ack_from_reply(reply: object, command: BotCommand) -> OrderAck:
-    if isinstance(reply, OrderAck):
-        return reply
-    side = getattr(command.request, "side", None)
-    if isinstance(reply, dict):
-        return OrderAck(
-            order_id=str(reply.get("orderID", "")),
-            status=str(reply.get("ordStatus", "New")),
-            price=reply.get("price") if isinstance(reply.get("price"), (int, float)) else None,
-            orig_qty=reply.get("orderQty") if isinstance(reply.get("orderQty"), (int, float)) else None,
-            executed_qty=reply.get("cumQty") if isinstance(reply.get("cumQty"), (int, float)) else None,
-            side=str(reply.get("side")) if reply.get("side") is not None else side,
-        )
-    return OrderAck(
-        order_id=f"ACK-{datetime.now(timezone.utc).timestamp()}",
-        status="New",
-        side=side,
-    )
 
 
 def _played_quantity_from_request(request: PlaceOrderCommandRequest | object | None) -> float:

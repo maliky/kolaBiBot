@@ -67,6 +67,7 @@ TailRole = TailMode
 
 class PairIntentKind(StrEnum):
     PLACE_HEAD = "place_head"
+    AMEND_HEAD = "amend_head"
     PLACE_TAIL = "place_tail"
     AMEND_TAIL = "amend_tail"
 

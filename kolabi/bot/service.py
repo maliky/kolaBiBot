@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import threading
 from dataclasses import dataclass
 from typing import Any, Iterable, Optional, Protocol, TypedDict, cast
 
@@ -15,29 +14,45 @@ from kolabi.bot.persistence import OrderRecorder, PersistenceConfig
 from kolabi.bot.strategy_runtime import (
     KrakenPrivateOrderPollingSource,
     KrakenPublicTriggerSource,
-    LegacyOgunExecutor,
     SimulatedExecutor,
     StrategyRunResult,
     StrategyRuntime,
     StaticHookSource,
     plan_strategy_once,
 )
-from kolabi.shared.core.bargain import Bargain
 from kolabi.shared.config import ExchangeConfig, load_exchange_config
+from kolabi.shared.core.models import OrderAck
+from kolabi.shared.core.runtime_types import (
+    AmendHeadCommand,
+    AmendTailCommand,
+    CancelCommand,
+    ExchangePort,
+    PlaceHeadCommand,
+    PlaceTailCommand,
+)
 from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.kraken_futures import kraken_futures_environment
 from kolabi.shared.logging import setup_logging
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntimeState
-from kolabi.tree.account import (
-    AccountStateStore,
-    AccountStreamConfig,
-    KrakenFuturesPrivateStream,
-    credentials_from_env,
-)
+from kolabi.runtime.kola.ogun_executor import OgunExecutor
 
 
 class InstrumentRulesExchange(Protocol):
     def instrument_rules(self, symbol: str | None = None) -> dict[str, object]: ...
+
+
+class ExchangeAdapterLike(Protocol):
+    def place_order(
+        self,
+        side: str,
+        orderQty: object,
+        price: object | None = None,
+        stopPx: object | None = None,
+        type_: str = "LIMIT",
+        **params: object,
+    ) -> OrderAck: ...
+    def amend_order(self, order_id: str, **params: object) -> OrderAck: ...
+    def cancel_order(self, order_id: str) -> OrderAck: ...
 
 
 @dataclass
@@ -97,7 +112,6 @@ class BotService:
             else None
         )
         self._server_started = False
-        self._account_thread: Any = None
         self._account_db_url = account_db_url
         self._market_db_url = market_db_url
         self.runtime_state: KrakenRuntimeStateClient | None = None
@@ -120,7 +134,6 @@ class BotService:
 
     def start(self) -> None:
         if not self._server_started:
-            self._start_kraken_private_stream()
             self._wait_until_ready()
             self._server_started = True
 
@@ -138,36 +151,6 @@ class BotService:
         payload = state.as_dict()
         payload["status"] = "ok" if state.ready else "waiting"
         return payload
-
-    def _start_kraken_private_stream(self) -> None:
-        if (
-            self.config.exchange.lower() != "kraken"
-            or self._account_thread is not None
-        ):
-            return
-        env_cfg = kraken_futures_environment(self.config.environment)
-        stream_config = AccountStreamConfig(
-            db_url=self._account_db_url or env_cfg.private_db_url,
-            environment=self.config.environment,
-            market_type="futures",
-            ws_url=env_cfg.private_ws_url,
-            rest_url=env_cfg.rest_url,
-            api_key_env=env_cfg.api_key_env,
-            api_secret_env=env_cfg.api_secret_env,
-        )
-        store = AccountStateStore(stream_config)
-        credentials = credentials_from_env(stream_config)
-
-        def _run_stream() -> None:
-            store.record_connection_status("rest_reconciler", "starting")
-            asyncio.run(_run_private_stack(stream_config, store, credentials))
-
-        self._account_thread = threading.Thread(
-            target=_run_stream,
-            name="kraken-private-stream",
-            daemon=True,
-        )
-        self._account_thread.start()
 
     def _wait_until_ready(self) -> None:
         """Wait for fresh Kraken public/private state before starting the runtime."""
@@ -297,8 +280,11 @@ class BotService:
         self._ensure_exchange_config()
         if self.exchange_config is None:
             raise RuntimeError("Exchange configuration is required for active execution")
-        bargain = Bargain(self.config.exchange, self.exchange_config)
-        return LegacyOgunExecutor(bargain)
+        port = AdapterExchangePort(
+            exchange=self.config.exchange.lower(),
+            exchange_config=self.exchange_config,
+        )
+        return OgunExecutor(port)
 
     def _build_public_source(self, *, simulate: bool):
         if simulate:
@@ -327,17 +313,61 @@ class BotService:
 
 
 async def _run_private_stack(
-    config: AccountStreamConfig,
-    store: AccountStateStore,
-    credentials: Any,
+    *_args: Any,
 ) -> None:
-    """Start one reconcile pass, then keep the private websocket alive."""
-    from kolabi.tree.account import KrakenFuturesRestReconciler
+    raise RuntimeError("_run_private_stack is retired from the active bot path")
 
-    reconciler = KrakenFuturesRestReconciler(config, store, credentials)
-    try:
-        reconciler.reconcile_once()
-    except Exception as exc:
-        store.record_connection_status("rest_reconciler", "error", last_error=str(exc))
-    stream = KrakenFuturesPrivateStream(config, store, credentials)
-    await stream.run()
+
+class AdapterExchangePort(ExchangePort):
+    """ExchangePort adapter backed by shared exchange adapters."""
+
+    def __init__(self, *, exchange: str, exchange_config: ExchangeConfig) -> None:
+        adapter_cls = get_adapter(exchange)
+        self.adapter = cast(
+            ExchangeAdapterLike,
+            adapter_cls(
+                api_key=exchange_config.api_key,
+                api_secret=exchange_config.api_secret,
+                base_url=exchange_config.base_url,
+                symbol=exchange_config.symbol,
+                **exchange_config.adapter_kwargs,
+            ),
+        )
+
+    async def place_head(self, command: PlaceHeadCommand) -> OrderAck:
+        return self._place(command.request)
+
+    async def place_tail(self, command: PlaceTailCommand) -> OrderAck:
+        return self._place(command.request)
+
+    async def amend_head(self, command: AmendHeadCommand) -> OrderAck:
+        return self._amend(command.request)
+
+    async def amend_tail(self, command: AmendTailCommand) -> OrderAck:
+        return self._amend(command.request)
+
+    async def cancel(self, command: CancelCommand) -> OrderAck:
+        return self.adapter.cancel_order(command.request.clOrdID)
+
+    def _place(self, request: Any) -> OrderAck:
+        return self.adapter.place_order(
+            request.side,
+            request.orderQty,
+            price=request.price,
+            stopPx=request.stopPx,
+            type_=request.ordType,
+            clOrdID=request.clOrdID,
+            execInst=request.execInst,
+            text=request.text,
+            oDelta=request.oDelta,
+        )
+
+    def _amend(self, request: Any) -> OrderAck:
+        params: dict[str, Any] = {}
+        if request.newPrice is not None:
+            params["price"] = request.newPrice
+        if request.newQty is not None:
+            params["orderQty"] = request.newQty
+        if request.text is not None:
+            params["text"] = request.text
+        return self.adapter.amend_order(request.orderID, **params)
