@@ -11,21 +11,28 @@
 ** Kept active
 - `kolabi/bot/domain.py`
 - `kolabi/bot/pair_cycle.py`
-- `kolabi/bot/runtime/auditor.py`
+- `kolabi/bot/orange.py`
+- `kolabi/bot/chronos.py`
+- `kolabi/bot/isis.py`
+- `kolabi/bot/janus.py`
+- `kolabi/bot/strategy_runtime.py`
 - `kolabi/shared/core/runtime_types.py`
 - `kolabi/shared/core/runtime_commands.py`
 - `kolabi/shared/exchanges/`
-- `kolabi/runtime/kola/chronos.py`
 - `kolabi/runtime/kola/orders/`
+- `kolabi/runtime/kola/ogun_executor.py`
 - `kolabi/runtime/kola/utils/orderfunc.py`
 - `kolabi/runtime/kola/price.py`
-Reason: active strategy path flows through `python -m kolabi.bot` and the local `MarketAuditor` shell.
+Reason: active strategy path flows through `python -m kolabi.bot` and the typed async bot stack.
 
 ** Archived
 - `archives/runtime/run_multi_kola.py`
 Reason: superseded by `python -m kolabi.bot`.
-- `kolabi/runtime/kola/multi_kola.py`
+- `archives/runtime/multi_kola.py`
 Reason: behavioural reference only; no active strategy import path depends on it.
+- `archives/runtime/bot_runtime/__init__.py`
+- `archives/runtime/bot_runtime/auditor.py`
+Reason: the `MarketAuditor.go()` shell is no longer part of the active path.
 - `archives/getKrakenOrderBook/`
 Reason: historical tooling, not in active import path.
 
