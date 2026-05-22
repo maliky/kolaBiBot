@@ -13,10 +13,14 @@ from kolabi.bot.indicators import (
 from kolabi.bot.domain import OrderPairSpec, StrategySpec
 from kolabi.bot.persistence import OrderRecorder, PersistenceConfig
 from kolabi.bot.strategy_runtime import (
+    KrakenPrivateOrderPollingSource,
+    KrakenPublicTriggerSource,
     LegacyOgunExecutor,
     SimulatedExecutor,
     StrategyRunResult,
     StrategyRuntime,
+    StaticHookSource,
+    plan_strategy_once,
 )
 from kolabi.shared.core.bargain import Bargain
 from kolabi.shared.config import ExchangeConfig, load_exchange_config
@@ -227,10 +231,12 @@ class BotService:
             strategy=strategy,
             symbol=self.config.symbol,
             executor=None if dry_run else self._build_executor(simulate=simulate),
+            public_source=self._build_public_source(simulate=simulate),
+            private_source=self._build_private_source(simulate=simulate),
             simulate=simulate,
         )
         if dry_run:
-            return asyncio.run(runtime.plan())
+            return plan_strategy_once(strategy=strategy, symbol=self.config.symbol)
         return asyncio.run(runtime.run())
 
     def run_orders(self, pairs: Iterable[OrderPairSpec], *, dry_run: bool = False, simulate: bool = False) -> StrategyRunResult:
@@ -293,6 +299,18 @@ class BotService:
             raise RuntimeError("Exchange configuration is required for active execution")
         bargain = Bargain(self.config.exchange, self.exchange_config)
         return LegacyOgunExecutor(bargain)
+
+    def _build_public_source(self, *, simulate: bool):
+        if simulate:
+            return StaticHookSource()
+        if self.runtime_state is not None:
+            return KrakenPublicTriggerSource(self.runtime_state)
+        return StaticHookSource()
+
+    def _build_private_source(self, *, simulate: bool):
+        if simulate or self.runtime_state is None:
+            return None
+        return KrakenPrivateOrderPollingSource(self.runtime_state)
 
     def _ensure_exchange_config(self) -> None:
         if self.exchange_config is not None:

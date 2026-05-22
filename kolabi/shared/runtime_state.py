@@ -242,6 +242,43 @@ class KrakenRuntimeStateClient:
             reasons=reasons,
         )
 
+    def fetch_private_orders_since(
+        self,
+        *,
+        after_local_timestamp: datetime | None = None,
+        after_local_id: int | None = None,
+        symbol: str | None = None,
+        limit: int = 200,
+    ) -> tuple[PrivateOrderRecord, ...]:
+        """Return private order rows strictly newer than the supplied cursor."""
+        target_symbol = symbol or self.symbol
+        with self._account_sessionmaker() as session:
+            statement = (
+                select(ExchangeOrder)
+                .where(
+                    ExchangeOrder.exchange == self.exchange,
+                    ExchangeOrder.environment == self.environment,
+                    ExchangeOrder.market_type == self.market_type,
+                    ExchangeOrder.symbol == target_symbol,
+                )
+                .order_by(ExchangeOrder.local_timestamp.asc(), ExchangeOrder.id.asc())
+                .limit(limit)
+            )
+            rows = session.execute(statement).scalars().all()
+        records: list[PrivateOrderRecord] = []
+        for row in rows:
+            if after_local_timestamp is not None:
+                if row.local_timestamp < after_local_timestamp:
+                    continue
+                if (
+                    row.local_timestamp == after_local_timestamp
+                    and after_local_id is not None
+                    and row.id <= after_local_id
+                ):
+                    continue
+            records.append(_private_order_record(row))
+        return tuple(records)
+
     def wait_until_ready(
         self,
         *,
@@ -463,7 +500,22 @@ def _public_indicator_records(
 
 
 def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
-    return PrivateOrderRecord(symbol=row.symbol, status=row.status)
+    return PrivateOrderRecord(
+        symbol=row.symbol,
+        status=row.status,
+        exchange_order_id=row.exchange_order_id,
+        client_order_id=row.client_order_id,
+        side=row.side,
+        order_type=row.order_type,
+        price=row.price,
+        quantity=row.quantity,
+        filled_quantity=row.filled_quantity,
+        source_timestamp=(
+            row.source_timestamp.isoformat() if row.source_timestamp is not None else None
+        ),
+        local_timestamp=row.local_timestamp.isoformat(),
+        local_id=row.id,
+    )
 
 
 def _private_fill_record(symbol: str) -> PrivateFillRecord:

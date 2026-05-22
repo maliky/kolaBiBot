@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, is_dataclass
 import json
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 from kolabi.bot.domain import StrategySpec
 from kolabi.bot.service import BotConfig, BotService
@@ -386,15 +388,15 @@ def _command_to_pretty_dict(command) -> dict[str, object]:
         "kind": command.kind.value,
         "symbol": str(command.symbol),
         "pair_name": command.pair_name,
-        "role": None if command.role is None else command.role.value,
+        "role": command.role.value,
         "reason": command.reason,
     }
-    if command.request is not None:
-        payload["request"] = command.request.__dict__
-    elif command.order is not None:
-        payload["request"] = dict(command.order)
-    else:
-        payload["request"] = None
+    payload["request"] = (
+        asdict(cast(Any, command.request)) if is_dataclass(command.request) else None
+    )
+    payload["legacy_order"] = (
+        dict(command.legacy_order) if command.legacy_order is not None else None
+    )
     return payload
 
 
