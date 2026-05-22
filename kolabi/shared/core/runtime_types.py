@@ -434,6 +434,21 @@ class AmendTailCommand:
 
 
 @dataclass(frozen=True)
+class AmendHeadCommand:
+    kind: RuntimeCommandKind
+    symbol: Symbol
+    pair_name: str
+    request: AmendOrderCommandRequest
+    role: OrderRole = OrderRole.HEAD
+    reason: str = OrderRole.HEAD.value
+    legacy_order: OrderDict | None = None
+
+    def __post_init__(self) -> None:
+        if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
+            object.__setattr__(self, "legacy_order", MappingProxyType(dict(self.legacy_order)))
+
+
+@dataclass(frozen=True)
 class CancelCommand:
     kind: RuntimeCommandKind
     symbol: Symbol
@@ -448,7 +463,7 @@ class CancelCommand:
             object.__setattr__(self, "legacy_order", MappingProxyType(dict(self.legacy_order)))
 
 
-BotCommand = PlaceHeadCommand | PlaceTailCommand | AmendTailCommand | CancelCommand
+DragonSong = PlaceHeadCommand | PlaceTailCommand | AmendHeadCommand | AmendTailCommand | CancelCommand
 
 
 @dataclass(frozen=True)
@@ -487,3 +502,13 @@ class RuntimeState:
     active_exchange_order_id: ExchangeOrderId | None = None
     status: OrderStatus | None = None
     metadata: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+
+
+class ExchangePort(Protocol):
+    """Abstract async exchange boundary consumed by OgunExecutor."""
+
+    async def place_head(self, command: PlaceHeadCommand) -> object: ...
+    async def place_tail(self, command: PlaceTailCommand) -> object: ...
+    async def amend_head(self, command: AmendHeadCommand) -> object: ...
+    async def amend_tail(self, command: AmendTailCommand) -> object: ...
+    async def cancel(self, command: CancelCommand) -> object: ...

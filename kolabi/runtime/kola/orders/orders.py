@@ -317,8 +317,6 @@ def cancel_order(brg: KolaBargain, order):
             return brg.crypto_api.cancel(get_anID(order))
         except ValueError:
             sleep(API_ERROR_INTERVAL)
-        else:
-            break
 
 
 def get_anID(order):
