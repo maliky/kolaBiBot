@@ -1,5 +1,8 @@
-"""Order orchestration (kolaBiBot)."""
+"""Order orchestration (kolaBiBot).
 
-from .service import BotConfig, BotService
+Pure package import only. Impure service/runtime shells stay in explicit
+submodules so importing `kolabi.bot` does not pull SQLAlchemy, requests, or
+exchange adapters.
+"""
 
-__all__ = ["BotService", "BotConfig"]
+__all__: list[str] = []

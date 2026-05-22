@@ -1,5 +1,3 @@
-"""Shared primitives for both kolaBiTree and kolaBiBot."""
-
-from . import config, core, exchanges
+"""Shared namespace without eager side-effect imports."""
 
 __all__ = ["core", "exchanges", "config"]

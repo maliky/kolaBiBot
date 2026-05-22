@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Mapping, Protocol
 
 from kolabi.shared.core.runtime_types import Side
@@ -250,7 +251,7 @@ class PairCycleState:
     head_identity: OrderIdentity | None = None
     tail_identity: OrderIdentity | None = None
     played_quantity: Decimal | None = None
-    latest_commands: dict[str, tuple[str, ...]] | None = None
+    latest_commands: Mapping[str, tuple[str, ...]] | None = None
     pair_id: str | None = None
     last_processed_private_event_id: str | None = None
     last_processed_private_event_ts: datetime | None = None
@@ -264,6 +265,14 @@ class PairCycleState:
     @property
     def tail_client_order_id(self) -> str | None:
         return None if self.tail_identity is None else self.tail_identity.client_order_id
+
+    def __post_init__(self) -> None:
+        if self.latest_commands is not None and not isinstance(self.latest_commands, MappingProxyType):
+            object.__setattr__(
+                self,
+                "latest_commands",
+                MappingProxyType(dict(self.latest_commands)),
+            )
 
 
 @dataclass(frozen=True)
@@ -279,6 +288,12 @@ class EggMove:
     pair_name: str | None = None
     is_private: bool = False
 
+    def __post_init__(self) -> None:
+        if self.order is not None and not isinstance(self.order, MappingProxyType):
+            object.__setattr__(self, "order", MappingProxyType(dict(self.order)))
+        if self.reply is not None and not isinstance(self.reply, MappingProxyType):
+            object.__setattr__(self, "reply", MappingProxyType(dict(self.reply)))
+
 
 @dataclass(frozen=True)
 class PairIntent:
@@ -290,10 +305,14 @@ class StrategyState:
     """Persistent strategy memory owned by the Chronos supervisor layer."""
 
     launched_at: datetime
-    pairs: dict[str, PairCycleState]
+    pairs: Mapping[str, PairCycleState]
     strategy_id: str | None = None
     last_event_id: str | None = None
     last_event_ts: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pairs, MappingProxyType):
+            object.__setattr__(self, "pairs", MappingProxyType(dict(self.pairs)))
 
 
 @dataclass(frozen=True)

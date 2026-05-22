@@ -13,10 +13,16 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Protocol
 
 from kolabi.bot.domain import OrderPairSpec, Side
 from kolabi.shared.core.runtime_types import decimal_to_float, to_decimal
-from kolabi.shared.runtime_state import PublicMarketState
+
+
+class MarketLike(Protocol):
+    best_bid: float | None
+    best_ask: float | None
+    mid_price: float | None
 
 
 def pair_window_is_open(
@@ -30,7 +36,7 @@ def pair_window_is_open(
     return pair.window.start_minutes <= elapsed_minutes <= pair.window.end_minutes
 
 
-def resolve_head_price(pair: OrderPairSpec, market: PublicMarketState) -> float | None:
+def resolve_head_price(pair: OrderPairSpec, market: MarketLike) -> float | None:
     """Resolve the head order price from pair configuration and live market state."""
     order_type = pair.head.order_type.replace("_", "").replace("-", "").lower()
     if order_type in {"m", "market"}:
@@ -46,7 +52,7 @@ def resolve_head_price(pair: OrderPairSpec, market: PublicMarketState) -> float 
     return decimal_to_float(reference + offset)
 
 
-def reference_price(side: Side, market: PublicMarketState) -> float:
+def reference_price(side: Side, market: MarketLike) -> float:
     """Return the reference side-aware market price used for relative pricing."""
     if side == Side.BUY:
         return market.best_bid or market.mid_price or 0.0
