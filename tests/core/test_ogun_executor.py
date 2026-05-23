@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import asyncio
 import pytest
 
-from kolabi.runtime.kola.ogun_executor import OgunExecutor, RetryPolicy
+from kolabi.bot.ogun_executor import OgunExecutor, RetryPolicy
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,

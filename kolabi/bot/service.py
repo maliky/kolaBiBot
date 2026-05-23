@@ -34,7 +34,7 @@ from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.kraken_futures import kraken_futures_environment
 from kolabi.shared.logging import setup_logging
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntimeState
-from kolabi.runtime.kola.ogun_executor import OgunExecutor
+from kolabi.bot.ogun_executor import OgunExecutor
 
 
 class InstrumentRulesExchange(Protocol):

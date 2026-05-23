@@ -74,8 +74,9 @@ warn_return_any = true
 warn_unreachable = true
 exclude = [
   "^archives/",
-  "^kolabi/runtime/kola/binance_api/",
-  "^kolabi/runtime/kola/bitmex_api/",
+  "^kolabi/legacy/",
+  "^tests/legacy/",
+  "^kolabi/shared/exchanges/bitmex_api/",
   "^kolabi/bot/tsv/parser.py$",
   "^kolabi/shared/persistence/models.py$",
   "^kolabi/tree/",

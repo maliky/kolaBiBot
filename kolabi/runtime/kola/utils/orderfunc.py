@@ -8,24 +8,67 @@ Outputs: normalized `OrderDict` payloads and helper scalar transformations.
 Side effects: none beyond in-place dict normalization in documented helpers.
 Important types: `OrderDict`, `Quantity`.
 Role: pure logic plus utility boundary helpers.
-Transitional: yes, payload construction now delegates to extracted pure module.
 """
 import re
 from base64 import b64encode
+from decimal import Decimal
 from typing import Any, Optional, Sequence, cast
 from uuid import uuid4
 
-from kolabi.runtime.kola.pure_runtime import build_order_payload
 from kolabi.runtime.kola.settings import LOGNAME, ORDERID_PREFIX
+from kolabi.runtime.kola.utils.pricefunc import get_prix_decl, setdef_stopPrice
 from kolabi.runtime.kola.utils.general import contains, opt_add_to_
 from kolabi.runtime.kola.utils.logfunc import get_logger
-from kolabi.shared.core.runtime_types import OrderDict, Quantity
+from kolabi.shared.core.runtime_types import (
+    OrderDict,
+    OrderQty,
+    Price,
+    Quantity,
+    StopPrice,
+    decimal_to_float,
+    to_decimal,
+)
 
 mlogger = get_logger(name=f"{LOGNAME}.{__name__}")
 
 # import logging
 # mlogger = logging.getLogger('')
 # mlogger.setLevel('INFO')
+
+
+def build_order_payload(
+    *,
+    side: str,
+    quantity: Quantity,
+    op_type: str,
+    ord_type: str,
+    exec_inst: str,
+    prices: tuple[float, float] | None,
+    absdelta: float,
+    text: str | None,
+) -> OrderDict:
+    if prices is None and ord_type != "Market":
+        raise ValueError(f"prices are required for ord_type={ord_type}")
+    order: OrderDict = {
+        "side": side,
+        "orderQty": cast(OrderQty, to_decimal(int(quantity))),
+        "ordType": ord_type,
+        "execInst": exec_inst,
+        "text": text,
+    }
+    if ord_type == "Limit":
+        order["price"] = cast(Price, Decimal(str(get_prix_decl(cast(tuple[float, float], prices), cast(Any, side), cast(Any, ord_type)))))
+    elif ord_type in ["Stop", "MarketIfTouched"]:
+        order["stopPx"] = cast(StopPrice, Decimal(str(get_prix_decl(cast(tuple[float, float], prices), cast(Any, side), cast(Any, ord_type)))))
+    elif ord_type in ["StopLimit", "LimitIfTouched"]:
+        price = Decimal(str(get_prix_decl(cast(tuple[float, float], prices), cast(Any, side), cast(Any, ord_type))))
+        order["price"] = cast(Price, price)
+        order["stopPx"] = cast(
+            StopPrice,
+            Decimal(str(setdef_stopPrice(decimal_to_float(price), cast(Any, side), cast(Any, ord_type), absdelta))),
+        )
+    _ = op_type
+    return order
 
 
 def toggle_order(order: OrderDict) -> OrderDict:
