@@ -5,6 +5,7 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 addopts = "-p no:cacheprovider --assert=plain --strict-markers"
 python_files = ["tests.py", "test_*.py", "*_tests.py"]
+norecursedirs = ["archives", ".*", "__pycache__", "build", "dist"]
 markers = [
   "selenium: browser-facing end-to-end tests powered by Selenium",
 ]
@@ -74,8 +75,6 @@ warn_return_any = true
 warn_unreachable = true
 exclude = [
   "^archives/",
-  "^kolabi/legacy/",
-  "^tests/legacy/",
   "^kolabi/shared/exchanges/bitmex_api/",
   "^kolabi/bot/tsv/parser.py$",
   "^kolabi/shared/persistence/models.py$",
