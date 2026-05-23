@@ -220,7 +220,7 @@ Examples:
 
 - Command: =python -m kolabi.bargain.smoke=
 - Role: place a paced sweep of standard Kraken Futures order kinds
-- Use:- demo validation of the contract layer and order serializers
+- Use: demo validation of the contract layer and order serializers
 - Main options:
   - =--symbol= : default: =PI_XBTUSD=
   - =--environment {demo,live}=
@@ -229,6 +229,41 @@ Examples:
 
 #+begin_src bash
 python -m kolabi.bargain.smoke --symbol PI_XBTUSD --environment demo --sleep-seconds 2
+#+end_src
+
+* tree.kraken public db
+
+- Command: =python -m kolabi.tree.kraken=
+- Role: public Kraken Futures market-data DB service (orderbook snapshots and indicators)
+- Data persisted: market snapshots, derived indicators, service health
+
+| Subcommand | Purpose                                                    |
+|------------+------------------------------------------------------------|
+| =run=      | start continuous public websocket listener and DB writer   |
+| =probe=    | run listener for bounded seconds, then print status        |
+| =status=   | show public DB counts and stream status                    |
+
+Shared options:
+
+| Option                             | Meaning                                   |
+|------------------------------------+-------------------------------------------|
+| =--pair=                           | Futures product id, for example PI_XBTUSD |
+| =--environment {demo,live}=        | endpoint family                           |
+| =--db-url=                         | public SQLite DB location                 |
+| =--private-db-url=                 | private DB location used for correlation  |
+| =--ws-url=                         | override public websocket URL             |
+| =--trace-ws=                       | print websocket payload traces            |
+| =--trace-ws-format {compact,json}= | trace output format                       |
+| =--snapshot-interval-seconds=      | snapshot write cadence                    |
+| =--indicator-interval-seconds=     | indicator write cadence                   |
+| =--log-interval-seconds=           | service heartbeat cadence                 |
+
+Examples:
+
+#+begin_src bash
+python -m kolabi.tree.kraken run --environment demo --pair PI_XBTUSD
+python -m kolabi.tree.kraken probe --environment demo --pair PI_XBTUSD --seconds 15 --trace-ws
+python -m kolabi.tree.kraken status --environment demo --pair PI_XBTUSD
 #+end_src
 
 * tree.account private db
@@ -492,11 +527,11 @@ python -m kolabi.tree.account status --environment demo
 
 ** Start the DB in different shells
 #+BEGIN_SRC bash
-  # Start the public Kraken Futures book DB service:
+  # Shell 1: start the public Kraken Futures market DB service:
   python -m kolabi.tree.kraken run --pair PI_XBTUSD --environment demo
-  # Start the private account/order DB service:
+  # Shell 2: start the private account/order DB service:
   python -m kolabi.tree.account run --environment demo
-  # Check strategy readiness against both DBs:
+  # Shell 3: check readiness against both DBs:
   python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo  
 #+END_SRC   
 ** Send And Cancel One Demo Order
