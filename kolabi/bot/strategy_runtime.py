@@ -9,6 +9,7 @@ executor boundary.
 Important types: `Chronos`, `EggMove`, algebraic bot commands.
 Role: interpreter shell.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +20,13 @@ from itertools import count
 from typing import Protocol, cast
 
 from kolabi.bot.chronos import Chronos, ChronosNotice
-from kolabi.bot.domain import EggMove, HeadState, OrderIdentity, StrategySpec, StrategyState
+from kolabi.bot.domain import (
+    EggMove,
+    HeadState,
+    OrderIdentity,
+    StrategySpec,
+    StrategyState,
+)
 from kolabi.bot.ids import head_client_order_id
 from kolabi.bot.dragon import (
     MarketSnapshotFact,
@@ -39,10 +46,10 @@ from kolabi.shared.core.runtime_types import (
     PlaceHeadCommand,
     PlaceTailCommand,
     Price,
+    PrivateOrderRecord,
     Symbol,
     to_decimal,
 )
-from kolabi.shared.runtime_state import KrakenRuntimeStateClient
 
 
 class CommandExecutor(Protocol):
@@ -64,6 +71,36 @@ class RuntimeQueueLike(Protocol):
     async def enqueue(self, event: EggMove) -> None: ...
 
     def record_targets_head(self, record: object) -> bool: ...
+
+
+class PublicMarketStateReader(Protocol):
+    """Adapter port for public market facts; the bot core does not know the DB."""
+
+    best_bid: float | None
+    best_ask: float | None
+    mid_price: float | None
+    recorded_at: str | None
+
+
+class PublicRuntimeStateReader(Protocol):
+    """Reads strategy-facing public market state from any backing store."""
+
+    def fetch_market_state(
+        self, symbol: str | None = None
+    ) -> PublicMarketStateReader: ...
+
+
+class PrivateOrderStateReader(Protocol):
+    """Reads strategy-facing private order records from any backing store."""
+
+    def fetch_private_orders_since(
+        self,
+        *,
+        after_local_timestamp: datetime | None = None,
+        after_local_id: int | None = None,
+        symbol: str | None = None,
+        limit: int = 200,
+    ) -> tuple[PrivateOrderRecord, ...]: ...
 
 
 class StrategyRuntimeLike(RuntimeQueueLike, Protocol):
@@ -123,7 +160,7 @@ class StaticHookSource:
 class KrakenPublicTriggerSource:
     def __init__(
         self,
-        client: KrakenRuntimeStateClient,
+        client: PublicRuntimeStateReader,
         *,
         poll_seconds: float = 1.0,
     ) -> None:
@@ -164,7 +201,7 @@ class KrakenPublicTriggerSource:
 class KrakenPrivateOrderPollingSource:
     def __init__(
         self,
-        client: KrakenRuntimeStateClient,
+        client: PrivateOrderStateReader,
         *,
         poll_seconds: float = 1.0,
     ) -> None:
@@ -298,10 +335,14 @@ class StrategyRuntime:
     def record_targets_head(self, record) -> bool:
         for pair_state in self.state.pairs.values():
             tail_identity = pair_state.tail_identity
-            if tail_identity is not None and _record_matches_identity(record, tail_identity):
+            if tail_identity is not None and _record_matches_identity(
+                record, tail_identity
+            ):
                 return False
             head_identity = pair_state.head_identity
-            if head_identity is not None and _record_matches_identity(record, head_identity):
+            if head_identity is not None and _record_matches_identity(
+                record, head_identity
+            ):
                 return True
         return False
 
@@ -375,7 +416,10 @@ def _pair_state_from_spec(pair):
 def _record_matches_identity(record, identity: OrderIdentity) -> bool:
     if record.client_order_id and identity.client_order_id == record.client_order_id:
         return True
-    if record.exchange_order_id and identity.exchange_order_id == record.exchange_order_id:
+    if (
+        record.exchange_order_id
+        and identity.exchange_order_id == record.exchange_order_id
+    ):
         return True
     return False
 
@@ -388,7 +432,9 @@ def _record_timestamp(record) -> datetime | None:
     return None
 
 
-def _played_quantity_from_request(request: PlaceOrderCommandRequest | object | None) -> float:
+def _played_quantity_from_request(
+    request: PlaceOrderCommandRequest | object | None,
+) -> float:
     if isinstance(request, PlaceOrderCommandRequest) and request.orderQty is not None:
         return float(request.orderQty)
     return 0.0

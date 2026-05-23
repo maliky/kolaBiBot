@@ -17,12 +17,15 @@ import kolabi.bot.pair_cycle
 import kolabi.bot.isis
 import kolabi.bot.horus
 import kolabi.bot.dragon
+import kolabi.bot.strategy_runtime
 
 banned = sorted(
     name
     for name in sys.modules
     if name.split(".")[0] in {"sqlalchemy", "pandas", "dateparser", "requests"}
     or name.startswith("kolabi.shared.exchanges")
+    or name.startswith("kolabi.shared.runtime_state")
+    or name.startswith("kolabi.tree")
 )
 if "kolabi.bot.service" in sys.modules:
     banned.append("kolabi.bot.service")

@@ -9,14 +9,14 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlencode
 from uuid import uuid4
 
 import requests
 import websockets
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.shared.kraken_futures import kraken_futures_environment
@@ -28,6 +28,7 @@ from kolabi.shared.persistence import (
     ExchangeConnection,
     ExchangeFill,
     ExchangeOrder,
+    RawExchangeEvent,
 )
 from kolabi.tree.kraken import build_engine
 
@@ -59,6 +60,8 @@ class AccountStreamConfig:
     reconnect_seconds: int = 5
     ping_seconds: int = 50
     heartbeat_log_seconds: int = 60
+    raw_retention_minutes: int = 1440
+    raw_retention_limit: int = 100000
     log_level: str = "INFO"
 
 
@@ -84,6 +87,7 @@ class OrderWrite:
     price: float | None = None
     filled_quantity: float = 0.0
     reduce_only: bool = False
+    raw_payload: dict[str, Any] | None = None
     source_timestamp: datetime | None = None
 
 
@@ -98,6 +102,7 @@ class FillWrite:
     fee: float | None = None
     fee_currency: str | None = None
     liquidity_role: str | None = None
+    raw_payload: dict[str, Any] | None = None
     source_timestamp: datetime | None = None
 
 
@@ -109,6 +114,7 @@ class BalanceWrite:
     available: float
     locked: float
     total: float
+    raw_payload: dict[str, Any] | None = None
     source_timestamp: datetime | None = None
 
 
@@ -126,6 +132,7 @@ class PositionWrite:
     maintenance_margin: float | None = None
     maintenance_margin_buffer: float | None = None
     funding_rate: float | None = None
+    raw_payload: dict[str, Any] | None = None
     source_timestamp: datetime | None = None
 
 
@@ -143,7 +150,58 @@ class FillEvent:
     fee: float | None = None
     fee_currency: str | None = None
     liquidity_role: str | None = None
+    raw_payload: dict[str, Any] | None = None
     source_timestamp: datetime | None = None
+
+
+def upgrade_private_schema(engine: Any) -> None:
+    """Apply additive SQLite schema upgrades for existing private DBs."""
+    if getattr(engine.dialect, "name", "") != "sqlite":
+        return
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    with engine.begin() as connection:
+        if "exchange_orders" in tables:
+            ensure_columns(connection, "exchange_orders", {"raw_payload": "JSON"})
+        if "exchange_fills" in tables:
+            ensure_columns(connection, "exchange_fills", {"raw_payload": "JSON"})
+        if "account_balances" in tables:
+            ensure_columns(connection, "account_balances", {"raw_payload": "JSON"})
+        if "account_positions" in tables:
+            ensure_columns(connection, "account_positions", {"raw_payload": "JSON"})
+        if "raw_exchange_events" in tables:
+            ensure_columns(
+                connection,
+                "raw_exchange_events",
+                {
+                    "environment": "VARCHAR(32)",
+                    "market_type": "VARCHAR(32)",
+                    "account_scope": "VARCHAR(64)",
+                    "symbol": "VARCHAR(64)",
+                    "exchange_sequence": "VARCHAR(128)",
+                    "source_timestamp": "DATETIME",
+                    "received_at": "DATETIME",
+                },
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_identity "
+                    "ON raw_exchange_events "
+                    "(exchange, environment, stream_kind, event_type, correlation_id)"
+                )
+            )
+
+
+def ensure_columns(connection: Any, table_name: str, columns: dict[str, str]) -> None:
+    existing = {
+        str(row[1])
+        for row in connection.execute(text(f"PRAGMA table_info({table_name})"))
+    }
+    for column_name, column_type in columns.items():
+        if column_name not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+            )
 
 
 class AccountStateStore:
@@ -156,6 +214,7 @@ class AccountStateStore:
     def __init__(self, config: AccountStreamConfig) -> None:
         self.config = config
         self.engine = build_engine(config.db_url)
+        upgrade_private_schema(self.engine)
         Base.metadata.create_all(self.engine)
         self.sessionmaker = sessionmaker(
             bind=self.engine,
@@ -214,6 +273,7 @@ class AccountStateStore:
                 quantity=order.quantity,
                 filled_quantity=order.filled_quantity,
                 reduce_only=order.reduce_only,
+                raw_payload=order.raw_payload or {},
                 source_timestamp=order.source_timestamp,
                 local_timestamp=datetime.now(timezone.utc),
             )
@@ -243,15 +303,22 @@ class AccountStateStore:
                     quantity=order.quantity,
                     filled_quantity=order.filled_quantity,
                     reduce_only=order.reduce_only,
+                    raw_payload=order.raw_payload or {},
                     source_timestamp=order.source_timestamp,
                     local_timestamp=datetime.now(timezone.utc),
                 )
                 session.add(row)
             else:
-                row.status = order.status
-                row.filled_quantity = order.filled_quantity
+                row.status = _prefer_known(order.status, row.status)
+                row.side = _prefer_known(order.side, row.side)
+                row.order_type = _prefer_known(order.order_type, row.order_type)
+                row.symbol = _prefer_known(order.symbol, row.symbol)
+                row.client_order_id = order.client_order_id or row.client_order_id
+                row.filled_quantity = max(row.filled_quantity, order.filled_quantity)
+                row.quantity = max(row.quantity, order.quantity)
                 row.price = order.price if order.price is not None else row.price
-                row.source_timestamp = order.source_timestamp
+                row.source_timestamp = order.source_timestamp or row.source_timestamp
+                row.raw_payload = _merge_raw_payload(row.raw_payload, order.raw_payload)
                 row.local_timestamp = datetime.now(timezone.utc)
             session.commit()
             session.refresh(row)
@@ -260,6 +327,9 @@ class AccountStateStore:
     def record_fill(self, fill: FillWrite) -> ExchangeFill:
         """Persiste une execution normalisee."""
         with self.sessionmaker() as session:
+            existing = find_fill(session, self.config, fill.exchange_fill_id)
+            if existing is not None:
+                return existing
             row = ExchangeFill(
                 local_uuid=str(uuid4()),
                 order_id=fill.order_id,
@@ -270,6 +340,7 @@ class AccountStateStore:
                 fee=fill.fee,
                 fee_currency=fill.fee_currency,
                 liquidity_role=fill.liquidity_role,
+                raw_payload=fill.raw_payload or {},
                 source_timestamp=fill.source_timestamp,
                 local_timestamp=datetime.now(timezone.utc),
             )
@@ -289,6 +360,7 @@ class AccountStateStore:
                 quantity=event.quantity,
                 exchange_order_id=event.exchange_order_id,
                 filled_quantity=event.quantity,
+                raw_payload=event.raw_payload,
                 source_timestamp=event.source_timestamp,
             )
         )
@@ -301,6 +373,7 @@ class AccountStateStore:
                 fee=event.fee,
                 fee_currency=event.fee_currency,
                 liquidity_role=event.liquidity_role,
+                raw_payload=event.raw_payload,
                 source_timestamp=event.source_timestamp,
             )
         )
@@ -316,6 +389,7 @@ class AccountStateStore:
                 available=balance.available,
                 locked=balance.locked,
                 total=balance.total,
+                raw_payload=balance.raw_payload or {},
                 source_timestamp=balance.source_timestamp,
                 local_timestamp=datetime.now(timezone.utc),
             )
@@ -342,10 +416,49 @@ class AccountStateStore:
                 maintenance_margin=position.maintenance_margin,
                 maintenance_margin_buffer=position.maintenance_margin_buffer,
                 funding_rate=position.funding_rate,
+                raw_payload=position.raw_payload or {},
                 source_timestamp=position.source_timestamp,
                 local_timestamp=datetime.now(timezone.utc),
             )
             session.add(row)
+            session.commit()
+            session.refresh(row)
+            return row
+
+    def record_raw_event(
+        self, message: JsonMapT, stream_kind: str = "private_ws"
+    ) -> RawExchangeEvent:
+        """Persist the exchange-native event before any normalized mapping."""
+        event_type = str(message.get("feed") or message.get("event") or "unknown")
+        payload = dict(message)
+        source_timestamp = parse_kraken_time(
+            first_present(payload, "timestamp", "time", "last_update_time")
+        )
+        with self.sessionmaker() as session:
+            row = RawExchangeEvent(
+                exchange=self.config.exchange,
+                environment=self.config.environment,
+                market_type=self.config.market_type,
+                account_scope=self.config.account_scope,
+                symbol=raw_event_symbol(payload),
+                stream_kind=stream_kind,
+                event_type=event_type,
+                correlation_id=raw_event_correlation_id(payload),
+                exchange_sequence=optional_str(payload.get("seq")),
+                payload=payload,
+                source_timestamp=source_timestamp,
+                received_at=datetime.now(timezone.utc),
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(row)
+            prune_raw_events(
+                session,
+                config=self.config,
+                retention_minutes=self.config.raw_retention_minutes,
+                retention_limit=self.config.raw_retention_limit,
+                now=row.received_at,
+                stream_kind=stream_kind,
+            )
             session.commit()
             session.refresh(row)
             return row
@@ -486,28 +599,42 @@ class KrakenFuturesPrivateStream:
     def handle_message(self, message: JsonMapT) -> None:
         """Mappe un message Kraken Futures prive en lignes normalisees."""
         feed = str(message.get("feed", ""))
-        if message.get("event") in {"subscribed", "heartbeat"}:
+        event = message.get("event")
+        if event == "heartbeat":
             self.store.record_connection_status("private_ws", "healthy")
             return
-        if message.get("event") == "error":
+        if event == "subscribed":
+            self.store.record_raw_event(message)
+            self.store.record_connection_status("private_ws", "healthy")
+            return
+        if event == "error":
+            self.store.record_raw_event(message)
             self.store.record_connection_status(
                 "private_ws", "error", last_error=str(message.get("message", "error"))
             )
             return
-        if feed.startswith("open_orders"):
-            for order in iter_order_payloads(message):
-                self.store.ensure_order(map_order(order))
-        elif feed == "fills":
-            for fill in iter_fill_payloads(message):
-                self.store.record_fill_event(map_fill_event(fill))
-        elif feed == "balances":
-            for balance in map_balances(message):
-                self.store.record_balance(balance)
-        elif feed == "open_positions":
-            for position in map_positions(message):
-                self.store.record_position(position)
-        elif feed in {"account_log", "notifications_auth"}:
-            self.store.record_connection_status("private_ws", "healthy")
+        self.store.record_raw_event(message)
+        try:
+            if feed.startswith("open_orders"):
+                for order in iter_order_payloads(message):
+                    self.store.ensure_order(map_order(order))
+            elif feed.startswith("fills"):
+                for fill in iter_fill_payloads(message):
+                    self.store.record_fill_event(map_fill_event(fill))
+            elif feed.startswith("balances"):
+                for balance in map_balances(message):
+                    self.store.record_balance(balance)
+            elif feed.startswith("open_positions"):
+                for position in map_positions(message):
+                    self.store.record_position(position)
+            elif feed.startswith(("account_log", "notifications_auth")):
+                pass
+        except Exception as exc:
+            self.store.record_connection_status(
+                "private_ws", "error", last_error=f"{feed}: {exc}"
+            )
+            raise
+        self.store.record_connection_status("private_ws", "healthy")
 
 
 class KrakenFuturesRestReconciler:
@@ -658,25 +785,34 @@ def iter_fill_payloads(message: JsonMapT) -> list[JsonMapT]:
 
 def map_order(payload: JsonMapT) -> OrderWrite:
     """Mappe un ordre Kraken Futures vers OrderWrite."""
-    quantity = as_float(payload.get("qty") or payload.get("quantity"))
-    filled = as_float(payload.get("filled") or payload.get("filled_quantity"))
+    quantity = first_float(payload, "qty", "quantity", "size", "unfilledSize") or 0.0
+    filled = first_float(payload, "filled", "filled_quantity", "filledSize") or 0.0
     return OrderWrite(
         symbol=str(payload.get("instrument") or payload.get("symbol") or "unknown"),
-        side=map_side(first_present(payload, "direction", "side")),
-        order_type=str(payload.get("type") or payload.get("orderType") or "unknown"),
+        side=map_side(first_present(payload, "direction", "side", "buy")),
+        order_type=str(
+            payload.get("type")
+            or payload.get("orderType")
+            or payload.get("order_type")
+            or payload.get("taker_order_type")
+            or "unknown"
+        ),
         status=map_order_status(payload),
         quantity=quantity,
         exchange_order_id=optional_str(payload.get("order_id") or payload.get("orderId")),
         client_order_id=optional_str(
             payload.get("cli_ord_id") or payload.get("cliOrdId")
         ),
-        price=first_float(payload, "limit_price", "price", "stop_price"),
+        price=first_float(payload, "limit_price", "limitPrice", "price", "stop_price"),
         filled_quantity=filled,
         reduce_only=bool(
             payload.get("reduce_only") or payload.get("reduceOnly") or False
         ),
+        raw_payload=dict(payload),
         source_timestamp=parse_kraken_time(
-            payload.get("last_update_time") or payload.get("time")
+            payload.get("last_update_time")
+            or payload.get("lastUpdateTime")
+            or payload.get("time")
         ),
     )
 
@@ -686,8 +822,14 @@ def map_fill_event(payload: JsonMapT) -> FillEvent:
     return FillEvent(
         exchange_order_id=optional_str(payload.get("order_id") or payload.get("orderId")),
         symbol=str(payload.get("instrument") or payload.get("symbol") or "unknown"),
-        side=map_side(first_present(payload, "direction", "side")),
-        order_type=str(payload.get("type") or payload.get("orderType") or "unknown"),
+        side=map_side(first_present(payload, "direction", "side", "buy")),
+        order_type=str(
+            payload.get("type")
+            or payload.get("orderType")
+            or payload.get("order_type")
+            or payload.get("taker_order_type")
+            or "unknown"
+        ),
         price=as_float(payload.get("price")),
         quantity=as_float(payload.get("qty") or payload.get("quantity")),
         exchange_fill_id=optional_str(payload.get("fill_id") or payload.get("fillId")),
@@ -696,8 +838,11 @@ def map_fill_event(payload: JsonMapT) -> FillEvent:
             payload.get("fee_currency") or payload.get("feeCurrency")
         ),
         liquidity_role=optional_str(
-            payload.get("liquidity") or payload.get("liquidity_role")
+            payload.get("liquidity")
+            or payload.get("liquidity_role")
+            or payload.get("fill_type")
         ),
+        raw_payload=dict(payload),
         source_timestamp=parse_kraken_time(
             payload.get("time") or payload.get("timestamp")
         ),
@@ -719,6 +864,7 @@ def map_balances(message: JsonMapT) -> list[BalanceWrite]:
                         available=total,
                         locked=0.0,
                         total=total,
+                        raw_payload=dict(message),
                         source_timestamp=source_time,
                     )
                 )
@@ -745,7 +891,15 @@ def map_rest_balances(payload: JsonMapT) -> list[BalanceWrite]:
             rows.extend(map_rest_balance_entry(asset, value))
             continue
         total = as_float(value)
-        rows.append(BalanceWrite(asset=str(asset), available=total, locked=0.0, total=total))
+        rows.append(
+            BalanceWrite(
+                asset=str(asset),
+                available=total,
+                locked=0.0,
+                total=total,
+                raw_payload=dict(payload),
+            )
+        )
     return rows
 
 
@@ -769,6 +923,7 @@ def map_rest_balance_entry(asset_key: object, payload: JsonMapT) -> list[Balance
                     available=total,
                     locked=0.0,
                     total=total,
+                    raw_payload=dict(payload),
                     source_timestamp=source_time,
                 )
             )
@@ -812,6 +967,7 @@ def map_rest_balance_entry(asset_key: object, payload: JsonMapT) -> list[Balance
                 available=safe_available,
                 locked=max(safe_total - safe_available, 0.0),
                 total=safe_total,
+                raw_payload=dict(payload),
                 source_timestamp=source_time,
             )
         )
@@ -845,8 +1001,9 @@ def map_position(payload: JsonMapT) -> PositionWrite:
             payload, "maintenance_margin_buffer", "maintenanceMarginBuffer"
         ),
         funding_rate=first_float(payload, "funding_rate", "fundingRate"),
+        raw_payload=dict(payload),
         source_timestamp=parse_kraken_time(
-            payload.get("time") or payload.get("timestamp")
+            payload.get("time") or payload.get("timestamp") or payload.get("fill_time")
         ),
     )
 
@@ -889,6 +1046,63 @@ def find_order(
     return session.execute(stmt).scalars().first()
 
 
+def find_fill(
+    session: Session,
+    config: AccountStreamConfig,
+    exchange_fill_id: str | None,
+) -> ExchangeFill | None:
+    """Cherche une execution par id exchange pour rendre le flux idempotent."""
+    if not exchange_fill_id:
+        return None
+    stmt = (
+        select(ExchangeFill)
+        .where(
+            ExchangeFill.exchange == config.exchange,
+            ExchangeFill.exchange_fill_id == exchange_fill_id,
+        )
+        .order_by(ExchangeFill.local_timestamp.desc(), ExchangeFill.id.desc())
+    )
+    return session.execute(stmt).scalars().first()
+
+
+def prune_raw_events(
+    session: Session,
+    *,
+    config: AccountStreamConfig,
+    retention_minutes: int,
+    retention_limit: int,
+    now: datetime,
+    stream_kind: str = "private_ws",
+) -> None:
+    """Apply bounded raw private-event retention for one stream identity."""
+    base_filters = (
+        RawExchangeEvent.exchange == config.exchange,
+        RawExchangeEvent.environment == config.environment,
+        RawExchangeEvent.stream_kind == stream_kind,
+    )
+    if retention_minutes > 0:
+        cutoff = now - timedelta(minutes=retention_minutes)
+        session.execute(
+            delete(RawExchangeEvent).where(
+                *base_filters,
+                RawExchangeEvent.received_at < cutoff,
+            )
+        )
+    if retention_limit > 0:
+        keep_ids = (
+            select(RawExchangeEvent.id)
+            .where(*base_filters)
+            .order_by(RawExchangeEvent.received_at.desc(), RawExchangeEvent.id.desc())
+            .limit(retention_limit)
+        )
+        session.execute(
+            delete(RawExchangeEvent).where(
+                *base_filters,
+                RawExchangeEvent.id.notin_(keep_ids),
+            )
+        )
+
+
 def count_private_rows(session: Session) -> dict[str, int]:
     """Compte les tables privees principales pour la CLI."""
     return {
@@ -906,7 +1120,23 @@ def count_private_rows(session: Session) -> dict[str, int]:
                 select(func.count()).select_from(AccountPosition)
             ).scalar_one()
         ),
+        "raw_event_count": int(
+            session.execute(
+                select(func.count()).select_from(RawExchangeEvent)
+            ).scalar_one()
+        ),
+        "latest_raw_event_at": latest_iso(session, RawExchangeEvent.received_at),
+        "latest_order_at": latest_iso(session, ExchangeOrder.local_timestamp),
+        "latest_fill_at": latest_iso(session, ExchangeFill.local_timestamp),
+        "latest_position_at": latest_iso(session, AccountPosition.local_timestamp),
     }
+
+
+def latest_iso(session: Session, column: Any) -> str | None:
+    value = session.execute(select(func.max(column))).scalar_one()
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
 def connection_to_status(connection: ExchangeConnection) -> dict[str, object]:
@@ -915,9 +1145,11 @@ def connection_to_status(connection: ExchangeConnection) -> dict[str, object]:
         "exchange": connection.exchange,
         "environment": connection.environment,
         "last_error": connection.last_error,
-        "last_heartbeat_at": connection.last_heartbeat_at.isoformat()
-        if connection.last_heartbeat_at
-        else None,
+        "last_heartbeat_at": (
+            connection.last_heartbeat_at.isoformat()
+            if connection.last_heartbeat_at
+            else None
+        ),
         "market_type": connection.market_type,
         "status": connection.status,
         "stream_kind": connection.stream_kind,
@@ -952,6 +1184,8 @@ def parse_kraken_time(value: object) -> datetime | None:
 
 def map_side(value: object) -> str:
     """Mappe direction Kraken 0/1 ou texte vers buy/sell."""
+    if isinstance(value, bool):
+        return "buy" if value else "sell"
     if value in (0, "0", "buy", "BUY"):
         return "buy"
     if value in (1, "1", "sell", "SELL"):
@@ -1008,27 +1242,132 @@ def optional_str(value: object) -> str | None:
     return str(value)
 
 
+def _prefer_known(new_value: str, old_value: str) -> str:
+    """Prefer a concrete normalized value over placeholders."""
+    if new_value and new_value != "unknown":
+        return new_value
+    return old_value
+
+
+def _merge_raw_payload(
+    old_payload: dict[str, Any] | None,
+    new_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if new_payload:
+        return new_payload
+    return old_payload or {}
+
+
+def raw_event_symbol(payload: JsonMapT) -> str | None:
+    direct = optional_str(payload.get("instrument") or payload.get("symbol"))
+    if direct:
+        return direct
+    for key in ("orders", "fills", "positions"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, Mapping):
+                    nested = optional_str(item.get("instrument") or item.get("symbol"))
+                    if nested:
+                        return nested
+    return None
+
+
+def raw_event_correlation_id(payload: JsonMapT) -> str | None:
+    direct = optional_str(
+        payload.get("order_id")
+        or payload.get("orderId")
+        or payload.get("fill_id")
+        or payload.get("fillId")
+        or payload.get("cli_ord_id")
+        or payload.get("cliOrdId")
+    )
+    if direct:
+        return direct
+    for key in ("orders", "fills"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, Mapping):
+                    nested = raw_event_correlation_id(item)
+                    if nested:
+                        return nested
+    return optional_str(payload.get("seq"))
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construit la CLI de memoire privee."""
-    parser = argparse.ArgumentParser(prog="python -m kolabi.tree.account")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="python -m kolabi.tree.account",
+        description="Private account/order state service CLI.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="<command>",
+    )
+    command_help = {
+        "status": "Show private DB counts and stream health.",
+        "run": "Run private websocket listener and persist account/order events.",
+        "reconcile": "Fetch one private REST snapshot and persist normalized rows.",
+    }
     for command in ("status", "run", "reconcile"):
-        cmd = subparsers.add_parser(command)
-        cmd.add_argument("--db-url")
-        cmd.add_argument("--exchange", default=AccountStreamConfig.exchange)
+        cmd = subparsers.add_parser(
+            command,
+            help=command_help[command],
+            description=command_help[command],
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        )
+        cmd.add_argument("--db-url", help="Private SQLite database URL.")
+        cmd.add_argument(
+            "--exchange",
+            default=AccountStreamConfig.exchange,
+            help="Exchange label stored with rows.",
+        )
         cmd.add_argument(
             "--environment",
             choices=("demo", "live"),
             default=AccountStreamConfig.environment,
+            help="Endpoint family.",
         )
-        cmd.add_argument("--market-type", default=AccountStreamConfig.market_type)
-        cmd.add_argument("--account-scope", default=AccountStreamConfig.account_scope)
-        cmd.add_argument("--ws-url")
-        cmd.add_argument("--rest-url")
-        cmd.add_argument("--api-key-env")
-        cmd.add_argument("--api-secret-env")
-        cmd.add_argument("--stream-kind", default="private_ws")
-        cmd.add_argument("--log-level", default=AccountStreamConfig.log_level)
+        cmd.add_argument(
+            "--market-type",
+            default=AccountStreamConfig.market_type,
+            help="Market type label stored with rows.",
+        )
+        cmd.add_argument(
+            "--account-scope",
+            default=AccountStreamConfig.account_scope,
+            help="Logical account scope label.",
+        )
+        cmd.add_argument("--ws-url", help="Override private websocket URL.")
+        cmd.add_argument("--rest-url", help="Override private REST base URL.")
+        cmd.add_argument("--api-key-env", help="Environment variable name for API key.")
+        cmd.add_argument(
+            "--api-secret-env", help="Environment variable name for API secret."
+        )
+        cmd.add_argument(
+            "--stream-kind", default="private_ws", help="Stream kind for status queries."
+        )
+        cmd.add_argument(
+            "--log-level",
+            default=AccountStreamConfig.log_level,
+            help="Logging verbosity.",
+        )
+        cmd.add_argument(
+            "--raw-retention-minutes",
+            type=int,
+            default=AccountStreamConfig.raw_retention_minutes,
+            help="Raw private-event retention window in minutes; 0 disables time cleanup.",
+        )
+        cmd.add_argument(
+            "--raw-retention-limit",
+            type=int,
+            default=AccountStreamConfig.raw_retention_limit,
+            help="Maximum raw private events kept per stream identity; 0 disables count cleanup.",
+        )
     return parser
 
 
@@ -1045,6 +1384,8 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
         rest_url=args.rest_url or env_cfg.rest_url,
         api_key_env=args.api_key_env or env_cfg.api_key_env,
         api_secret_env=args.api_secret_env or env_cfg.api_secret_env,
+        raw_retention_minutes=args.raw_retention_minutes,
+        raw_retention_limit=args.raw_retention_limit,
         log_level=args.log_level,
     )
 
@@ -1063,7 +1404,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         stats = KrakenFuturesRestReconciler(config, store, credentials).reconcile_once()
         print(json.dumps(stats, sort_keys=True))
         return 0
-    asyncio.run(KrakenFuturesPrivateStream(config, store, credentials).run())
+    stream = KrakenFuturesPrivateStream(config, store, credentials)
+    try:
+        asyncio.run(stream.run())
+    except KeyboardInterrupt:
+        stream.stop()
+        store.record_connection_status(
+            "private_ws",
+            "stopped",
+            last_error="stopped by operator",
+        )
+        print("private account stream stopped by operator")
+        return 0
     return 0
 
 

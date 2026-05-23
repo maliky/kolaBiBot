@@ -171,9 +171,7 @@ class MarketIndicator(Base):
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
     indicator_name: Mapped[str] = mapped_column(String(64), nullable=False)
     value: Mapped[float] = mapped_column(Float, nullable=False)
-    source_age_seconds: Mapped[float] = mapped_column(
-        Float, nullable=False, default=0.0
-    )
+    source_age_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -241,6 +239,7 @@ class ExchangeOrder(Base):
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
     filled_quantity: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     reduce_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    raw_payload: Mapped[dict] = mapped_column(JSON, default=dict)
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     local_timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -274,6 +273,7 @@ class ExchangeFill(Base):
     fee: Mapped[float | None] = mapped_column(Float)
     fee_currency: Mapped[str | None] = mapped_column(String(16))
     liquidity_role: Mapped[str | None] = mapped_column(String(16))
+    raw_payload: Mapped[dict] = mapped_column(JSON, default=dict)
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     local_timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -301,6 +301,7 @@ class AccountBalance(Base):
     available: Mapped[float] = mapped_column(Float, nullable=False)
     locked: Mapped[float] = mapped_column(Float, nullable=False)
     total: Mapped[float] = mapped_column(Float, nullable=False)
+    raw_payload: Mapped[dict] = mapped_column(JSON, default=dict)
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     local_timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -336,6 +337,7 @@ class AccountPosition(Base):
     maintenance_margin: Mapped[float | None] = mapped_column(Float)
     maintenance_margin_buffer: Mapped[float | None] = mapped_column(Float)
     funding_rate: Mapped[float | None] = mapped_column(Float)
+    raw_payload: Mapped[dict] = mapped_column(JSON, default=dict)
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     local_timestamp: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -343,21 +345,42 @@ class AccountPosition(Base):
 
 
 class RawExchangeEvent(Base):
-    """Payload brut optionnel, desactive par defaut cote services."""
+    """Payload brut prive/public conserve pour audit et remapping."""
 
     __tablename__ = "raw_exchange_events"
     __table_args__ = (
         Index(
-            "ix_raw_exchange_events_retention", "exchange", "stream_kind", "created_at"
+            "ix_raw_exchange_events_retention",
+            "exchange",
+            "environment",
+            "stream_kind",
+            "created_at",
+        ),
+        Index(
+            "ix_raw_exchange_events_identity",
+            "exchange",
+            "environment",
+            "stream_kind",
+            "event_type",
+            "correlation_id",
         ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    environment: Mapped[str | None] = mapped_column(String(32))
+    market_type: Mapped[str | None] = mapped_column(String(32))
+    account_scope: Mapped[str | None] = mapped_column(String(64))
+    symbol: Mapped[str | None] = mapped_column(String(64))
     stream_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     correlation_id: Mapped[str | None] = mapped_column(String(128))
+    exchange_sequence: Mapped[str | None] = mapped_column(String(128))
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

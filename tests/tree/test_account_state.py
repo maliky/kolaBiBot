@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+from kolabi.tree import account as account_module
 from kolabi.shared.persistence import (
     AccountBalance,
     AccountPosition,
     ExchangeFill,
     ExchangeOrder,
+    RawExchangeEvent,
 )
 from kolabi.tree.account import (
     AccountStateStore,
@@ -18,9 +20,11 @@ from kolabi.tree.account import (
     map_order,
     map_positions,
     map_rest_balances,
+    prune_raw_events,
     sign_challenge,
     sign_rest_auth,
     subscribe_messages,
+    upgrade_private_schema,
 )
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -203,6 +207,208 @@ def test_map_fill_event_and_record_with_placeholder_order(tmp_path):
         assert len(fills) == 1
         assert fill.order_id == orders[0].id
         assert orders[0].exchange_order_id == "OID-2"
+
+
+def test_kraken_fill_payload_maps_side_type_and_raw_payload(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    payload = {
+        "buy": True,
+        "fee_currency": "BTC",
+        "fee_paid": 6.55e-09,
+        "fill_id": "FID-3",
+        "fill_type": "taker",
+        "instrument": "PI_XBTUSD",
+        "order_id": "OID-3",
+        "order_type": "market",
+        "price": 76448.0,
+        "qty": 1.0,
+        "time": 1779577521578,
+    }
+
+    event = map_fill_event(payload)
+    fill = store.record_fill_event(event)
+
+    assert event.side == "buy"
+    assert event.order_type == "market"
+    assert event.fee == 6.55e-09
+    assert event.liquidity_role == "taker"
+    with Session(store.engine) as session:
+        order = session.execute(select(ExchangeOrder)).scalars().one()
+        stored_fill = session.execute(select(ExchangeFill)).scalars().one()
+        assert order.exchange_order_id == "OID-3"
+        assert order.side == "buy"
+        assert order.order_type == "market"
+        assert order.raw_payload["fill_id"] == "FID-3"
+        assert stored_fill.id == fill.id
+        assert stored_fill.raw_payload["order_id"] == "OID-3"
+
+
+def test_duplicate_fill_id_is_idempotent(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    event = map_fill_event(
+        {
+            "buy": False,
+            "fill_id": "FID-4",
+            "instrument": "PI_XBTUSD",
+            "order_id": "OID-4",
+            "order_type": "market",
+            "price": 76447.0,
+            "qty": 1.0,
+        }
+    )
+
+    first = store.record_fill_event(event)
+    second = store.record_fill_event(event)
+
+    assert second.id == first.id
+    with Session(store.engine) as session:
+        assert len(session.execute(select(ExchangeFill)).scalars().all()) == 1
+
+
+def test_handle_message_persists_raw_event_and_fill_snapshot(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "fills_snapshot",
+        "fills": [
+            {
+                "buy": True,
+                "fill_id": "FID-5",
+                "instrument": "PI_XBTUSD",
+                "order_id": "OID-5",
+                "order_type": "market",
+                "price": 76448.0,
+                "qty": 1.0,
+                "seq": 33,
+                "time": 1779577521578,
+            }
+        ],
+    }
+
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    stream.handle_message(message)
+
+    with Session(store.engine) as session:
+        raw = session.execute(select(RawExchangeEvent)).scalars().one()
+        order = session.execute(select(ExchangeOrder)).scalars().one()
+        fill = session.execute(select(ExchangeFill)).scalars().one()
+        assert raw.event_type == "fills_snapshot"
+        assert raw.symbol == "PI_XBTUSD"
+        assert raw.correlation_id == "OID-5"
+        assert order.exchange_order_id == "OID-5"
+        assert fill.exchange_fill_id == "FID-5"
+
+
+def test_raw_event_retention_limit_keeps_latest_events(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            raw_retention_minutes=0,
+            raw_retention_limit=2,
+        )
+    )
+
+    for seq in range(3):
+        store.record_raw_event({"feed": "fills", "seq": seq, "fills": []})
+
+    with Session(store.engine) as session:
+        rows = (
+            session.execute(
+                select(RawExchangeEvent).order_by(
+                    RawExchangeEvent.received_at.asc(),
+                    RawExchangeEvent.id.asc(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert [row.exchange_sequence for row in rows] == ["1", "2"]
+
+
+def test_raw_event_time_retention_deletes_old_events(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            raw_retention_minutes=0,
+            raw_retention_limit=0,
+        )
+    )
+    old = store.record_raw_event({"feed": "fills", "seq": "old", "fills": []})
+    new = store.record_raw_event({"feed": "fills", "seq": "new", "fills": []})
+
+    now = datetime.now(timezone.utc)
+    with Session(store.engine) as session:
+        old_row = session.get(RawExchangeEvent, old.id)
+        new_row = session.get(RawExchangeEvent, new.id)
+        assert old_row is not None
+        assert new_row is not None
+        old_row.received_at = now - timedelta(minutes=10)
+        new_row.received_at = now
+        prune_raw_events(
+            session,
+            config=store.config,
+            retention_minutes=5,
+            retention_limit=0,
+            now=now,
+        )
+        session.commit()
+        rows = session.execute(select(RawExchangeEvent)).scalars().all()
+        assert [row.exchange_sequence for row in rows] == ["new"]
+
+
+def test_schema_upgrade_skips_non_sqlite_engines(monkeypatch):
+    class Dialect:
+        name = "postgresql"
+
+    class Engine:
+        dialect = Dialect()
+
+    def fail_inspect(_engine):
+        raise AssertionError("inspect should not run for non-sqlite engines")
+
+    monkeypatch.setattr(account_module, "inspect", fail_inspect)
+
+    upgrade_private_schema(Engine())
+
+
+def test_main_handles_ctrl_c_as_clean_stop(tmp_path, monkeypatch, capsys):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_KEY", "key")
+    monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_SECRET", "secret")
+
+    class InterruptingStream:
+        def __init__(self, *args, **kwargs):
+            self.stopped = False
+
+        async def run(self):
+            raise KeyboardInterrupt
+
+        def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr(
+        account_module,
+        "KrakenFuturesPrivateStream",
+        InterruptingStream,
+    )
+
+    result = account_module.main(["run", "--db-url", db_url])
+
+    assert result == 0
+    assert "stopped by operator" in capsys.readouterr().out
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    status = store.latest_status("private_ws")
+    assert status["status"] == "stopped"
 
 
 def test_map_balances_and_positions_are_persisted(tmp_path):
