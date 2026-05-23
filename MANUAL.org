@@ -231,7 +231,7 @@ Examples:
 python -m kolabi.bargain.smoke --symbol PI_XBTUSD --environment demo --sleep-seconds 2
 #+end_src
 
-* tree.account
+* tree.account private db
 
 - Command: =python -m kolabi.tree.account=
 - Role: private Kraken Futures account/order state service

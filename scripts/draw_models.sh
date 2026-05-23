@@ -13,6 +13,7 @@ Default output directory:
 Generated files:
   - classes_kolabi.plantuml
   - packages_kolabi.plantuml
+  - botmap.org (PlantUML Babel blocks exporting to Map/)
   - imports_kolabi.svg
   - optional PDF exports from PlantUML sources (via SVG conversion)
 
@@ -24,6 +25,7 @@ Options:
   --summary            Use class-name-only mode (much smaller class diagrams).
   --split              Generate per-subpackage class diagrams.
   --no-imports         Skip pydeps import graph generation.
+  --org-only           Generate/update botmap.org from PlantUML files and skip render steps.
   --poster SCALE       Run pdfposter on generated PDFs with linear SCALE.
                        Example: --poster 2.0 (prints across multiple sheets).
   -h, --help           Show this help.
@@ -34,6 +36,7 @@ want_pdf=0
 summary_mode=0
 split_mode=0
 skip_imports=0
+org_only=0
 poster_scale=""
 outdir="./Docs"
 exclude_file="./scripts/modules_to_exclude.txt"
@@ -60,6 +63,10 @@ while [[ $# -gt 0 ]]; do
       skip_imports=1
       shift
       ;;
+    --org-only)
+      org_only=1
+      shift
+      ;;
     --poster)
       shift
       if [[ $# -eq 0 ]]; then
@@ -77,6 +84,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$outdir"
+mkdir -p "$outdir/Map"
 
 if ! command -v pyreverse >/dev/null 2>&1; then
   echo "Missing pyreverse. Install with: pip install pylint" >&2
@@ -92,7 +100,7 @@ annotate_plantuml_roles() {
   local target_file="$1"
   local diagram_kind="$2"
 
-  if [[ ! -f "$target_file" ]]; then
+if [[ ! -f "$target_file" ]]; then
     return
   fi
 
@@ -182,6 +190,37 @@ path.write_text(text, encoding="utf-8")
 PY
 }
 
+write_org_map() {
+  local org_file="$outdir/botmap.org"
+  shift
+  local puml_files=("$@")
+  local rel_map_dir="Map"
+  if [[ "$outdir" != "." && "$outdir" != "./" ]]; then
+    rel_map_dir="$outdir/Map"
+  fi
+
+  {
+    echo "#+TITLE: kolabi bot map"
+    echo "#+PROPERTY: header-args:plantuml :results file link :exports both"
+    echo
+    echo "* Overview"
+    echo "Generated PlantUML source blocks exporting images to =${rel_map_dir}/=."
+    echo
+    for puml in "${puml_files[@]}"; do
+      local base stem out_file section
+      base="$(basename "$puml")"
+      stem="${base%.plantuml}"
+      out_file="${rel_map_dir}/${stem}.svg"
+      section="${stem//_/ }"
+      echo "* ${section}"
+      echo "#+BEGIN_SRC plantuml :file ${out_file}"
+      cat "$puml"
+      echo "#+END_SRC"
+      echo
+    done
+  } >"$org_file"
+}
+
 ignore_args=()
 if [[ -f "$exclude_file" ]]; then
   ignore_list="$(paste -sd, "$exclude_file")"
@@ -235,6 +274,24 @@ if [[ "$split_mode" -eq 1 ]]; then
     annotate_plantuml_roles "$outdir/classes_kolabi_${sub}.plantuml" "classes"
     annotate_plantuml_roles "$outdir/packages_kolabi_${sub}.plantuml" "packages"
   done
+fi
+
+org_sources=(
+  "$outdir/classes_kolabi.plantuml"
+  "$outdir/packages_kolabi.plantuml"
+)
+if [[ "$split_mode" -eq 1 ]]; then
+  while IFS= read -r file; do
+    org_sources+=("$file")
+  done < <(
+    find "$outdir" -maxdepth 1 -type f \( -name 'classes_kolabi_*.plantuml' -o -name 'packages_kolabi_*.plantuml' \) | sort
+  )
+fi
+write_org_map "${org_sources[@]}"
+
+if [[ "$org_only" -eq 1 ]]; then
+  echo "Generated Org map only: $outdir/botmap.org"
+  exit 0
 fi
 
 if [[ "$skip_imports" -eq 0 ]]; then
