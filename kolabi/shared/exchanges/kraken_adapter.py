@@ -92,9 +92,7 @@ class KrakenFuturesAdapter(ExchangeABC):
     def _clean_params(params: Sequence[tuple[str, Any]]) -> list[tuple[str, Any]]:
         """Garde l'ordre des champs tout en supprimant les valeurs vides."""
         return [
-            (key, value)
-            for key, value in params
-            if value is not None and value != ""
+            (key, value) for key, value in params if value is not None and value != ""
         ]
 
     def _request(
@@ -107,7 +105,9 @@ class KrakenFuturesAdapter(ExchangeABC):
         retry_attempts: int = 3,
     ) -> Dict[str, Any]:
         url = f"{self.rest_url}{path}"
-        raw_params = list(params.items()) if isinstance(params, dict) else list(params or [])
+        raw_params = (
+            list(params.items()) if isinstance(params, dict) else list(params or [])
+        )
         payload = self._clean_params(raw_params)
         last_error: RuntimeError | None = None
         for attempt in range(1, retry_attempts + 1):
@@ -173,7 +173,9 @@ class KrakenFuturesAdapter(ExchangeABC):
             ticker.get("indexPrice", ticker.get("index_price", mark)) or mark
         )
         last = float(ticker.get("last", ticker.get("lastPrice", mark)) or mark)
-        return _Ticker(bid=bid, ask=ask, mark_price=mark, index_price=index_price, last=last)
+        return _Ticker(
+            bid=bid, ask=ask, mark_price=mark, index_price=index_price, last=last
+        )
 
     def list_instruments(self) -> list[Dict[str, Any]]:
         """Retourne les instruments Futures exposes par Kraken."""
@@ -190,17 +192,23 @@ class KrakenFuturesAdapter(ExchangeABC):
         now = datetime.now(timezone.utc)
         with self._public_sessionmaker() as session:
             for instrument in instruments:
-                symbol = str(instrument.get("symbol") or instrument.get("product_id") or "")
+                symbol = str(
+                    instrument.get("symbol") or instrument.get("product_id") or ""
+                )
                 if not symbol:
                     continue
-                row = session.execute(
-                    select(ExchangeInstrument).where(
-                        ExchangeInstrument.exchange == "kraken",
-                        ExchangeInstrument.environment == self.environment,
-                        ExchangeInstrument.market_type == "futures",
-                        ExchangeInstrument.symbol == symbol,
+                row = (
+                    session.execute(
+                        select(ExchangeInstrument).where(
+                            ExchangeInstrument.exchange == "kraken",
+                            ExchangeInstrument.environment == self.environment,
+                            ExchangeInstrument.market_type == "futures",
+                            ExchangeInstrument.symbol == symbol,
+                        )
                     )
-                ).scalars().first()
+                    .scalars()
+                    .first()
+                )
                 payload = dict(instrument)
                 min_quantity = _extract_min_quantity_from_instrument(payload)
                 tick_size = _optional_float(payload.get("tickSize"))
@@ -211,7 +219,9 @@ class KrakenFuturesAdapter(ExchangeABC):
                         environment=self.environment,
                         market_type="futures",
                         symbol=symbol,
-                        instrument_type=str(payload.get("type") or payload.get("tag") or ""),
+                        instrument_type=str(
+                            payload.get("type") or payload.get("tag") or ""
+                        ),
                         tradeable=bool(payload.get("tradeable", True)),
                         tick_size=tick_size,
                         contract_size=contract_size,
@@ -221,7 +231,9 @@ class KrakenFuturesAdapter(ExchangeABC):
                     )
                     session.add(row)
                 else:
-                    row.instrument_type = str(payload.get("type") or payload.get("tag") or "")
+                    row.instrument_type = str(
+                        payload.get("type") or payload.get("tag") or ""
+                    )
                     row.tradeable = bool(payload.get("tradeable", True))
                     row.tick_size = tick_size
                     row.contract_size = contract_size
@@ -234,14 +246,18 @@ class KrakenFuturesAdapter(ExchangeABC):
         """Return cached local instrument rules, syncing from Kraken if needed."""
         target_symbol = symbol or self.symbol
         with self._public_sessionmaker() as session:
-            row = session.execute(
-                select(ExchangeInstrument).where(
-                    ExchangeInstrument.exchange == "kraken",
-                    ExchangeInstrument.environment == self.environment,
-                    ExchangeInstrument.market_type == "futures",
-                    ExchangeInstrument.symbol == target_symbol,
+            row = (
+                session.execute(
+                    select(ExchangeInstrument).where(
+                        ExchangeInstrument.exchange == "kraken",
+                        ExchangeInstrument.environment == self.environment,
+                        ExchangeInstrument.market_type == "futures",
+                        ExchangeInstrument.symbol == target_symbol,
+                    )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             if row is not None:
                 return {
                     "symbol": row.symbol,
@@ -273,7 +289,10 @@ class KrakenFuturesAdapter(ExchangeABC):
         target_symbol = symbol or self.symbol
         candidates = self.list_instruments()
         for instrument in candidates:
-            if str(instrument.get("symbol") or instrument.get("product_id") or "") == target_symbol:
+            if (
+                str(instrument.get("symbol") or instrument.get("product_id") or "")
+                == target_symbol
+            ):
                 return instrument
         hint = ""
         if target_symbol.startswith("PF_"):
@@ -287,12 +306,39 @@ class KrakenFuturesAdapter(ExchangeABC):
         return ticker.bid * 0.99
 
     @staticmethod
-    def _legacy_ack_from_order(order: Dict[str, Any], *, exec_type: str = "New") -> Dict[str, Any]:
-        quantity = float(order.get("qty", order.get("size", order.get("quantity", 0.0))) or 0.0)
-        filled = float(order.get("filled", order.get("filled_quantity", 0.0)) or 0.0)
-        price = order.get("limit_price", order.get("price", order.get("stop_price")))
-        side = "buy" if str(order.get("direction", order.get("side", "buy"))) in {"0", "buy"} else "sell"
+    def _legacy_ack_from_order(
+        order: Dict[str, Any], *, exec_type: str = "New"
+    ) -> Dict[str, Any]:
+        quantity = float(
+            order.get(
+                "qty",
+                order.get("size", order.get("quantity", order.get("orderQty", 0.0))),
+            )
+            or 0.0
+        )
+        event_filled, event_price = _execution_summary_from_order_events(order)
+        filled = float(
+            order.get("filled", order.get("filled_quantity", event_filled)) or 0.0
+        )
+        price = order.get(
+            "limit_price",
+            order.get(
+                "limitPrice",
+                order.get("price", order.get("stop_price", order.get("stopPrice"))),
+            ),
+        )
+        if price in (None, ""):
+            price = event_price
+        side = (
+            "buy"
+            if str(order.get("direction", order.get("side", "buy"))) in {"0", "buy"}
+            else "sell"
+        )
         status = _map_order_status_from_payload(order)
+        if exec_type == "Canceled" and filled == 0:
+            status = "Canceled"
+        if filled > 0 and quantity > 0:
+            status = "Filled" if filled >= quantity else "PartiallyFilled"
         return {
             "orderID": str(order.get("order_id", order.get("orderId", ""))),
             "clOrdID": str(order.get("cli_ord_id", order.get("cliOrdId", ""))),
@@ -349,11 +395,7 @@ class KrakenFuturesAdapter(ExchangeABC):
         **_opts: Any,
     ) -> Dict[str, Any]:
         del asBulk
-        fallback_market_price = (
-            self._market_like_limit_price(side)
-            if ordType.replace("_", "").strip().lower() == "market"
-            else None
-        )
+        fallback_market_price = None
         contract = build_send_order_contract(
             ord_type=ordType,
             symbol=self.symbol,
@@ -472,9 +514,13 @@ class KrakenFuturesAdapter(ExchangeABC):
         for position in positions:
             if str(position.get("symbol") or position.get("instrument")) == target_symbol:
                 current_qty = float(
-                    position.get("size", position.get("balance", position.get("qty", 0.0)))
+                    position.get(
+                        "size", position.get("balance", position.get("qty", 0.0))
+                    )
                 )
-                side_hint = str(position.get("side") or position.get("direction") or "").lower()
+                side_hint = str(
+                    position.get("side") or position.get("direction") or ""
+                ).lower()
                 if current_qty > 0 and side_hint in {"short", "sell", "-1"}:
                     current_qty = -current_qty
                 return {
@@ -484,7 +530,9 @@ class KrakenFuturesAdapter(ExchangeABC):
                         position.get("entry_price") or position.get("price")
                     ),
                     "leverage": _optional_float(position.get("leverage")),
-                    "liquidationPrice": _optional_float(position.get("liquidation_price")),
+                    "liquidationPrice": _optional_float(
+                        position.get("liquidation_price")
+                    ),
                 }
         return {
             "symbol": target_symbol,
@@ -501,8 +549,10 @@ class KrakenFuturesAdapter(ExchangeABC):
 
     def instrument(self, symbol: str) -> Dict[str, Any]:
         metadata = self.instrument_rules(symbol)
-        ticker = self._ticker() if symbol == self.symbol else _ticker_from_payload(
-            self._request("GET", f"/tickers/{symbol}")
+        ticker = (
+            self._ticker()
+            if symbol == self.symbol
+            else _ticker_from_payload(self._request("GET", f"/tickers/{symbol}"))
         )
         return {
             "symbol": symbol,
@@ -600,6 +650,28 @@ def _extract_order_like(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _execution_summary_from_order_events(
+    payload: Dict[str, Any],
+) -> tuple[float, float | None]:
+    events = payload.get("orderEvents")
+    if not isinstance(events, list):
+        return 0.0, None
+    filled = 0.0
+    price: float | None = None
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        if str(event.get("type") or "").upper() != "EXECUTION":
+            continue
+        amount = event.get("amount")
+        if isinstance(amount, (int, float, str)):
+            filled += abs(float(amount))
+        event_price = event.get("price")
+        if isinstance(event_price, (int, float, str)):
+            price = float(event_price)
+    return filled, price
+
+
 def _merge_order_payload_defaults(
     payload: Dict[str, Any],
     *,
@@ -667,24 +739,45 @@ def _is_trigger_order(order: Dict[str, Any]) -> bool:
 
 
 def _normalize_live_order(order: Dict[str, Any]) -> Dict[str, Any]:
+    filled = _optional_float(
+        _first_present_value(order, "filled", "filled_quantity", "filledSize")
+    )
     return {
         "order_id": str(order.get("order_id") or order.get("orderId") or ""),
         "client_order_id": str(order.get("cli_ord_id") or order.get("cliOrdId") or ""),
         "symbol": str(order.get("instrument") or order.get("symbol") or ""),
         "side": str(order.get("direction") or order.get("side") or ""),
         "order_type": str(order.get("type") or order.get("orderType") or ""),
-        "qty": _optional_float(order.get("qty") or order.get("quantity")),
-        "filled": _optional_float(order.get("filled") or order.get("filled_quantity")),
-        "price": _optional_float(order.get("limit_price") or order.get("price")),
-        "stop_price": _optional_float(order.get("stop_price") or order.get("stopPrice")),
+        "qty": _normalise_live_quantity(order, filled),
+        "filled": filled,
+        "price": _optional_float(
+            _first_present_value(order, "limit_price", "limitPrice", "price")
+        ),
+        "stop_price": _optional_float(
+            _first_present_value(order, "stop_price", "stopPrice", "triggerPrice")
+        ),
         "status": _map_order_status_from_payload(order),
     }
+
+
+def _normalise_live_quantity(order: Dict[str, Any], filled: float | None) -> float | None:
+    quantity = _optional_float(_first_present_value(order, "qty", "quantity", "size"))
+    if quantity is not None:
+        return quantity
+    unfilled = _optional_float(
+        _first_present_value(order, "unfilledSize", "unfilled_size")
+    )
+    if unfilled is None:
+        return None
+    return unfilled + (filled or 0.0)
 
 
 def _extract_order_id(order: Dict[str, Any] | str) -> str:
     if isinstance(order, str):
         return order
-    return str(order.get("orderID") or order.get("order_id") or order.get("clOrdID") or "")
+    return str(
+        order.get("orderID") or order.get("order_id") or order.get("clOrdID") or ""
+    )
 
 
 def _map_trigger_signal(exec_inst: str) -> str | None:
@@ -708,6 +801,14 @@ def _optional_float(value: object) -> float | None:
     if isinstance(value, (int, float, str)):
         return float(value)
     raise TypeError(f"cannot convert {type(value)!r} to float")
+
+
+def _first_present_value(payload: Dict[str, Any], *keys: str) -> object | None:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def _first_float(payload: Dict[str, Any], *keys: str, default: float) -> float:
@@ -835,16 +936,20 @@ def build_exec_orders(
             {
                 "orderID": order.exchange_order_id or "",
                 "clOrdID": order.client_order_id or "",
-                "ordStatus": "Filled"
-                if order.filled_quantity >= order.quantity
-                else "PartiallyFilled",
+                "ordStatus": (
+                    "Filled"
+                    if order.filled_quantity >= order.quantity
+                    else "PartiallyFilled"
+                ),
                 "execType": "Trade",
                 "price": fill.price,
                 "orderQty": order.quantity,
                 "cumQty": order.filled_quantity,
                 "side": order.side.capitalize(),
                 "transactTime": (
-                    fill.source_timestamp or fill.local_timestamp or datetime.now(timezone.utc)
+                    fill.source_timestamp
+                    or fill.local_timestamp
+                    or datetime.now(timezone.utc)
                 ).isoformat(),
             }
         )
@@ -852,7 +957,9 @@ def build_exec_orders(
 
 
 def _ticker_from_payload(payload: Dict[str, Any]) -> _Ticker:
-    ticker = KrakenFuturesAdapter._first(payload.get("ticker") or payload.get("result") or payload)
+    ticker = KrakenFuturesAdapter._first(
+        payload.get("ticker") or payload.get("result") or payload
+    )
     bid = float(ticker.get("bid", ticker.get("bidPrice", 0.0)) or 0.0)
     ask = float(ticker.get("ask", ticker.get("askPrice", 0.0)) or 0.0)
     mark = float(ticker.get("markPrice", ticker.get("mark_price", bid)) or bid)

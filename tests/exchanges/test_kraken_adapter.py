@@ -59,7 +59,7 @@ def test_place_maps_limit_order_to_sendorder(tmp_path):
                     "direction": 0,
                     "reason": "new_placed_order_by_user",
                     "last_update_time": 1778371200000,
-                }
+                },
             },
             {
                 "result": "success",
@@ -72,8 +72,8 @@ def test_place_maps_limit_order_to_sendorder(tmp_path):
                     "direction": 0,
                     "reason": "new_placed_order_by_user",
                     "last_update_time": 1778371200000,
-                }
-            }
+                },
+            },
         ]
     )
     adapter = KrakenFuturesAdapter(
@@ -108,19 +108,17 @@ def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):
         [
             {
                 "result": "success",
-                "ticker": {
-                    "bid": 79000.0,
-                    "ask": 79010.0,
-                    "markPrice": 79005.0,
-                    "last": 79006.0,
-                },
-            },
-            {
-                "result": "success",
                 "sendStatus": {
                     "order_id": "OID-2",
                     "status": "placed",
-                }
+                    "orderEvents": [
+                        {
+                            "type": "EXECUTION",
+                            "price": 79006.0,
+                            "amount": 1,
+                        }
+                    ],
+                },
             }
         ]
     )
@@ -144,6 +142,12 @@ def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):
     assert ack.order_id == "OID-2"
     assert ack.side == "Sell"
     assert ack.orig_qty == 1.0
+    assert ack.executed_qty == 1.0
+    assert ack.price == 79006.0
+    assert ack.status == "Filled"
+    sent_payload = dict(session.calls[0]["data"])
+    assert sent_payload["orderType"] == "mkt"
+    assert "limitPrice" not in sent_payload
 
 
 def test_build_exec_orders_maps_rows_and_fills():
@@ -282,7 +286,7 @@ def test_amend_maps_to_editorder(tmp_path):
                     "direction": 0,
                     "reason": "edited_by_user",
                     "last_update_time": 1778371201000,
-                }
+                },
             }
         ]
     )
@@ -304,6 +308,71 @@ def test_amend_maps_to_editorder(tmp_path):
     assert sent_payload["order_id"] == "OID-1"
     assert sent_payload["limitPrice"] == 80100
     assert sent_payload["size"] == 3
+
+
+def test_cancel_sparse_response_maps_to_canceled_status(tmp_path):
+    session = DummySession([{"result": "success", "cancelStatus": {"order_id": "OID-1"}}])
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    ack = adapter.cancel_order("OID-1")
+
+    assert ack.order_id == "OID-1"
+    assert ack.status == "Canceled"
+
+
+def test_live_order_normalization_reads_camel_case_price_and_quantity(tmp_path):
+    session = DummySession(
+        [
+            {
+                "result": "success",
+                "openOrders": [
+                    {
+                        "orderId": "OID-1",
+                        "symbol": "PI_XBTUSD",
+                        "side": "buy",
+                        "orderType": "lmt",
+                        "unfilledSize": 2,
+                        "limitPrice": 70000.0,
+                        "filledSize": 0,
+                    }
+                ],
+            }
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    rows = adapter.live_open_orders()
+
+    assert rows == [
+        {
+            "order_id": "OID-1",
+            "client_order_id": "",
+            "symbol": "PI_XBTUSD",
+            "side": "buy",
+            "order_type": "lmt",
+            "qty": 2.0,
+            "filled": 0.0,
+            "price": 70000.0,
+            "stop_price": None,
+            "status": "New",
+        }
+    ]
 
 
 def test_validate_symbol_syncs_instrument_rules_to_public_db(tmp_path):

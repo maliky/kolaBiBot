@@ -9,6 +9,7 @@ class KrakenFuturesOrderType(StrEnum):
     """Canonical Kraken Futures wire values for orderType."""
 
     LIMIT = "lmt"
+    MARKET = "mkt"
     IMMEDIATE_OR_CANCEL = "ioc"
     STOP = "stp"
     TAKE_PROFIT = "take_profit"
@@ -79,9 +80,11 @@ class SendOrderContract:
             ("trailingStopMaxDeviation", self.trailing_stop_max_deviation),
             (
                 "trailingStopDeviationUnit",
-                self.trailing_stop_deviation_unit.value
-                if self.trailing_stop_deviation_unit is not None
-                else None,
+                (
+                    self.trailing_stop_deviation_unit.value
+                    if self.trailing_stop_deviation_unit is not None
+                    else None
+                ),
             ),
             ("tag", self.tag),
         ]
@@ -175,10 +178,9 @@ def map_standard_order_to_wire(
     """Map standard-order intents to Kraken Futures wire values."""
     standard_order = normalize_standard_order(ord_type)
     if standard_order == KrakenFuturesStandardOrder.MARKET:
-        resolved_market_price = price if price is not None else fallback_market_price
-        if resolved_market_price is None:
-            raise ValueError("Kraken Futures market fallback price is missing")
-        return KrakenFuturesOrderType.IMMEDIATE_OR_CANCEL, resolved_market_price, None
+        del price
+        del fallback_market_price
+        return KrakenFuturesOrderType.MARKET, None, None
     if standard_order == KrakenFuturesStandardOrder.LIMIT:
         return KrakenFuturesOrderType.LIMIT, price, None
     if standard_order == KrakenFuturesStandardOrder.STOP_LOSS_MARKET:

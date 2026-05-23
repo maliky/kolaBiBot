@@ -32,7 +32,7 @@ def test_build_send_order_contract_maps_limit_to_lmt():
     assert ("postOnly", True) in contract.as_params()
 
 
-def test_build_send_order_contract_uses_ioc_for_market():
+def test_build_send_order_contract_uses_native_market_type():
     contract = build_send_order_contract(
         ord_type="Market",
         symbol="PI_XBTUSD",
@@ -50,11 +50,12 @@ def test_build_send_order_contract_uses_ioc_for_market():
         tag=None,
     )
 
-    assert contract.order_type == KrakenFuturesOrderType.IMMEDIATE_OR_CANCEL
-    assert ("limitPrice", 79000.0) in contract.as_params()
+    assert contract.order_type == KrakenFuturesOrderType.MARKET
+    assert ("orderType", "mkt") in contract.as_params()
+    assert ("limitPrice", None) in contract.as_params()
 
 
-def test_build_send_order_contract_prefers_explicit_market_price_when_provided():
+def test_build_send_order_contract_ignores_market_price_protection_inputs():
     contract = build_send_order_contract(
         ord_type="Market",
         symbol="PI_XBTUSD",
@@ -72,8 +73,8 @@ def test_build_send_order_contract_prefers_explicit_market_price_when_provided()
         tag=None,
     )
 
-    assert contract.order_type == KrakenFuturesOrderType.IMMEDIATE_OR_CANCEL
-    assert ("limitPrice", 79123.0) in contract.as_params()
+    assert contract.order_type == KrakenFuturesOrderType.MARKET
+    assert ("limitPrice", None) in contract.as_params()
 
 
 def test_normalize_standard_order_supports_legacy_and_short_aliases():
@@ -83,7 +84,10 @@ def test_normalize_standard_order_supports_legacy_and_short_aliases():
     assert normalize_standard_order("SL") == KrakenFuturesStandardOrder.STOP_LOSS_LIMIT
     assert normalize_standard_order("MT") == KrakenFuturesStandardOrder.TAKE_PROFIT_MARKET
     assert normalize_standard_order("LT") == KrakenFuturesStandardOrder.TAKE_PROFIT_LIMIT
-    assert normalize_standard_order("StopLoss") == KrakenFuturesStandardOrder.STOP_LOSS_MARKET
+    assert (
+        normalize_standard_order("StopLoss")
+        == KrakenFuturesStandardOrder.STOP_LOSS_MARKET
+    )
     assert (
         normalize_standard_order("TriggerEntryLimit")
         == KrakenFuturesStandardOrder.STOP_LOSS_LIMIT
