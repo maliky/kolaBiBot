@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import pytest
 import requests
-from kolabi.bargain.cli import main
+from kolabi.bargain.cli import build_parser, main
 from kolabi.shared.core.models import OrderAck, Position
 
 
@@ -12,6 +13,7 @@ class DummyAdapter:
         self.placed_orders: list[dict[str, Any]] = []
         self._position = Position(symbol="PI_XBTUSD", qty=0.0, entry_price=None)
         self._instrument = {"bidPrice": 100.0, "askPrice": 101.0}
+        self._recent_trades: list[dict[str, object]] = []
 
     def list_instruments(self):
         return [
@@ -21,7 +23,9 @@ class DummyAdapter:
 
     def validate_symbol(self, symbol: str):
         if symbol == "PF_ADAUSD":
-            raise ValueError("Unknown Kraken Futures symbol 'PF_ADAUSD'. Did you mean 'PI_ADAUSD'?")
+            raise ValueError(
+                "Unknown Kraken Futures symbol 'PF_ADAUSD'. Did you mean 'PI_ADAUSD'?"
+            )
         return {"symbol": symbol, "tradeable": True}
 
     def instrument(self, symbol: str):
@@ -102,11 +106,14 @@ class DummyAdapter:
             side=side,
         )
 
+    def recent_trades(self):
+        return list(self._recent_trades)
+
 
 def test_balance_command_prints_available_margin(monkeypatch, capsys):
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: DummyAdapter(),
+        lambda exchange, symbol, environment: DummyAdapter(),
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "balance"])
@@ -118,7 +125,7 @@ def test_balance_command_prints_available_margin(monkeypatch, capsys):
 def test_limit_command_prints_order_ack(monkeypatch, capsys):
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: DummyAdapter(),
+        lambda exchange, symbol, environment: DummyAdapter(),
     )
 
     exit_code = main(
@@ -143,15 +150,68 @@ def test_limit_command_prints_order_ack(monkeypatch, capsys):
     assert '"price": 80000.0' in output
 
 
-def test_check_symbol_command_prints_validation(monkeypatch, capsys):
+def test_market_command_exits_nonzero_when_fill_not_observed(monkeypatch, capsys):
+    adapter = DummyAdapter()
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: DummyAdapter(),
+        lambda exchange, symbol, environment: adapter,
     )
 
     exit_code = main(
-        ["--symbol", "PI_ADAUSD", "--environment", "demo", "check-symbol"]
+        [
+            "--symbol",
+            "PI_XBTUSD",
+            "--environment",
+            "demo",
+            "market",
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+        ]
     )
+
+    assert exit_code == 2
+    output = capsys.readouterr().out
+    assert '"filled": false' in output
+    assert '"reason": "no_fill_observed"' in output
+
+
+def test_market_command_succeeds_when_recent_trade_matches_order_id(monkeypatch, capsys):
+    adapter = DummyAdapter()
+    adapter._recent_trades = [{"order_id": "OID-1", "size": 1.0}]
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.build_adapter",
+        lambda exchange, symbol, environment: adapter,
+    )
+
+    exit_code = main(
+        [
+            "--symbol",
+            "PI_XBTUSD",
+            "--environment",
+            "demo",
+            "market",
+            "--side",
+            "buy",
+            "--qty",
+            "1",
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"filled": true' in output
+    assert '"reason": "recent_trades_match"' in output
+
+
+def test_check_symbol_command_prints_validation(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.build_adapter",
+        lambda exchange, symbol, environment: DummyAdapter(),
+    )
+
+    exit_code = main(["--symbol", "PI_ADAUSD", "--environment", "demo", "check-symbol"])
 
     assert exit_code == 0
     assert '"symbol": "PI_ADAUSD"' in capsys.readouterr().out
@@ -161,7 +221,7 @@ def test_amend_command_supports_price_and_quantity(monkeypatch, capsys):
     adapter = DummyAdapter()
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: adapter,
+        lambda exchange, symbol, environment: adapter,
     )
 
     exit_code = main(
@@ -191,7 +251,7 @@ def test_cancel_all_command_cancels_open_orders(monkeypatch, capsys):
     adapter = DummyAdapter()
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: adapter,
+        lambda exchange, symbol, environment: adapter,
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "cancel-all"])
@@ -206,7 +266,7 @@ def test_open_orders_command_prints_live_resting_orders(monkeypatch, capsys):
     adapter = DummyAdapter()
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: adapter,
+        lambda exchange, symbol, environment: adapter,
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "open-orders"])
@@ -221,12 +281,10 @@ def test_trigger_orders_command_prints_live_trigger_orders(monkeypatch, capsys):
     adapter = DummyAdapter()
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: adapter,
+        lambda exchange, symbol, environment: adapter,
     )
 
-    exit_code = main(
-        ["--symbol", "PI_XBTUSD", "--environment", "demo", "trigger-orders"]
-    )
+    exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "trigger-orders"])
 
     assert exit_code == 0
     output = capsys.readouterr().out
@@ -239,7 +297,7 @@ def test_close_all_command_cancels_orders_and_closes_long_position(monkeypatch, 
     adapter._position = Position(symbol="PI_XBTUSD", qty=3.0, entry_price=1.0)
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: adapter,
+        lambda exchange, symbol, environment: adapter,
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "close-all"])
@@ -253,7 +311,9 @@ def test_close_all_command_cancels_orders_and_closes_long_position(monkeypatch, 
     assert adapter.placed_orders[-1]["reduceOnly"] is True
 
 
-def test_close_all_retries_with_explicit_market_price_when_still_open(monkeypatch, capsys):
+def test_close_all_retries_with_explicit_market_price_when_still_open(
+    monkeypatch, capsys
+):
     adapter = DummyAdapter()
     adapter._position = Position(symbol="PI_XBTUSD", qty=-1.0, entry_price=1.0)
     first_close_attempt = True
@@ -275,7 +335,7 @@ def test_close_all_retries_with_explicit_market_price_when_still_open(monkeypatc
     monkeypatch.setattr(cast(Any, adapter), "place_order", flaky_close)
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: adapter,
+        lambda exchange, symbol, environment: adapter,
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "close-all"])
@@ -302,7 +362,7 @@ def test_close_all_reports_verification_timeout_without_traceback(monkeypatch, c
     monkeypatch.setattr(cast(Any, adapter), "get_position", timeout_after_close)
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda symbol, environment: adapter,
+        lambda exchange, symbol, environment: adapter,
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "close-all"])
@@ -311,3 +371,42 @@ def test_close_all_reports_verification_timeout_without_traceback(monkeypatch, c
     output = capsys.readouterr().out
     assert '"verification_error":' in output
     assert '"closed": false' in output
+
+
+def test_top_level_help_lists_subcommand_descriptions():
+    help_text = build_parser().format_help()
+    assert "Show available margin." in help_text
+    assert "Submit one limit order." in help_text
+    assert "Cancel one order." in help_text
+
+
+def test_subcommand_help_shows_description(capsys):
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["balance", "--help"])
+    output = capsys.readouterr().out
+    assert "Show available margin for the selected exchange account." in output
+
+
+def test_exchange_option_is_forwarded_to_build_adapter(monkeypatch):
+    observed: dict[str, str] = {}
+
+    def _build_adapter(exchange: str, symbol: str, environment: str):
+        observed["exchange"] = exchange
+        observed["symbol"] = symbol
+        observed["environment"] = environment
+        return DummyAdapter()
+
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", _build_adapter)
+    exit_code = main(
+        [
+            "--exchange",
+            "binance",
+            "--symbol",
+            "BTCUSDT",
+            "--environment",
+            "demo",
+            "balance",
+        ]
+    )
+    assert exit_code == 0
+    assert observed == {"exchange": "binance", "symbol": "BTCUSDT", "environment": "demo"}

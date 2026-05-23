@@ -15,12 +15,17 @@ from kolabi.bot.tsv import (
     strategy_to_pretty_dict,
 )
 
+class RawTextDefaultsFormatter(
+    argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter
+):
+    """Show defaults while preserving raw multiline epilog formatting."""
+
 
 def add_runtime_options(parser: argparse.ArgumentParser) -> None:
     """Attach common runtime options shared by run and run-once."""
-    parser.add_argument("--exchange", default="kraken")
-    parser.add_argument("--symbol", default="PI_XBTUSD")
-    parser.add_argument("--environment", choices=("demo", "live"), default="demo")
+    parser.add_argument("--exchange", default="kraken", help="Exchange name.")
+    parser.add_argument("--symbol", default="PI_XBTUSD", help="Futures product id.")
+    parser.add_argument("--environment", choices=("demo", "live"), default="demo", help="Endpoint family.")
     parser.add_argument("--db-url", help="Optional database URL for run persistence")
     parser.add_argument(
         "--market-db-url",
@@ -65,9 +70,9 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Skip Kraken runtime freshness checks before starting the strategy.",
     )
-    parser.add_argument("--log-level", default="INFO")
-    parser.add_argument("--update-pause", type=int, default=10)
-    parser.add_argument("--log-pause", type=int, default=60)
+    parser.add_argument("--log-level", default="INFO", help="Logging verbosity.")
+    parser.add_argument("--update-pause", type=int, default=10, help="Update loop pause in seconds.")
+    parser.add_argument("--log-pause", type=int, default=60, help="Periodic status log pause in seconds.")
     parser.add_argument(
         "--sync",
         action="store_true",
@@ -252,12 +257,16 @@ def build_single_strategy(args: argparse.Namespace) -> StrategySpec:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="kolabi.bot", description="kolaBiBot execution CLI"
+        prog="kolabi.bot",
+        description="kolaBiBot execution CLI",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser(
-        "run", help="Run strategies defined in a TSV file"
+        "run",
+        help="Run strategies defined in a TSV file",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     run_parser.add_argument(
         "--strategy",
@@ -287,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
             "    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo "
             "-m XAbs -t 0 60 -x 79320 79340 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pA --dry-run"
         ),
-        formatter_class=argparse.RawTextHelpFormatter,
+        formatter_class=RawTextDefaultsFormatter,
     )
     add_runtime_options(run_once_parser)
     add_single_order_options(run_once_parser)
@@ -295,11 +304,12 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_parser = subparsers.add_parser(
         "preflight",
         help="Check whether Kraken public/private DB state is fresh enough to start a strategy",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    preflight_parser.add_argument("--exchange", default="kraken")
-    preflight_parser.add_argument("--symbol", default="PI_XBTUSD")
+    preflight_parser.add_argument("--exchange", default="kraken", help="Exchange name.")
+    preflight_parser.add_argument("--symbol", default="PI_XBTUSD", help="Futures product id.")
     preflight_parser.add_argument(
-        "--environment", choices=("demo", "live"), default="demo"
+        "--environment", choices=("demo", "live"), default="demo", help="Endpoint family."
     )
     preflight_parser.add_argument(
         "--market-db-url",
@@ -313,26 +323,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--ready-timeout-seconds",
         type=float,
         default=45.0,
+        help="Maximum wait for readiness checks.",
     )
     preflight_parser.add_argument(
         "--ready-poll-seconds",
         type=float,
         default=1.0,
+        help="Polling cadence while waiting for readiness.",
     )
     preflight_parser.add_argument(
         "--max-public-age-seconds",
         type=float,
         default=15.0,
+        help="Maximum acceptable age of public market snapshot.",
     )
     preflight_parser.add_argument(
         "--max-private-age-seconds",
         type=float,
         default=30.0,
+        help="Maximum acceptable age of private websocket heartbeat.",
     )
     preflight_parser.add_argument(
         "--max-reconcile-age-seconds",
         type=float,
         default=300.0,
+        help="Maximum acceptable age of REST reconcile snapshot.",
     )
     return parser
 

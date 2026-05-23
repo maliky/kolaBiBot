@@ -971,57 +971,83 @@ def format_trace_message(message: object, raw_payload: str, trace_format: str) -
 
 def build_parser() -> argparse.ArgumentParser:
     """Construit le parser CLI des commandes `run`, `probe` et `status`."""
-    parser = argparse.ArgumentParser(prog="python -m kolabi.tree.kraken")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="python -m kolabi.tree.kraken",
+        description="Public market-data service CLI for Kraken Futures.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="<command>",
+    )
+    command_help = {
+        "run": "Run public websocket listener and persist market snapshots.",
+        "probe": "Run listener for a bounded duration and print status.",
+        "status": "Show latest public DB status for a symbol.",
+    }
     for command in ("run", "probe", "status"):
-        command_parser = subparsers.add_parser(command)
-        command_parser.add_argument("--pair", default=KrakenConfig.pair)
-        command_parser.add_argument("--depth", type=int, default=KrakenConfig.depth)
-        command_parser.add_argument("--environment", choices=("demo", "live"), default=KrakenConfig.environment)
-        command_parser.add_argument("--ws-url")
-        command_parser.add_argument("--db-url")
-        command_parser.add_argument("--private-db-url")
-        command_parser.add_argument("--exchange", default=KrakenConfig.exchange)
-        command_parser.add_argument("--market-type", default=KrakenConfig.market_type)
-        command_parser.add_argument("--log-level", default=KrakenConfig.log_level)
+        command_parser = subparsers.add_parser(
+            command,
+            help=command_help[command],
+            description=command_help[command],
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        )
+        command_parser.add_argument("--pair", default=KrakenConfig.pair, help="Futures product id.")
+        command_parser.add_argument("--depth", type=int, default=KrakenConfig.depth, help="Orderbook depth to keep.")
+        command_parser.add_argument("--environment", choices=("demo", "live"), default=KrakenConfig.environment, help="Endpoint family.")
+        command_parser.add_argument("--ws-url", help="Override public websocket URL.")
+        command_parser.add_argument("--db-url", help="Override public SQLite DB URL.")
+        command_parser.add_argument("--private-db-url", help="Override private SQLite DB URL used for correlation.")
+        command_parser.add_argument("--exchange", default=KrakenConfig.exchange, help="Exchange label stored with rows.")
+        command_parser.add_argument("--market-type", default=KrakenConfig.market_type, help="Market type label stored with rows.")
+        command_parser.add_argument("--log-level", default=KrakenConfig.log_level, help="Logging verbosity.")
         command_parser.add_argument(
             "--snapshot-interval-seconds",
             type=float,
             default=KrakenConfig.snapshot_interval_seconds,
+            help="Snapshot write cadence.",
         )
         command_parser.add_argument(
             "--indicator-interval-seconds",
             type=float,
             default=KrakenConfig.indicator_interval_seconds,
+            help="Indicator update cadence.",
         )
         command_parser.add_argument(
             "--log-interval-seconds",
             type=float,
             default=KrakenConfig.log_interval_seconds,
+            help="Heartbeat log cadence.",
         )
         command_parser.add_argument(
             "--retention-minutes",
             type=int,
             default=KrakenConfig.retention_minutes,
+            help="Retention window for service-managed cleanup.",
         )
         command_parser.add_argument(
             "--reconnect-seconds",
             type=int,
             default=KrakenConfig.reconnect_seconds,
+            help="Reconnect delay after websocket failure.",
         )
-        command_parser.add_argument("--trace-ws", action="store_true")
+        command_parser.add_argument("--trace-ws", action="store_true", help="Print websocket payload traces.")
         command_parser.add_argument(
             "--trace-ws-format",
             choices=("compact", "json"),
             default=KrakenConfig.trace_ws_format,
+            help="Trace output format.",
         )
         command_parser.add_argument(
             "--trace-ws-max-lines",
             type=int,
             default=KrakenConfig.trace_ws_max_lines,
+            help="Maximum number of websocket trace lines to emit.",
         )
     probe_parser = subparsers.choices["probe"]
-    probe_parser.add_argument("--seconds", type=float, default=10.0)
+    probe_parser.add_argument("--seconds", type=float, default=10.0, help="Probe duration before auto-stop.")
     return parser
 
 

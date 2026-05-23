@@ -10,67 +10,184 @@ from kolabi.shared.config import load_exchange_config
 from kolabi.shared.core.models import OrderAck, Position
 from kolabi.shared.exchanges import get_adapter
 
+EXCHANGES = ("kraken", "binance", "bitmex")
+
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construire une petite CLI pour tester le canal Futures Kraken."""
-    parser = argparse.ArgumentParser(prog="python -m kolabi.bargain.cli")
-    parser.add_argument("--symbol", default="PI_XBTUSD")
-    parser.add_argument("--environment", choices=("demo", "live"), default="demo")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    """Build a small exchange CLI for direct adapter operations."""
+    parser = argparse.ArgumentParser(
+        prog="python -m kolabi.bargain.cli",
+        usage="python -m kolabi.bargain.cli [--exchange EXCHANGE] [--symbol SYMBOL] [--environment {demo,live}] <command> [<args>]",
+        description=(
+            "Direct exchange adapter CLI for instrument checks, account reads, and order actions."
+        ),
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--exchange", choices=EXCHANGES, default="kraken", help="Target exchange adapter.")
+    parser.add_argument("--symbol", default="PI_XBTUSD", help="Trading symbol / instrument id.")
+    parser.add_argument("--environment", choices=("demo", "live"), default="demo", help="API environment.")
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="<command>",
+    )
 
-    subparsers.add_parser("balance")
-    subparsers.add_parser("position")
+    def add_command(name: str, help_text: str, description: str | None = None) -> argparse.ArgumentParser:
+        return subparsers.add_parser(name, help=help_text, description=description or help_text)
 
-    instruments = subparsers.add_parser("instruments")
-    instruments.add_argument("--contains")
+    add_command("balance", "Show available margin.", "Show available margin for the selected exchange account.")
+    add_command("position", "Show current position.", "Show current position for the selected symbol.")
 
-    subparsers.add_parser("check-symbol")
+    instruments = add_command(
+        "instruments",
+        "List available instruments.",
+        "List exchange instruments; optionally filter symbols by substring.",
+    )
+    instruments.add_argument(
+        "--contains",
+        help="Filter instruments whose symbol contains this text (case-insensitive).",
+    )
 
-    cancel = subparsers.add_parser("cancel")
-    cancel.add_argument("--order-id", required=True)
-    amend = subparsers.add_parser("amend")
-    amend.add_argument("--order-id", required=True)
-    amend.add_argument("--price", type=float)
-    amend.add_argument("--qty", type=float)
-    subparsers.add_parser("open-orders")
-    subparsers.add_parser("trigger-orders")
-    subparsers.add_parser("cancel-all")
-    subparsers.add_parser("close-all")
+    add_command(
+        "check-symbol",
+        "Validate selected symbol.",
+        "Validate the selected symbol on the target exchange and return metadata.",
+    )
+
+    cancel = add_command(
+        "cancel",
+        "Cancel one order.",
+        "Cancel one order by exchange order id.",
+    )
+    cancel.add_argument(
+        "--order-id",
+        required=True,
+        help="Exchange order id to cancel.",
+    )
+    amend = add_command(
+        "amend",
+        "Amend one order.",
+        "Amend one order by id using optional price and quantity updates.",
+    )
+    amend.add_argument(
+        "--order-id",
+        required=True,
+        help="Exchange order id to amend.",
+    )
+    amend.add_argument(
+        "--price",
+        type=float,
+        help="New limit price for the order.",
+    )
+    amend.add_argument(
+        "--qty",
+        type=float,
+        help="New order quantity.",
+    )
+    add_command("open-orders", "Show live resting orders.", "Show live resting orders for the selected symbol.")
+    add_command("trigger-orders", "Show live trigger orders.", "Show live trigger orders for the selected symbol.")
+    add_command("cancel-all", "Cancel all open and trigger orders.", "Cancel all open and trigger orders for the selected symbol.")
+    add_command("close-all", "Cancel all orders and close position.", "Cancel all orders and close current position with reduce-only market logic.")
 
     for command in ("limit", "market"):
-        cmd = subparsers.add_parser(command)
-        cmd.add_argument("--side", choices=("buy", "sell"), required=True)
-        cmd.add_argument("--qty", type=float, required=True)
+        cmd = add_command(
+            command,
+            "Submit one limit order." if command == "limit" else "Submit one market order.",
+            "Submit one limit order." if command == "limit" else "Submit one market order.",
+        )
+        cmd.add_argument(
+            "--side",
+            choices=("buy", "sell"),
+            required=True,
+            help="Order side.",
+        )
+        cmd.add_argument(
+            "--qty",
+            type=float,
+            required=True,
+            help="Order quantity.",
+        )
         if command == "limit":
-            cmd.add_argument("--price", type=float, required=True)
+            cmd.add_argument(
+                "--price",
+                type=float,
+                required=True,
+                help="Limit price.",
+            )
 
-    trailing = subparsers.add_parser("trailing")
-    trailing.add_argument("--side", choices=("buy", "sell"), required=True)
-    trailing.add_argument("--qty", type=float, required=True)
-    trailing.add_argument("--deviation", type=float, required=True)
+    trailing = add_command(
+        "trailing",
+        "Submit one trailing-stop order.",
+        "Submit one native trailing-stop order.",
+    )
+    trailing.add_argument(
+        "--side",
+        choices=("buy", "sell"),
+        required=True,
+        help="Order side.",
+    )
+    trailing.add_argument(
+        "--qty",
+        type=float,
+        required=True,
+        help="Order quantity.",
+    )
+    trailing.add_argument(
+        "--deviation",
+        type=float,
+        required=True,
+        help="Trailing stop deviation value.",
+    )
     trailing.add_argument(
         "--unit",
         choices=("PERCENT", "QUOTE_CURRENCY"),
         default="PERCENT",
+        help="Deviation unit for trailing stop.",
     )
 
-    trailing_limit = subparsers.add_parser("trailing-limit")
-    trailing_limit.add_argument("--side", choices=("buy", "sell"), required=True)
-    trailing_limit.add_argument("--qty", type=float, required=True)
-    trailing_limit.add_argument("--price", type=float, required=True)
-    trailing_limit.add_argument("--deviation", type=float, required=True)
+    trailing_limit = add_command(
+        "trailing-limit",
+        "Submit one trailing-stop-limit order.",
+        "Submit one native trailing-stop-limit order.",
+    )
+    trailing_limit.add_argument(
+        "--side",
+        choices=("buy", "sell"),
+        required=True,
+        help="Order side.",
+    )
+    trailing_limit.add_argument(
+        "--qty",
+        type=float,
+        required=True,
+        help="Order quantity.",
+    )
+    trailing_limit.add_argument(
+        "--price",
+        type=float,
+        required=True,
+        help="Limit price for trailing-stop-limit order.",
+    )
+    trailing_limit.add_argument(
+        "--deviation",
+        type=float,
+        required=True,
+        help="Trailing stop deviation value.",
+    )
     trailing_limit.add_argument(
         "--unit",
         choices=("PERCENT", "QUOTE_CURRENCY"),
         default="PERCENT",
+        help="Deviation unit for trailing stop.",
     )
     return parser
 
 
-def build_adapter(symbol: str, environment: str):
-    """Construire l'adapter Kraken a partir des variables d'environnement."""
-    config = load_exchange_config("kraken", symbol=symbol, environment=environment)
-    adapter_cls = get_adapter("kraken")
+def build_adapter(exchange: str, symbol: str, environment: str):
+    """Build the adapter for the selected exchange from environment credentials."""
+    config = load_exchange_config(exchange, symbol=symbol, environment=environment)
+    adapter_cls = get_adapter(exchange)
     return adapter_cls(
         api_key=config.api_key,
         api_secret=config.api_secret,
@@ -93,6 +210,95 @@ def ack_to_payload(ack: OrderAck) -> dict[str, object]:
 def position_to_payload(position: Position) -> dict[str, object]:
     """Convertir une position simple vers JSON stable."""
     return asdict(position)
+
+
+def _safe_float(value: object | None) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float, str)):
+        return float(value)
+    return None
+
+
+def _extract_trade_order_id(trade: dict[str, object]) -> str:
+    for key in ("order_id", "orderId", "orderID", "cli_ord_id", "cliOrdId"):
+        value = trade.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def _extract_trade_fill_qty(trade: dict[str, object]) -> float:
+    for key in ("filled", "filled_qty", "filledQty", "size", "qty", "quantity"):
+        value = _safe_float(trade.get(key))
+        if value is not None:
+            return abs(value)
+    return 0.0
+
+
+def _verify_market_submission(
+    adapter: Any,
+    *,
+    order_id: str,
+    initial_qty: float,
+    side: str,
+    quantity: float,
+    timeout_seconds: float = 2.5,
+) -> dict[str, object]:
+    """Verify that a market order has visible execution evidence shortly after submit."""
+    deadline = time.time() + timeout_seconds
+    observed_position = adapter.get_position()
+    fill_qty = 0.0
+    matched_trade = False
+    verification_error: str | None = None
+    polls = 0
+    while time.time() < deadline:
+        polls += 1
+        try:
+            observed_position = adapter.get_position()
+        except Exception as exc:
+            verification_error = f"position_check_failed: {exc}"
+            break
+        if float(observed_position.qty) != float(initial_qty):
+            return {
+                "filled": True,
+                "reason": "position_changed",
+                "position_before": initial_qty,
+                "position_after": float(observed_position.qty),
+                "polls": polls,
+            }
+        if hasattr(adapter, "recent_trades"):
+            try:
+                trades = adapter.recent_trades()
+            except Exception as exc:
+                verification_error = f"recent_trades_failed: {exc}"
+                break
+            for trade in trades:
+                trade_id = _extract_trade_order_id(trade)
+                if order_id and trade_id and trade_id == order_id:
+                    matched_trade = True
+                    fill_qty += _extract_trade_fill_qty(trade)
+            if fill_qty > 0:
+                return {
+                    "filled": True,
+                    "reason": "recent_trades_match",
+                    "position_before": initial_qty,
+                    "position_after": float(observed_position.qty),
+                    "filled_qty": fill_qty,
+                    "polls": polls,
+                }
+        time.sleep(0.25)
+    return {
+        "filled": False,
+        "reason": "no_fill_observed",
+        "position_before": initial_qty,
+        "position_after": float(observed_position.qty),
+        "requested_side": side,
+        "requested_qty": quantity,
+        "matched_trade_without_qty": matched_trade,
+        "verification_error": verification_error,
+        "polls": polls,
+    }
 
 
 def _cancel_all_orders(adapter: Any) -> list[dict[str, object]]:
@@ -183,7 +389,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Point d'entree CLI pour tests de communication directs."""
     parser = build_parser()
     args = parser.parse_args(argv)
-    adapter = build_adapter(args.symbol, args.environment)
+    adapter = build_adapter(args.exchange, args.symbol, args.environment)
 
     if args.command == "instruments":
         instruments = adapter.list_instruments()
@@ -285,16 +491,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "market":
         adapter.validate_symbol(args.symbol)
-        print_json(
-            ack_to_payload(
-                adapter.place_order(
-                    side=args.side,
-                    orderQty=args.qty,
-                    type_="MARKET",
-                )
-            )
+        initial_position = adapter.get_position()
+        ack = adapter.place_order(
+            side=args.side,
+            orderQty=args.qty,
+            type_="MARKET",
         )
-        return 0
+        payload = ack_to_payload(ack)
+        if (
+            str(payload.get("status", "")).lower() == "filled"
+            or float(payload.get("executed_qty") or 0.0) > 0.0
+        ):
+            payload["verification"] = {"filled": True, "reason": "ack_execution"}
+            print_json(payload)
+            return 0
+        verification = _verify_market_submission(
+            adapter,
+            order_id=str(payload.get("order_id") or ""),
+            initial_qty=float(initial_position.qty),
+            side=args.side,
+            quantity=float(args.qty),
+        )
+        payload["verification"] = verification
+        print_json(payload)
+        return 0 if bool(verification.get("filled")) else 2
     if args.command == "trailing":
         adapter.validate_symbol(args.symbol)
         print_json(

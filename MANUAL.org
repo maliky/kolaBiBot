@@ -177,11 +177,30 @@ ack = adapter.amend_order("YOUR_ORDER_ID", price=70500)
 print(ack)
 #+end_src
 
-* trade.cli
+* bargain.cli
+#+BEGIN_SRC bash :results output
+python -m kolabi.bargain.cli --help
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+usage: python -m kolabi.bargain.cli [-h] [--symbol SYMBOL]
+                                    [--environment {demo,live}]
+                                    {balance,position,instruments,check-symbol,cancel,amend,open-orders,trigger-orders,cancel-all,close-all,limit,market,trailing,trailing-limit} ...
+
+positional arguments:
+  {balance,position,instruments,check-symbol,cancel,amend,open-orders,trigger-orders,cancel-all,close-all,limit,market,trailing,trailing-limit}
+
+options:
+  -h, --help            show this help message and exit
+  --symbol SYMBOL
+  --environment {demo,live}
+#+end_example
 
 - Command: =python -m kolabi.bargain.cli=
-- Role: direct Kraken Futures CLI for instruments, balance, position, order submission, amend, and cancel
+- Role: direct exchange-adapter CLI for instruments, balance, position, order submission, amend, and cancel
 - Global options:
+  - =--exchange {kraken,binance,bitmex}= : exchange adapter target, default =kraken=
   - =--symbol= : selected Kraken Futures product id, example: =PI_XBTUSD=
   - =--environment {demo,live}= : selected endpoint family
 
@@ -198,38 +217,63 @@ print(ack)
 | =trailing=       | send native Kraken trailing stop       | =--side=, =--qty=, =--deviation=, =--unit=            |
 | =trailing-limit= | send native Kraken trailing stop limit | =--side=, =--qty=, =--price=, =--deviation=, =--unit= |
 
+Help behavior:
+- =python -m kolabi.bargain.cli --help= shows one-line descriptions for each subcommand.
+- =python -m kolabi.bargain.cli <subcommand> --help= shows that subcommand description and options.
+- Example: =python -m kolabi.bargain.cli balance --help= describes the balance read command.
+
 Examples:
 
 #+begin_src bash
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo balance
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo position
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo instruments --contains ADA
-  python -m kolabi.bargain.cli --symbol PF_ADAUSD --environment demo check-symbol
+  python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo balance
+  python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo position
+  python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo instruments --contains ADA
+  python -m kolabi.bargain.cli --exchange kraken --symbol PF_ADAUSD --environment demo check-symbol
   # orders
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo limit --side buy --qty 2 --price 70000
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo market --side buy --qty 1
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo cancel --order-id YOUR_ORDER_ID
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo amend --order-id YOUR_ORDER_ID --price 70100 --qty 3
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo trailing \
+  python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo limit --side buy --qty 2 --price 70000
+  python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo market --side buy --qty 1
+  python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo cancel --order-id YOUR_ORDER_ID
+  python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo amend --order-id YOUR_ORDER_ID --price 70100 --qty 3
+  python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo trailing \
     --side buy --qty 1 --deviation 20 --unit PERCENT
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo trailing-limit \
+  python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo trailing-limit \
     --side buy --qty 1 --price 82000 --deviation 20 --unit PERCENT
 #+end_src
 
-* trade.smoke
+* bargain.smoke
 
 - Command: =python -m kolabi.bargain.smoke=
 - Role: place a paced sweep of standard Kraken Futures order kinds
 - Use: demo validation of the contract layer and order serializers
 - Main options:
+  - =--exchange {kraken,binance,bitmex}= : exchange target, default =kraken=
   - =--symbol= : default: =PI_XBTUSD=
   - =--environment {demo,live}=
+  - =--list-orders= : print tested/supported smoke order plan for the exchange and exit
   - =--sleep-seconds=: use =2= or more to stay conservative
   - =--log-level=
 
-#+begin_src bash
-python -m kolabi.bargain.smoke --symbol PI_XBTUSD --environment demo --sleep-seconds 2
+#+begin_src bash  :results output
+python -m kolabi.bargain.smoke --help 
 #+end_src
+
+#+RESULTS:
+#+begin_example
+usage: python -m kolabi.bargain.smoke [-h]
+                                      [--exchange {kraken,binance,bitmex}]
+                                      [--symbol SYMBOL]
+                                      [--environment {demo,live}]
+                                      [--sleep-seconds SLEEP_SECONDS]
+                                      [--log-level LOG_LEVEL]
+
+options:
+  -h, --help            show this help message and exit
+  --exchange {kraken,binance,bitmex}
+  --symbol SYMBOL
+  --environment {demo,live}
+  --sleep-seconds SLEEP_SECONDS
+  --log-level LOG_LEVEL
+#+end_example
 
 * tree.kraken public db
 

@@ -1073,10 +1073,10 @@ Tail is not only exposure protection.
 
 * Environments
 
-| Environment | REST endpoint                                       | WebSocket endpoint                    |
-|-------------+-----------------------------------------------------+---------------------------------------|
-| Demo        | https://demo-futures.kraken.com/derivatives/api/v3 | wss://demo-futures.kraken.com/ws/v1  |
-| Live        | https://futures.kraken.com/derivatives/api/v3      | wss://futures.kraken.com/ws/v1       |
+| Environment | REST endpoint                                      | WebSocket endpoint                  |
+|-------------+----------------------------------------------------+-------------------------------------|
+| Demo        | https://demo-futures.kraken.com/derivatives/api/v3 | wss://demo-futures.kraken.com/ws/v1 |
+| Live        | https://futures.kraken.com/derivatives/api/v3      | wss://futures.kraken.com/ws/v1      |
 
 Credentials:
 
