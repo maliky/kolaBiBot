@@ -8,7 +8,7 @@ def test_extract_min_quantity_falls_back_to_one_contract():
 
 
 def test_build_smoke_orders_covers_standard_order_sweep():
-    orders = build_smoke_orders("PI_XBTUSD", quantity=1.0, reference_price=100.0)
+    orders = build_smoke_orders("kraken", "PI_XBTUSD", quantity=1.0, reference_price=100.0)
     order_types = {order.order_type for order in orders}
 
     assert "Limit" in order_types
@@ -19,3 +19,10 @@ def test_build_smoke_orders_covers_standard_order_sweep():
     assert "TakeProfitLimit" in order_types
     assert "TrailingStop" in order_types
     assert "TrailingStopLimit" in order_types
+
+
+def test_build_smoke_orders_binance_uses_exchange_safe_subset():
+    orders = build_smoke_orders("binance", "BTCUSDT", quantity=1.0, reference_price=100.0)
+    order_types = {order.order_type for order in orders}
+    assert "Limit" in order_types
+    assert "Market" in order_types
