@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import time
 from dataclasses import asdict, dataclass
@@ -26,12 +27,20 @@ class SmokeOrder:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the smoke-test CLI."""
-    parser = argparse.ArgumentParser(prog="python -m kolabi.bargain.smoke")
-    parser.add_argument("--exchange", choices=("kraken", "binance", "bitmex"), default="kraken")
-    parser.add_argument("--symbol", default="PI_XBTUSD")
-    parser.add_argument("--environment", choices=("demo", "live"), default="demo")
-    parser.add_argument("--sleep-seconds", type=float, default=2.0)
-    parser.add_argument("--log-level", default="INFO")
+    parser = argparse.ArgumentParser(
+        prog="python -m kolabi.bargain.smoke",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--exchange", choices=("kraken", "binance", "bitmex"), default="kraken", help="Target exchange adapter.")
+    parser.add_argument("--symbol", default="PI_XBTUSD", help="Trading symbol / instrument id.")
+    parser.add_argument("--environment", choices=("demo", "live"), default="demo", help="API environment.")
+    parser.add_argument(
+        "--list-orders",
+        action="store_true",
+        help="List order types/plans tested for the selected exchange and exit.",
+    )
+    parser.add_argument("--sleep-seconds", type=float, default=2.0, help="Pause between order submissions.")
+    parser.add_argument("--log-level", default="INFO", help="Logging verbosity.")
     return parser
 
 
@@ -222,6 +231,7 @@ def run_smoke(
         quantity,
     )
     orders = build_smoke_orders(exchange, symbol, quantity, reference_price)
+    had_error = False
     for order in orders:
         logger.info(
             "submit name=%s type=%s side=%s qty=%.4f price=%s stop=%s trailing=%s/%s",
@@ -239,15 +249,45 @@ def run_smoke(
             logger.info("ack %s", payload)
         except Exception as exc:
             logger.error("error name=%s detail=%s", order.name, exc)
+            had_error = True
         time.sleep(max(sleep_seconds, 0.0))
-    logger.info("smoke_done symbol=%s", symbol)
-    return 0
+    logger.info("smoke_done symbol=%s had_error=%s", symbol, had_error)
+    return 1 if had_error else 0
+
+
+def list_smoke_orders(exchange: str) -> list[dict[str, object]]:
+    """Return a deterministic order-plan view for CLI listing."""
+    orders = build_smoke_orders(exchange=exchange, symbol="PI_XBTUSD", quantity=1.0, reference_price=100.0)
+    return [
+        {
+            "name": order.name,
+            "order_type": order.order_type,
+            "side": order.side,
+            "quantity": order.quantity,
+            "price": order.price,
+            "stop_price": order.stop_price,
+            "trailing_deviation": order.trailing_deviation,
+            "trailing_unit": order.trailing_unit,
+        }
+        for order in orders
+    ]
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """CLI entry point for the smoke-test runner."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.list_orders:
+        print(
+            json.dumps(
+                {
+                    "exchange": args.exchange,
+                    "orders": list_smoke_orders(args.exchange),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
     return run_smoke(
         exchange=args.exchange,
         symbol=args.symbol,
