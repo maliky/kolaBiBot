@@ -1,0 +1,480 @@
+#+TITLE: Kolabi TSV Grammar CLI Examples
+
+This file translates the =orders/demo_ada.tsv= grammar into explicit =kolabi.bot run-once= commands.  The commands are intentionally safe by default: they use = so they validate the strategy shape without calling Ogun or an exchange.
+
+--skip-ready-check?
+
+The common vocabulary is:
+
+- =-o, --oType=: head order type.
+- =-y, --tType=: tail order type.
+- =-c, --side=: head side; the tail side is the opposite side.
+- =-a, --aType=: interpretation of quantity, tail distance, and price interval.
+- =-x, --prix=: two ordered price bounds.  Equal bounds are invalid.
+- =-T, --tailPrice=: tail distance using the =t= token from =aType=.
+- =-d, --oDelta=: head trigger-to-limit difference for stop-limit and touch-limit orders.
+- =-s, --tDelta=: tail trigger-to-limit difference.
+- =-t, --tps_run=: start and end in minutes from launch.
+- =-O, --tOut=: head lifecycle timeout in minutes.
+- =-p, --drPause=: pause between retries in minutes.
+
+Order type vocabulary:
+
+
+- =M=: Market.
+- =L=: Limit.
+- =S=: Stop market.
+- =MT=: MarketIfTouched.
+- =SL=: StopLimit.
+- =LT=: LimitIfTouched.
+- =f=, =l=, =m=: trigger-price suffixes for fair, last, and mark price.
+- =!=: ParticipateDoNotInitiate, useful for passive limit orders, not market orders.
+- =-=: ReduceOnly, useful for protective tail orders, not market orders.
+
+* Individual Order Type Commands
+
+These commands focus on one head order type at a time.  They all use the same symbol and demo environment so differences stay visible.
+
+** Market Head
+
+Command: submit a buy market head with a reduce-only stop tail planned after the head fills.  Do not combine =M= with =!= or =-=.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  \
+  -m EX_Market_Head \
+  -t 0 1440 \
+  -O 120 \
+  -c buy \
+  -a qAt%p% \
+  -x -0.25 0.25 \
+  -q 11 \
+  -T 1.5 \
+  -o M \
+  -y S-
+#+END_SRC
+
+** Limit Head
+
+Place a passive sell limit head around a percent band, then protect the resulting exposure with a reduce-only stop tail.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  \
+  -m EX_Limit_Head \
+  -t 0 1440 \
+  -O 120 \
+  -c sell \
+  -a qAt%p% \
+  -x 0.50 0.5001 \
+  -q 11 \
+  -T 1.5 \
+  -o L! \
+  -y S-
+#+END_SRC
+
+** Stop Head
+
+Sell only if the market breaks below the current reference range; the tail is a reduce-only stop on the opposite side.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  \
+  -m EX_Stop_Head \
+  -t 0 1440 \
+  -O 120 \
+  -c sell \
+  -a qAt%p% \
+  -x -0.50 -0.4999 \
+  -q 11 \
+  -T 1.5 \
+  -o S \
+  -y S-
+#+END_SRC
+
+** MarketIfTouched Head
+
+Buy with a market-if-touched head when price pulls back to the lower band, then attach a protective sell stop tail.
+# > What do you mean by prices pulls back for a buy ? how does this differes from limit buy?
+# > althoug strange the -x should be a positive interval. price going up... That is the diff with a buy limit order.
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  \
+  -m EX_Market_If_Touched_Head \
+  -t 0 1440 \
+  -O 120 \
+  -c buy \
+  -a qAt%p% \
+  -x -0.50 -0.4999 \
+  -q 11 \
+  -T 1.5 \
+  -o MT \
+  -y S-
+#+END_SRC
+
+** StopLimit Head
+Sell with a stop-limit head.  The =-d= delta keeps the limit close to the trigger and in the same sell direction.
+Here I want to be market maker.
+# What's the unit of my delta ?
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  \
+  -m EX_Stop_Limit_Head \
+  -t 0 1440 \
+  -O 120 \
+  -c sell \
+  -a qAt%p% \
+  -x -0.50 -0.4999 \
+  -q 11 \
+  -T 1.5 \
+  -d 0.05 \
+  -o SLm \
+  -y S-
+#+END_SRC
+
+** LimitIfTouched Head
+
+Buy with a limit-if-touched head after a pullback.  The =-d= delta keeps the execution limit close to the touch trigger.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  \
+  -m EX_Limit_If_Touched_Head \
+  -t 0 1440 \
+  -O 120 \
+  -c buy \
+  -a qAt%p% \
+  -x -0.50 -0.4999 \
+  -q 11 \
+  -T 1.5 \
+  -d 0.05 \
+  -o LTm \
+  -y S-
+#+END_SRC
+
+* Trigger Price Variants
+
+Suffixes select the price used to trigger conditional orders.  No suffix means the default runtime reference.  The examples below keep the rest of the command constant and only vary the trigger source.
+
+** Stop On Fair Price
+#+BEGIN_SRC bash :results output :exports code
+  # Stop On Fair Price  
+  python -m kolabi.bot run-once --exchange kraken -m EX_Stop_Fair -t 0 1440 -O 120 -c sell -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o Sf -y S-
+  # Stop On Last Price
+  python -m kolabi.bot run-once --exchange kraken -m EX_Stop_Last -t 0 1440 -O 120 -c sell -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o Sl -y S-
+  # Stop On Mark Price
+  python -m kolabi.bot run-once --exchange kraken -m EX_Stop_Mark -t 0 1440 -O 120 -c sell -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o Sm -y S-
+#+END_SRC
+* Tail Order Commands
+
+Tail orders are planned only after the head lifecycle confirms the correct event. Use reduce-only tails for protection.  Do not use reduce-only with market tails.
+
+#+BEGIN_SRC bash :results output :exports code
+  # Market Tail: force a passive head shape, then plan a market tail.  This is useful for parser coverage, but it is rarely the preferred protective tail.
+  python -m kolabi.bot run-once --exchange kraken -m EX_Tail_Market -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y M
+  # Limit Tail: after a passive buy head, plan a sell limit tail at the configured profit distance.
+  python -m kolabi.bot run-once --exchange kraken -m EX_Tail_Limit -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y L
+  # Stop Tail: after a passive buy head, plan a reduce-only sell stop tail.
+  python -m kolabi.bot run-once --exchange kraken -m EX_Tail_Stop -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
+  # MarketIfTouched Tail: after a passive buy head, plan a sell market-if-touched tail.
+  python -m kolabi.bot run-once --exchange kraken -m EX_Tail_Market_Touched -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y MT
+  # StopLimit Tail: after a passive buy head, plan a reduce-only sell stop-limit tail.  The =-s= delta keeps the tail limit close to the tail trigger.
+  python -m kolabi.bot run-once --exchange kraken -m EX_Tail_Stop_Limit -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -s 0.05 -o L! -y SL-
+  # LimitIfTouched Tail: after a passive buy head, plan a reduce-only sell limit-if-touched tail.
+  python -m kolabi.bot run-once --exchange kraken -m EX_Tail_Limit_Touched -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -s 0.05 -o L! -y LT-
+#+END_SRC
+
+
+* Amount And Price Grammar
+
+The =aType= field combines three interpretations:
+
+- =qA= absolute quantity.
+- =q%= percentage quantity.
+- =t%= percent tail distance.
+- =tD= nominal tail distance from reference.
+- =tA= absolute tail price.
+- =p%= percent price interval.
+- =pD= nominal differential price interval.
+- =pA= absolute price interval.
+
+** Absolute Quantity, Nominal Tail, Nominal Price
+
+Command: use absolute quantity, a nominal tail distance, and a nominal price
+difference from the reference.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_qAtDpD -t 0 1440 -O 120 -c buy -a qAtDpD -x -50 -49 -q 11 -T 25 -o L! -y S-
+#+END_SRC
+
+** Absolute Quantity, Nominal Tail, Percent Price
+
+Command: use absolute quantity and nominal tail distance, but express entry
+range as a percent offset.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_qAtDpPct -t 0 1440 -O 120 -c buy -a qAtDp% -x -0.50 -0.4999 -q 11 -T 25 -o L! -y S-
+#+END_SRC
+
+** Absolute Quantity, Nominal Tail, Absolute Price
+
+Command: use absolute prices for the entry interval.  Adjust the two prices for
+the current contract before running live.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_qAtDpA -t 0 1440 -O 120 -c buy -a qAtDpA -x 70000 70010 -q 11 -T 25 -o L! -y S-
+#+END_SRC
+
+** Absolute Quantity, Percent Tail, Nominal Price
+
+Command: use absolute quantity, percent tail distance, and nominal entry
+difference.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_qAtPctpD -t 0 1440 -O 120 -c buy -a qAt%pD -x -50 -49 -q 11 -T 1.5 -o L! -y S-
+#+END_SRC
+
+** Absolute Quantity, Absolute Tail, Nominal Price
+
+Command: use an absolute tail price.  This is useful when the protective stop
+must live at a known chart level rather than at a relative distance.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_qAtApD -t 0 1440 -O 120 -c buy -a qAtApD -x -50 -49 -q 11 -T 69000 -o L! -y S-
+#+END_SRC
+
+** Percent Quantity, Nominal Tail, Nominal Price
+
+Command: size the head as a percent quantity while using nominal distances.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_qPcttDpD -t 0 1440 -O 120 -c buy -a q%tDpD -x -50 -49 -q 10 -T 25 -o L! -y S-
+#+END_SRC
+
+* Time, Timeout, Pause, And Retry
+
+Time fields are minutes:
+
+- 24h = =1440=.
+- 48h = =2880=.
+- 4d = =5760=.
+- 7d is about =10000=.
+
+** One Day Window
+
+Command: valid immediately for 24 hours.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_Time_24h -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
+#+END_SRC
+
+** Two Day Window
+
+Command: valid immediately for 48 hours.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_Time_48h -t 0 2880 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
+#+END_SRC
+
+** Four Day Window
+
+Command: valid immediately for four days.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_Time_4d -t 0 5760 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
+#+END_SRC
+
+** Seven Day Window
+
+Command: approximate a seven-day strategy window.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_Time_7d -t 0 10000 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
+#+END_SRC
+
+** Retry With Pause
+
+Command: attempt three times, pausing one minute between attempts, while the
+overall strategy window remains open.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once --exchange kraken -m EX_Retry_Pause -t 0 1440 -n 3 -p 1 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
+#+END_SRC
+
+* Market Scenarios
+
+These examples are still not live orders.  They use =--simulate= so the active
+runtime path can be exercised with simulated confirmations:
+
+=Dragon -> Chronos -> Isis -> Horus -> Ogun=
+
+Use the same shape without =--simulate= only when the exchange account, symbol,
+quantity, and price bands have been checked.
+
+** Passive Pullback Entry With Protective Stop
+
+Strategic goal: buy only if the market pulls back into a better entry band, then
+attach a reduce-only sell stop so the position has an explicit exit if the
+pullback becomes a breakdown.
+
+Execution path: Chronos waits for the price band, Isis activates the head, Horus
+plans a limit head, Ogun receives the command, and a simulated fill event causes
+the tail to be planned.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  --simulate \
+  -m SC_Pullback_Buy_Stop_Tail \
+  -t 0 1440 \
+  -O 120 \
+  -c buy \
+  -a qAt%p% \
+  -x -0.50 -0.4999 \
+  -q 11 \
+  -T 1.5 \
+  -o L! \
+  -y S-
+#+END_SRC
+
+** Breakout Failure Short With StopLimit Head
+
+Strategic goal: sell only after price breaks down through a watched mark-price
+level, but use stop-limit instead of a pure stop so execution stays bounded.
+
+Execution path: the =SLm= head waits on mark price.  If the trigger appears, the
+limit is placed close to the trigger using =-d=.  A protective buy stop tail is
+then prepared after the head fill.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  --simulate \
+  -m SC_Breakdown_Sell_StopLimit \
+  -t 0 2880 \
+  -O 180 \
+  -c sell \
+  -a qAt%p% \
+  -x -0.75 -0.7499 \
+  -q 11 \
+  -T 1.5 \
+  -d 0.05 \
+  -o SLm \
+  -y S-
+#+END_SRC
+
+** Mean Reversion Touch Buy
+
+Strategic goal: enter long only if price touches a lower band, expecting a
+reversion bounce.  =MT= gives immediate market execution once touched; use =LT=
+instead when bounded execution is more important than certainty.
+
+Execution path: the head remains dormant until the lower band is touched.  After
+the simulated head confirmation, a reduce-only sell stop tail is planned.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  --simulate \
+  -m SC_Mean_Reversion_Touch_Buy \
+  -t 0 1440 \
+  -O 120 \
+  -c buy \
+  -a qAt%p% \
+  -x -1.00 -0.9999 \
+  -q 11 \
+  -T 1.5 \
+  -o MT \
+  -y S-
+#+END_SRC
+
+** Passive Take-Profit Tail
+
+Strategic goal: open passively, then exit with a limit tail instead of a stop.
+This is useful for a planned scalp where the risk exit is handled elsewhere or
+by another pair.
+
+Execution path: after the buy head is filled, the sell limit tail is planned at
+the configured tail distance.  Because this is not a stop tail, it is a profit
+target rather than emergency protection.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  --simulate \
+  -m SC_Passive_Buy_Profit_Tail \
+  -t 0 1440 \
+  -O 120 \
+  -c buy \
+  -a qAt%p% \
+  -x -0.25 -0.2499 \
+  -q 11 \
+  -T 0.75 \
+  -o L! \
+  -y L
+#+END_SRC
+
+** Short Hedge With Reduce-Only Tail
+
+Strategic goal: sell a short hedge after a mild upward move, then protect the
+position with a reduce-only buy stop.  The =-= belongs on the tail, not on a
+market head.
+
+Execution path: if the sell limit head fills, the tail becomes a buy stop that
+can only reduce the resulting exposure.
+
+#+BEGIN_SRC bash :results output :exports code
+python -m kolabi.bot run-once \
+  --exchange kraken \
+  \
+  \
+  \
+  --simulate \
+  -m SC_Short_Hedge_Reduce_Tail \
+  -t 0 5760 \
+  -O 240 \
+  -c sell \
+  -a qAt%p% \
+  -x 0.50 0.5001 \
+  -q 11 \
+  -T 1.5 \
+  -o L! \
+  -y S-
+#+END_SRC
+
