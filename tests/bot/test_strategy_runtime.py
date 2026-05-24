@@ -24,10 +24,12 @@ from kolabi.bot.pair_cycle import step_pair
 from kolabi.bot.strategy_runtime import (
     KrakenPublicTriggerSource,
     SimulatedExecutor,
+    StaticHookSource,
     StrategyRuntime,
     plan_strategy_once,
 )
 from kolabi.bot.tail_tracking import initial_tail_trail
+from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import AmendTailCommand, RuntimeCommandKind, Symbol
 
 
@@ -82,6 +84,100 @@ def test_strategy_runtime_simulation_advances_to_tail_state() -> None:
         TailState.LIVING,
         TailState.SUBMITTED,
     }
+
+
+def test_strategy_runtime_simulation_initialises_relative_tail_reference() -> None:
+    pair = sample_strategy()[0]
+    pair = replace(pair, tail_price_spec=1.5, tail_price_spec_type="t%", amount_type="qAt%p%")
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=SimulatedExecutor(),
+        simulate=True,
+    )
+
+    result = asyncio.run(runtime.run())
+
+    assert result.state.pairs["pair-a"].tail_trail is not None
+    assert result.state.pairs["pair-a"].tail_trail.entry_reference_price == Decimal("100.0")
+
+
+def test_strategy_runtime_uses_filled_head_ack_to_place_tail_without_private_db() -> None:
+    pair = sample_strategy()[0]
+    pair = replace(pair, tail_price_spec=1.5, tail_price_spec_type="t%", amount_type="qAt%p%")
+
+    class _Executor:
+        async def execute(self, command):
+            if command.reason == "head":
+                return OrderAck(
+                    order_id="OID-H",
+                    status="Filled",
+                    price=100.0,
+                    orig_qty=1.0,
+                    executed_qty=1.0,
+                    side="buy",
+                )
+            return OrderAck(
+                order_id="OID-T",
+                status="New",
+                price=98.5,
+                orig_qty=1.0,
+                executed_qty=0.0,
+                side="sell",
+            )
+
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=_Executor(),
+        public_source=StaticHookSource(),
+        private_source=None,
+        simulate=False,
+    )
+
+    result = asyncio.run(runtime.run())
+
+    assert [command.reason for command in result.commands] == ["head", "tail"]
+    pair_state = result.state.pairs["pair-a"]
+    assert pair_state.tail_state == TailState.SUBMITTED
+    assert pair_state.tail_trail is not None
+    assert pair_state.tail_trail.current_stop_price == Decimal("98.500")
+
+
+def test_strategy_runtime_waits_for_tail_after_filled_head() -> None:
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=sample_strategy()),
+        symbol="PI_XBTUSD",
+        executor=SimulatedExecutor(),
+        simulate=True,
+    )
+    pair = sample_strategy()[0]
+
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                played_quantity=Decimal("1"),
+                tail_state=TailState.HOOKED,
+            )
+        },
+    )
+    assert runtime.all_pairs_terminal is False
+
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                played_quantity=Decimal("1"),
+                tail_state=TailState.SUBMITTED,
+            )
+        },
+    )
+    assert runtime.all_pairs_terminal is True
 
 
 def test_public_polling_emits_market_ticks_for_living_tails() -> None:

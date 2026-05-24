@@ -194,6 +194,144 @@ def test_place_order_merges_execinst_and_reduceonly_without_duplicate_kwarg(tmp_
     assert sent_payload["reduceOnly"] is True
 
 
+def test_live_trigger_orders_normalises_nested_order_trigger_payload(tmp_path):
+    session = DummySession(
+        [
+            {
+                "result": "success",
+                "openOrders": [
+                    {
+                        "order_id": "OID-T",
+                        "cli_ord_id": "CID-T",
+                        "symbol": "PI_XBTUSD",
+                        "direction": 1,
+                        "qty": "1",
+                        "reduceOnly": True,
+                        "status": "untouched",
+                        "orderTrigger": {
+                            "type": "stp",
+                            "stopPrice": "75454.94",
+                            "triggerSignal": "last",
+                        },
+                    }
+                ],
+            }
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    orders = adapter.live_trigger_orders()
+
+    assert orders == [
+        {
+            "order_id": "OID-T",
+            "client_order_id": "CID-T",
+            "symbol": "PI_XBTUSD",
+            "side": "sell",
+            "order_type": "stp",
+            "qty": 1.0,
+            "filled": None,
+            "price": None,
+            "stop_price": 75454.94,
+            "trigger_signal": "last",
+            "reduce_only": True,
+            "status": "New",
+        }
+    ]
+
+
+def test_place_order_rounds_stop_price_to_cached_tick_size(tmp_path):
+    public_db_url = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+    session = DummySession(
+        [
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "OID-T",
+                    "cli_ord_id": "CID-T",
+                    "status": "placed",
+                    "qty": 1,
+                    "filled": 0,
+                    "direction": 1,
+                    "stop_price": 75436.5,
+                },
+            }
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        public_db_url=public_db_url,
+        session=cast(Any, session),
+    )
+    with Session(adapter._public_engine) as db_session:
+        db_session.add(
+            ExchangeInstrument(
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                symbol="PI_XBTUSD",
+                tick_size=0.5,
+            )
+        )
+        db_session.commit()
+
+    adapter.place_order(
+        side="sell",
+        orderQty=1,
+        stopPx=75436.7175,
+        type_="S",
+        execInst="ReduceOnly,LastPrice",
+        clOrdID="CID-T",
+    )
+
+    sent_payload = dict(session.calls[0]["data"])
+    assert sent_payload["stopPrice"] == 75436.5
+
+
+def test_authenticated_requests_retry_with_increasing_nonce(tmp_path, monkeypatch):
+    session = DummySession(
+        [
+            {
+                "result": "error",
+                "error": "nonceBelowThreshold: TOO_SMALL",
+            },
+            {
+                "result": "success",
+                "openOrders": [],
+            },
+        ]
+    )
+    monkeypatch.setattr("kolabi.shared.exchanges.kraken_adapter.time.time", lambda: 1.0)
+    monkeypatch.setattr("kolabi.shared.exchanges.kraken_adapter.time.sleep", lambda _seconds: None)
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    assert adapter.live_trigger_orders() == []
+    first_nonce = int(session.calls[0]["headers"]["Nonce"])
+    second_nonce = int(session.calls[1]["headers"]["Nonce"])
+    assert second_nonce == first_nonce + 1
+
+
 def test_build_exec_orders_maps_rows_and_fills():
     order = ExchangeOrder(
         id=1,
@@ -414,6 +552,8 @@ def test_live_order_normalization_reads_camel_case_price_and_quantity(tmp_path):
             "filled": 0.0,
             "price": 70000.0,
             "stop_price": None,
+            "trigger_signal": "",
+            "reduce_only": False,
             "status": "New",
         }
     ]

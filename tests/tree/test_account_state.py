@@ -211,6 +211,29 @@ def test_map_fill_event_and_record_with_placeholder_order(tmp_path):
         assert orders[0].exchange_order_id == "OID-2"
 
 
+def test_fill_event_persists_client_order_id_from_cli_ord_id(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    event = map_fill_event(
+        {
+            "instrument": "PI_XBTUSD",
+            "direction": 0,
+            "order_id": "OID-H",
+            "cli_ord_id": "kolabi-M-head-1",
+            "fill_id": "FID-H",
+            "price": "76637",
+            "qty": "3",
+        }
+    )
+
+    store.record_fill_event(event)
+
+    with Session(store.engine) as session:
+        order = session.execute(select(ExchangeOrder)).scalars().one()
+        assert order.exchange_order_id == "OID-H"
+        assert order.client_order_id == "kolabi-M-head-1"
+
+
 def test_kraken_fill_payload_maps_side_type_and_raw_payload(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))

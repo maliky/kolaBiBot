@@ -169,6 +169,49 @@ def test_place_tail_translates_to_one_tail_place_command() -> None:
     )
 
 
+def test_place_tail_translates_legacy_reduce_only_trigger_suffixes() -> None:
+    state = sample_state()
+    state = PairCycleState(
+        pair=sample_pair("pair-a", tail_order_type="S-"),
+        head_state=state.head_state,
+        tail_state=state.tail_state,
+        played_quantity=state.played_quantity,
+    )
+
+    command = plan_runtime_commands(
+        state,
+        (PairIntent(PairIntentKind.PLACE_TAIL),),
+        symbol=Symbol("PI_XBTUSD"),
+    )[0]
+
+    assert isinstance(command, PlaceTailCommand)
+    assert command.request.ordType == "S"
+    assert command.request.execInst == "ReduceOnly,LastPrice"
+    assert command.legacy_order is not None
+    assert command.legacy_order["ordType"] == "S"
+    assert command.legacy_order["execInst"] == "ReduceOnly,LastPrice"
+
+
+def test_place_tail_translates_legacy_fair_price_trigger_suffix() -> None:
+    state = sample_state()
+    state = PairCycleState(
+        pair=sample_pair("pair-a", tail_order_type="Sf-"),
+        head_state=state.head_state,
+        tail_state=state.tail_state,
+        played_quantity=state.played_quantity,
+    )
+
+    command = plan_runtime_commands(
+        state,
+        (PairIntent(PairIntentKind.PLACE_TAIL),),
+        symbol=Symbol("PI_XBTUSD"),
+    )[0]
+
+    assert isinstance(command, PlaceTailCommand)
+    assert command.request.ordType == "S"
+    assert command.request.execInst == "ReduceOnly,MarkPrice"
+
+
 def test_amend_tail_with_full_identity_translates_to_one_amend_command() -> None:
     state = sample_state(
         played_quantity=Decimal("1"),

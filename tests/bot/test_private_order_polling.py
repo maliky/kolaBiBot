@@ -239,3 +239,76 @@ def test_private_order_poller_injects_side_aware_reference_price() -> None:
     asyncio.run(source.pump(_Runtime()))
 
     assert emitted[0].reply["reference_price"] == 101.0
+
+
+def test_private_order_poller_retries_fresh_unmatched_head_fill() -> None:
+    now = datetime.now(timezone.utc)
+    record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="filled",
+        exchange_order_id="OID-H",
+        client_order_id="CID-H",
+        quantity=3.0,
+        filled_quantity=3.0,
+        local_id=7,
+        local_timestamp=now.isoformat(),
+    )
+
+    class _Client:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def fetch_private_orders_since(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return (record,)
+            return ()
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.symbol = "PI_XBTUSD"
+            self.running = True
+            self.match_attempts = 0
+            self.state = StrategyState(
+                launched_at=now,
+                strategy_id="demo",
+                pairs={
+                    "pair-a": PairCycleState(
+                        pair=sample_pair("pair-a"),
+                        head_identity=OrderIdentity(
+                            pair_name="pair-a",
+                            role="head",
+                            client_order_id="CID-H",
+                            exchange_order_id="OID-H",
+                        ),
+                    )
+                },
+            )
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return False
+
+        async def enqueue(self, event) -> None:
+            emitted.append(event)
+            self.running = False
+
+        def record_targets_head(self, record) -> bool:
+            return self.head_pair_state_for_record(record) is not None
+
+        def head_pair_state_for_record(self, record) -> PairCycleState | None:
+            self.match_attempts += 1
+            if self.match_attempts == 1:
+                return None
+            return self.state.pairs["pair-a"]
+
+    emitted = []
+    client = _Client()
+    runtime = _Runtime()
+    source = KrakenPrivateOrderPollingSource(client, poll_seconds=0.0)
+
+    asyncio.run(source.pump(runtime))
+
+    assert client.calls == 2
+    assert len(emitted) == 1
+    assert emitted[0].kind.value == "played_and_canceled"
