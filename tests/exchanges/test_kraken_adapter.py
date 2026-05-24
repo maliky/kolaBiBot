@@ -150,6 +150,50 @@ def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):
     assert "limitPrice" not in sent_payload
 
 
+def test_place_order_merges_execinst_and_reduceonly_without_duplicate_kwarg(tmp_path):
+    session = DummySession(
+        [
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "OID-3",
+                    "cli_ord_id": "CID-3",
+                    "limit_price": 79000.0,
+                    "qty": 1,
+                    "filled": 0,
+                    "direction": 0,
+                    "reason": "new_placed_order_by_user",
+                    "last_update_time": 1778371200000,
+                },
+            }
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    ack = adapter.place_order(
+        side="buy",
+        orderQty=1,
+        price=79000.0,
+        type_="LIMIT",
+        execInst="ParticipateDoNotInitiate",
+        reduceOnly=True,
+        clOrdID="CID-3",
+    )
+
+    assert ack.order_id == "OID-3"
+    sent_payload = dict(session.calls[0]["data"])
+    assert sent_payload["postOnly"] is True
+    assert sent_payload["reduceOnly"] is True
+
+
 def test_build_exec_orders_maps_rows_and_fills():
     order = ExchangeOrder(
         id=1,

@@ -14,6 +14,7 @@ from kolabi.bot.persistence import OrderRecorder, PersistenceConfig
 from kolabi.bot.strategy_runtime import (
     KrakenPrivateOrderPollingSource,
     KrakenPublicTriggerSource,
+    PublicRuntimeStateReader,
     SimulatedExecutor,
     StrategyRunResult,
     StrategyRuntime,
@@ -290,7 +291,9 @@ class BotService:
         if simulate:
             return StaticHookSource()
         if self.runtime_state is not None:
-            return KrakenPublicTriggerSource(self.runtime_state)
+            return KrakenPublicTriggerSource(
+                cast(PublicRuntimeStateReader, self.runtime_state)
+            )
         return StaticHookSource()
 
     def _build_private_source(self, *, simulate: bool):
@@ -350,16 +353,22 @@ class AdapterExchangePort(ExchangePort):
         return self.adapter.cancel_order(command.request.clOrdID)
 
     def _place(self, request: Any) -> OrderAck:
+        params: dict[str, Any] = {}
+        if request.clOrdID is not None:
+            params["clOrdID"] = request.clOrdID
+        if request.execInst is not None:
+            params["execInst"] = request.execInst
+        if request.text is not None:
+            params["text"] = request.text
+        if request.oDelta is not None:
+            params["oDelta"] = request.oDelta
         return self.adapter.place_order(
             request.side,
             request.orderQty,
             price=request.price,
             stopPx=request.stopPx,
             type_=request.ordType,
-            clOrdID=request.clOrdID,
-            execInst=request.execInst,
-            text=request.text,
-            oDelta=request.oDelta,
+            **params,
         )
 
     def _amend(self, request: Any) -> OrderAck:

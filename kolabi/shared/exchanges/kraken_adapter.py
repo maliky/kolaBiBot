@@ -579,7 +579,12 @@ class KrakenFuturesAdapter(ExchangeABC):
         type_: str = "LIMIT",
         **params: Any,
     ) -> OrderAck:
-        exec_inst = "ReduceOnly" if params.pop("reduceOnly", False) else ""
+        requested_exec_inst = str(params.pop("execInst", "") or "")
+        reduce_only = bool(params.pop("reduceOnly", False))
+        exec_flags = [flag for flag in requested_exec_inst.split(",") if flag]
+        if reduce_only and "ReduceOnly" not in exec_flags:
+            exec_flags.append("ReduceOnly")
+        exec_inst = ",".join(exec_flags)
         response = self.place(
             orderQty=float(orderQty),
             side=side,

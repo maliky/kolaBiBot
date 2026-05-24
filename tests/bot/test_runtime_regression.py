@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
 
 from kolabi.bot.indicators import DummyIndicatorClient
-from kolabi.bot.service import BotConfig, BotService
+from kolabi.bot.service import AdapterExchangePort, BotConfig, BotService
 from kolabi.bot.strategy_runtime import StrategyRunResult
 from kolabi.bot.tsv import read_strategy_file
 from kolabi.shared.config import ExchangeConfig
+from kolabi.shared.core.models import OrderAck
+from kolabi.shared.core.runtime_types import PlaceHeadCommand, PlaceOrderCommandRequest, RuntimeCommandKind, Symbol
 
 
 def test_demo_ada_strategy_parsed_and_planned_on_active_runtime() -> None:
@@ -61,3 +64,62 @@ def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) ->
 def test_active_runtime_no_longer_depends_on_market_auditor() -> None:
     source = Path("kolabi/bot/service.py").read_text()
     assert "MarketAuditor" not in source
+
+
+def test_adapter_exchange_port_forwards_execinst_once(monkeypatch) -> None:
+    class FakeAdapter:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.calls: list[dict[str, object]] = []
+
+        def place_order(self, side: str, orderQty: object, **params: object) -> OrderAck:
+            self.calls.append({"side": side, "orderQty": orderQty, **params})
+            return OrderAck(order_id="OID-1", status="New")
+
+    adapter_holder: dict[str, FakeAdapter] = {}
+
+    def build_adapter(**kwargs) -> FakeAdapter:
+        adapter = FakeAdapter(**kwargs)
+        adapter_holder["adapter"] = adapter
+        return adapter
+
+    monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _: build_adapter)
+    port = AdapterExchangePort(
+        exchange="kraken",
+        exchange_config=ExchangeConfig(
+            api_key="k",
+            api_secret="s",
+            base_url="https://demo-futures.kraken.com",
+            symbol="PI_XBTUSD",
+            adapter_kwargs={},
+        ),
+    )
+    command = PlaceHeadCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="sell",
+            ordType="Limit",
+            orderQty=11,
+            price=75000.0,
+            execInst="ParticipateDoNotInitiate",
+            clOrdID="CID-1",
+        ),
+    )
+
+    ack = asyncio.run(port.place_head(command))
+
+    assert ack.order_id == "OID-1"
+    assert adapter_holder["adapter"].calls == [
+        {
+            "side": "sell",
+            "orderQty": 11,
+            "price": 75000.0,
+            "stopPx": None,
+            "type_": "Limit",
+            "clOrdID": "CID-1",
+            "execInst": "ParticipateDoNotInitiate",
+        }
+    ]
