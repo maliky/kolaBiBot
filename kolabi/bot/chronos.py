@@ -241,7 +241,7 @@ class Chronos:
             pair_name = _command_pair_name(command)
             if pair_name is None:
                 continue
-            command_key = (pair_name, f"{command.kind}:{command.reason}", _command_client_order_id(command))
+            command_key = (pair_name, f"{command.kind}:{command.reason}", _command_dedupe_value(command))
             if command_key in self._seen_command_keys:
                 continue
             self._seen_command_keys.add(command_key)
@@ -306,6 +306,14 @@ def _command_pair_name(command: DragonSong) -> str | None:
 
 def _command_client_order_id(command: DragonSong) -> str | None:
     return getattr(command.request, "clOrdID", None)
+
+
+def _command_dedupe_value(command: DragonSong) -> str | None:
+    client_order_id = _command_client_order_id(command) or ""
+    price = getattr(command.request, "newPrice", None)
+    if price is None:
+        price = getattr(command.request, "stopPx", None)
+    return f"{client_order_id}:{price}"
 
 
 def resolve_pair_name(state: StrategyState, event: EggMove) -> str | None:

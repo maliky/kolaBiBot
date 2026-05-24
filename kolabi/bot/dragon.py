@@ -27,6 +27,7 @@ from kolabi.bot.domain import (
     OrderReason,
     classify_confirmed_move,
 )
+from kolabi.bot.pricing import reference_price
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     BrokerReply,
@@ -74,6 +75,24 @@ def head_hooked_from_market_snapshot(
     )
 
 
+def market_tick_from_market_snapshot(
+    *,
+    pair: OrderPairSpec,
+    snapshot: MarketSnapshotFact,
+) -> EggMove | None:
+    """Translate public market state into a targeted side-aware tick."""
+    reference = reference_price(pair.head.side, snapshot)
+    if reference <= 0:
+        return None
+    return EggMove(
+        kind=EggMoveKind.MARKET_TICK,
+        occurred_at=snapshot.occurred_at,
+        symbol=snapshot.symbol,
+        pair_name=pair.name,
+        reply={"reference_price": reference},
+    )
+
+
 def head_hooked_event(
     *,
     pair_name: str,
@@ -112,6 +131,30 @@ def head_submitted_from_ack(
         reply["price"] = ack.price
     return EggMove(
         kind=EggMoveKind.HEAD_SUBMITTED,
+        occurred_at=occurred_at or datetime.now(timezone.utc),
+        symbol=symbol,
+        pair_name=pair_name,
+        reply=reply,
+        is_private=False,
+    )
+
+
+def tail_submitted_from_ack(
+    *,
+    pair_name: str,
+    symbol: str,
+    ack: OrderAck,
+    client_order_id: str | None,
+    occurred_at: datetime | None = None,
+) -> EggMove:
+    reply: BrokerReply = {
+        "orderID": str(ack.order_id),
+        "ordStatus": ack.status,
+    }
+    if client_order_id is not None:
+        reply["clOrdID"] = client_order_id
+    return EggMove(
+        kind=EggMoveKind.TAIL_SUBMITTED,
         occurred_at=occurred_at or datetime.now(timezone.utc),
         symbol=symbol,
         pair_name=pair_name,

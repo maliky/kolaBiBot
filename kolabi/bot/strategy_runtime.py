@@ -26,8 +26,9 @@ from kolabi.bot.domain import (
     OrderIdentity,
     StrategySpec,
     StrategyState,
+    TailState,
 )
-from kolabi.bot.ids import head_client_order_id
+from kolabi.bot.ids import head_client_order_id, tail_client_order_id
 from kolabi.bot.order_building import head_order_dict
 from kolabi.bot.dragon import (
     MarketSnapshotFact,
@@ -35,8 +36,10 @@ from kolabi.bot.dragon import (
     head_hooked_from_market_snapshot,
     head_move_from_private_fact,
     head_submitted_from_ack,
+    market_tick_from_market_snapshot,
     private_order_fact_from_record,
     simulated_private_fill_from_submission,
+    tail_submitted_from_ack,
 )
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
@@ -179,16 +182,28 @@ class KrakenPublicTriggerSource:
                 occurred_at=datetime.now(timezone.utc),
             )
             for pair_name, pair_state in runtime.state.pairs.items():
-                if pair_state.head_state != HeadState.LATENT:
-                    continue
-                move = head_hooked_from_market_snapshot(
-                    pair=pair_state.pair,
-                    launched_at=runtime.state.launched_at,
-                    snapshot=snapshot,
-                )
+                if pair_state.head_state == HeadState.LATENT:
+                    move = head_hooked_from_market_snapshot(
+                        pair=pair_state.pair,
+                        launched_at=runtime.state.launched_at,
+                        snapshot=snapshot,
+                    )
+                    event_prefix = "public-hook"
+                else:
+                    if pair_state.tail_trail is None or pair_state.tail_state not in {
+                        TailState.HOOKED,
+                        TailState.SUBMITTED,
+                        TailState.LIVING,
+                    }:
+                        continue
+                    move = market_tick_from_market_snapshot(
+                        pair=pair_state.pair,
+                        snapshot=snapshot,
+                    )
+                    event_prefix = "public-market"
                 if move is None:
                     continue
-                event_id = f"public-hook:{pair_name}:{market.recorded_at or snapshot.occurred_at.isoformat()}"
+                event_id = f"{event_prefix}:{pair_name}:{market.recorded_at or snapshot.occurred_at.isoformat()}"
                 if event_id in self._seen_event_ids:
                     continue
                 self._seen_event_ids.add(event_id)
@@ -359,9 +374,32 @@ class StrategyRuntime:
                 request=request,
                 legacy_order=head_order_dict(pair, client_order_id=clordid),
             )
+        if isinstance(command, PlaceTailCommand) and command.request.clOrdID is None:
+            pair_state = self.state.pairs[command.request.pair_name]
+            clordid = tail_client_order_id(
+                pair_state.pair,
+                at=datetime.now(timezone.utc),
+            )
+            request = replace(command.request, clOrdID=clordid)
+            legacy_order = dict(command.legacy_order or {})
+            legacy_order["clOrdID"] = clordid
+            return replace(
+                command,
+                request=request,
+                legacy_order=legacy_order,
+            )
         return command
 
     def _followup_events(self, command: DragonSong, ack: OrderAck) -> tuple[EggMove, ...]:
+        if isinstance(command, PlaceTailCommand):
+            submitted_tail = tail_submitted_from_ack(
+                pair_name=command.pair_name,
+                symbol=self.symbol,
+                ack=ack,
+                client_order_id=command.request.clOrdID,
+                occurred_at=datetime.now(timezone.utc),
+            )
+            return (submitted_tail,)
         if not isinstance(command, PlaceHeadCommand):
             return ()
         submitted = head_submitted_from_ack(
