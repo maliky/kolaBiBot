@@ -14,3 +14,4 @@ notes.org
 secrets*
 .env*
 .python*
+*tmp*
