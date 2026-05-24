@@ -306,79 +306,75 @@ def _cancel_all_orders(adapter: Any) -> list[dict[str, object]]:
     payloads: list[dict[str, object]] = []
     live_orders = list(adapter.live_open_orders()) + list(adapter.live_trigger_orders())
     for order in live_orders:
-        order_id = (
-            order.get("orderID")
-            or order.get("order_id")
-            or order.get("clOrdID")
-            or order.get("cli_ord_id")
-        )
+        order_id = _extract_cancelable_order_id(order)
         if not order_id:
             continue
         payloads.append(ack_to_payload(adapter.cancel_order(str(order_id))))
     return payloads
 
 
+def _extract_cancelable_order_id(order: dict[str, object]) -> object | None:
+    """Return any exchange/client identity accepted by adapter cancellation."""
+    for key in (
+        "orderID",
+        "orderId",
+        "order_id",
+        "id",
+        "clOrdID",
+        "cliOrdId",
+        "cli_ord_id",
+        "client_order_id",
+    ):
+        value = order.get(key)
+        if value:
+            return value
+    return None
+
+
 def _close_position(adapter: Any) -> dict[str, object] | None:
     """Fermer la position existante via un ordre market reduce-only."""
     position_before = adapter.get_position()
-    qty = float(position_before.qty)
-    if qty == 0:
+    initial_qty = float(position_before.qty)
+    if initial_qty == 0:
         return None
-    side = "sell" if qty > 0 else "buy"
-    attempts = 1
-    ack = adapter.place_order(
-        side=side,
-        orderQty=abs(qty),
-        type_="MARKET",
-        reduceOnly=True,
-    )
+    side = "sell" if initial_qty > 0 else "buy"
+    attempts = 0
+    max_attempts = 3
+    ack: OrderAck | None = None
     position_after = position_before
     verification_error: str | None = None
-    for _ in range(10):
-        try:
-            position_after = adapter.get_position()
-        except Exception as exc:
-            verification_error = str(exc)
+    verification_reason = "position_still_open"
+    while attempts < max_attempts:
+        current_qty = float(position_after.qty)
+        if current_qty == 0.0:
+            verification_reason = "position_closed"
             break
-        if float(position_after.qty) == 0.0:
-            break
-        time.sleep(0.2)
-    if float(position_after.qty) != 0.0 and hasattr(adapter, "instrument"):
-        # Pour Kraken Futures, un close IOC peut rater si le prix de protection
-        # implicite n'est pas assez agressif. On retente avec un prix explicite.
-        for multiplier in (1.05, 1.10, 1.20):
+        attempts += 1
+        ack = adapter.place_order(
+            side=side,
+            orderQty=abs(current_qty),
+            type_="MARKET",
+            reduceOnly=True,
+        )
+        for _ in range(10):
             try:
-                instrument = adapter.instrument(position_after.symbol)
+                position_after = adapter.get_position()
             except Exception as exc:
                 verification_error = str(exc)
-                break
-            bid = float(instrument.get("bidPrice") or 0.0)
-            ask = float(instrument.get("askPrice") or 0.0)
-            aggressive_price = ask * multiplier if side == "buy" else bid / multiplier
-            attempts += 1
-            ack = adapter.place_order(
-                side=side,
-                orderQty=abs(float(position_after.qty)),
-                price=aggressive_price,
-                type_="MARKET",
-                reduceOnly=True,
-            )
-            for _ in range(10):
-                try:
-                    position_after = adapter.get_position()
-                except Exception as exc:
-                    verification_error = str(exc)
-                    break
-                if float(position_after.qty) == 0.0:
-                    break
-                time.sleep(0.2)
-            if verification_error is not None:
+                verification_reason = "position_check_failed"
                 break
             if float(position_after.qty) == 0.0:
+                verification_reason = "position_closed"
                 break
-    payload = ack_to_payload(ack)
+            time.sleep(0.2)
+            if verification_error is not None:
+                break
+        if verification_error is not None or float(position_after.qty) == 0.0:
+            break
+    payload = ack_to_payload(ack) if ack is not None else {}
     payload["attempts"] = attempts
     payload["closed"] = float(position_after.qty) == 0.0
+    payload["verification_reason"] = verification_reason
     payload["position_before"] = position_to_payload(position_before)
     payload["position_after"] = position_to_payload(position_after)
     payload["verification_error"] = verification_error
@@ -498,9 +494,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             type_="MARKET",
         )
         payload = ack_to_payload(ack)
+        executed_qty = _safe_float(payload.get("executed_qty")) or 0.0
         if (
             str(payload.get("status", "")).lower() == "filled"
-            or float(payload.get("executed_qty") or 0.0) > 0.0
+            or executed_qty > 0.0
         ):
             payload["verification"] = {"filled": True, "reason": "ack_execution"}
             print_json(payload)

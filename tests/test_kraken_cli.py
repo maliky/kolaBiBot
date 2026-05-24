@@ -262,6 +262,31 @@ def test_cancel_all_command_cancels_open_orders(monkeypatch, capsys):
     assert '"order_id": "OID-2"' in output
 
 
+def test_cancel_all_command_accepts_client_order_id_only(monkeypatch, capsys):
+    adapter = DummyAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "live_open_orders",
+        lambda: [{"client_order_id": "CID-1", "symbol": "PI_XBTUSD"}],
+    )
+    monkeypatch.setattr(
+        adapter,
+        "live_trigger_orders",
+        lambda: [{"cliOrdId": "CID-2", "symbol": "PI_XBTUSD"}],
+    )
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.build_adapter",
+        lambda exchange, symbol, environment: adapter,
+    )
+
+    exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "cancel-all"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"order_id": "CID-1"' in output
+    assert '"order_id": "CID-2"' in output
+
+
 def test_open_orders_command_prints_live_resting_orders(monkeypatch, capsys):
     adapter = DummyAdapter()
     monkeypatch.setattr(
@@ -311,7 +336,7 @@ def test_close_all_command_cancels_orders_and_closes_long_position(monkeypatch, 
     assert adapter.placed_orders[-1]["reduceOnly"] is True
 
 
-def test_close_all_retries_with_explicit_market_price_when_still_open(
+def test_close_all_retries_with_reduce_only_market_when_still_open(
     monkeypatch, capsys
 ):
     adapter = DummyAdapter()
@@ -344,7 +369,9 @@ def test_close_all_retries_with_explicit_market_price_when_still_open(
     output = capsys.readouterr().out
     assert '"closed": true' in output
     assert '"attempts": 2' in output
-    assert adapter.placed_orders[-1]["price"] == 106.05000000000001
+    assert all(order["type_"] == "MARKET" for order in adapter.placed_orders)
+    assert all(order["reduceOnly"] is True for order in adapter.placed_orders)
+    assert all(order["price"] is None for order in adapter.placed_orders)
 
 
 def test_close_all_reports_verification_timeout_without_traceback(monkeypatch, capsys):
