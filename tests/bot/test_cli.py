@@ -64,6 +64,41 @@ def test_run_once_parser_accepts_legacy_short_flags() -> None:
     assert pair.amount_type == "qAt%pD"
 
 
+def test_run_once_parser_keeps_percent_tail_percent_head_grammar() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "run-once",
+            "-m",
+            "XSellPercentTail",
+            "-x",
+            "-1",
+            "1",
+            "-q",
+            "1",
+            "-T",
+            "0.5",
+            "-o",
+            "M",
+            "-y",
+            "S-",
+            "-c",
+            "sell",
+            "-a",
+            "qAt%p%",
+            "--dry-run",
+        ]
+    )
+
+    pair = build_single_strategy(args).pairs[0]
+
+    assert pair.head_quantity_type == "qA"
+    assert pair.tail_price_spec_type == "t%"
+    assert pair.head_price_type == "p%"
+    assert pair.tail_price_spec == 0.5
+
+
 def test_run_once_command_dry_run_prints_canonical_structure(capsys) -> None:
     args = argparse.Namespace(
         name="XSellTail",
