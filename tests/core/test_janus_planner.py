@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import cast
 
@@ -15,6 +16,8 @@ from kolabi.bot.domain import (
     PairIntentKind,
     Side,
     TailSpec,
+    TailTrailSample,
+    TailTrailState,
     TailState,
     TimeWindow,
 )
@@ -168,6 +171,47 @@ def test_amend_tail_with_full_identity_translates_to_one_amend_command() -> None
         newPrice=Decimal("99.0"),
         newQty=Decimal("1"),
     )
+
+
+def test_tail_commands_use_dynamic_trail_stop_when_present() -> None:
+    now = datetime.now(timezone.utc)
+    state = sample_state(
+        played_quantity=Decimal("1"),
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+    )
+    state = PairCycleState(
+        pair=state.pair,
+        head_state=state.head_state,
+        tail_state=state.tail_state,
+        played_quantity=state.played_quantity,
+        tail_identity=state.tail_identity,
+        tail_trail=TailTrailState(
+            entry_reference_price=Decimal("100"),
+            baseline_width=Decimal("1"),
+            current_stop_price=Decimal("101.2"),
+            previous_stop_price=Decimal("99"),
+            samples=(TailTrailSample(now, Decimal("102")),),
+        ),
+    )
+
+    place, amend = plan_runtime_commands(
+        state,
+        (
+            PairIntent(PairIntentKind.PLACE_TAIL),
+            PairIntent(PairIntentKind.AMEND_TAIL),
+        ),
+        symbol=Symbol("PI_XBTUSD"),
+    )
+
+    assert isinstance(place, PlaceTailCommand)
+    assert place.request.stopPx == Decimal("101.2")
+    assert isinstance(amend, AmendTailCommand)
+    assert amend.request.newPrice == Decimal("101.2")
 
 
 def test_amend_tail_without_identity_raises() -> None:
