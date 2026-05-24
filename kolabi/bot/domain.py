@@ -126,6 +126,8 @@ class ExecutionOutcome(StrEnum):
 class EggMoveKind(StrEnum):
     HEAD_HOOKED = "head_hooked"
     HEAD_SUBMITTED = "head_submitted"
+    TAIL_SUBMITTED = "tail_submitted"
+    MARKET_TICK = "market_tick"
     HEAD_UNADMITTED = "head_unadmitted"
     HEAD_ADMITTED = "head_admitted"
     NOT_PLAYED_NOR_CANCELED = "not_played_nor_canceled"
@@ -244,6 +246,21 @@ class ConfirmedOrder:
 
 
 @dataclass(frozen=True)
+class TailTrailSample:
+    occurred_at: datetime
+    reference_price: Decimal
+
+
+@dataclass(frozen=True)
+class TailTrailState:
+    entry_reference_price: Decimal
+    baseline_width: Decimal
+    current_stop_price: Decimal
+    previous_stop_price: Decimal
+    samples: tuple[TailTrailSample, ...]
+
+
+@dataclass(frozen=True)
 class PairCycleState:
     pair: OrderPairSpec
     head_state: HeadState = HeadState.LATENT
@@ -251,6 +268,7 @@ class PairCycleState:
     tail_mode: TailMode | None = None
     head_identity: OrderIdentity | None = None
     tail_identity: OrderIdentity | None = None
+    tail_trail: TailTrailState | None = None
     played_quantity: Decimal | None = None
     latest_commands: Mapping[str, tuple[str, ...]] | None = None
     pair_id: str | None = None

@@ -31,6 +31,7 @@ from kolabi.bot.domain import (
     TailState,
 )
 from kolabi.bot.dragon import reason_from_status_or_reason
+from kolabi.bot.tail_tracking import initial_tail_trail, step_tail_trail
 from kolabi.shared.core.runtime_types import to_decimal
 
 
@@ -43,6 +44,16 @@ def step_pair(
     A reducer maps current immutable state plus one typed move to next immutable
     state and emitted command intents, with no side effects.
     """
+    if move.kind == EggMoveKind.TAIL_SUBMITTED:
+        if state.tail_state in {None, TailState.LATENT, TailState.FAILED, TailState.CLOSED}:
+            return state, ()
+        next_state = replace(
+            state,
+            tail_state=TailState.SUBMITTED,
+            tail_identity=tail_identity_from_move(state, move),
+        )
+        return next_state, ()
+
     if state.head_state in {HeadState.FAILED, HeadState.CLOSED}:
         return state, ()
 
@@ -58,6 +69,32 @@ def step_pair(
             head_state=HeadState.SUBMITTED,
             head_identity=head_identity_from_move(state, move),
         )
+        return next_state, ()
+
+    if move.kind == EggMoveKind.MARKET_TICK:
+        if state.tail_trail is None or state.tail_state in {
+            None,
+            TailState.LATENT,
+            TailState.CLOSED,
+            TailState.FAILED,
+        }:
+            return state, ()
+        reference_price = reference_price_from_move(state, move)
+        if reference_price is None:
+            return state, ()
+        next_trail = step_tail_trail(
+            state.pair,
+            state.tail_trail,
+            reference_price,
+            move.occurred_at,
+            symbol=move.symbol,
+        )
+        next_state = replace(state, tail_trail=next_trail)
+        if (
+            next_trail.current_stop_price != state.tail_trail.current_stop_price
+            and _has_full_tail_identity(next_state)
+        ):
+            return next_state, (PairIntent(PairIntentKind.AMEND_TAIL),)
         return next_state, ()
 
     if move.kind == EggMoveKind.NOT_PLAYED_NOR_CANCELED:
@@ -94,6 +131,7 @@ def step_pair(
             head_identity=head_identity_from_move(state, move),
             tail_state=TailState.LIVING,
             tail_mode=TailMode.FLAPPING,
+            tail_trail=tail_trail_from_move(state, move),
             played_quantity=played_quantity,
         )
         return next_state, (_tail_intent_for_state(next_state),)
@@ -112,6 +150,7 @@ def step_pair(
             head_identity=head_identity_from_move(state, move),
             tail_state=_next_closed_tail_state(state),
             tail_mode=TailMode.FLYING,
+            tail_trail=tail_trail_from_move(state, move),
             played_quantity=played_quantity,
         )
         return next_state, (_tail_intent_for_state(next_state),)
@@ -120,12 +159,17 @@ def step_pair(
 
 
 def _tail_intent_for_state(state: PairCycleState) -> PairIntent:
-    if state.tail_identity is not None or state.tail_state in {
-        TailState.SUBMITTED,
-        TailState.LIVING,
-    }:
+    if _has_full_tail_identity(state):
         return PairIntent(PairIntentKind.AMEND_TAIL)
     return PairIntent(PairIntentKind.PLACE_TAIL)
+
+
+def _has_full_tail_identity(state: PairCycleState) -> bool:
+    return (
+        state.tail_identity is not None
+        and bool(state.tail_identity.client_order_id)
+        and bool(state.tail_identity.exchange_order_id)
+    )
 
 
 def _next_closed_tail_state(state: PairCycleState) -> TailState:
@@ -160,6 +204,24 @@ def head_identity_from_move(
     )
 
 
+def tail_identity_from_move(
+    state: PairCycleState,
+    move: EggMove,
+) -> OrderIdentity | None:
+    reply = move.reply or {}
+    order = move.order or {}
+    order_id = reply.get("orderID")
+    client_order_id = reply.get("clOrdID") or order.get("clOrdID")
+    if order_id is None and client_order_id is None:
+        return state.tail_identity
+    return OrderIdentity(
+        pair_name=state.pair.name,
+        role="tail",
+        client_order_id=str(client_order_id) if client_order_id is not None else None,
+        exchange_order_id=str(order_id) if order_id is not None else None,
+    )
+
+
 def played_quantity_from_move(state: PairCycleState, move: EggMove) -> Decimal | None:
     """Read played quantity from move payload and return unknown when missing."""
     reply = move.reply or {}
@@ -169,6 +231,29 @@ def played_quantity_from_move(state: PairCycleState, move: EggMove) -> Decimal |
             parsed = to_decimal(value)
             return parsed if parsed >= Decimal("0") else Decimal("0")
     return None
+
+
+def reference_price_from_move(state: PairCycleState, move: EggMove) -> Decimal | None:
+    """Read the side-aware public reference price from a reducer move."""
+    for payload in (move.reply, move.order):
+        if payload is None:
+            continue
+        for key in ("reference_price", "refPrice", "markPrice", "price", "lastPx"):
+            value = payload.get(key)
+            if isinstance(value, (int, float, Decimal, str)):
+                return to_decimal(value)
+    if state.tail_trail is not None:
+        return state.tail_trail.entry_reference_price
+    return None
+
+
+def tail_trail_from_move(state: PairCycleState, move: EggMove):
+    if state.tail_trail is not None:
+        return state.tail_trail
+    reference_price = reference_price_from_move(state, move)
+    if reference_price is None:
+        return None
+    return initial_tail_trail(state.pair, reference_price, move.occurred_at)
 
 
 def egg_move_from_confirmed_head(

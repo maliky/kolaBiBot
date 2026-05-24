@@ -81,8 +81,9 @@ def tail_order_dict(state: PairCycleState) -> OrderDict:
     quantity = resolve_tail_quantity(state)
     if quantity is not None:
         order["orderQty"] = cast(OrderQty, to_decimal(quantity))
-    if pair.tail_price_spec is not None:
-        order["stopPx"] = cast(StopPrice, to_decimal(pair.tail_price_spec))
+    stop_price = tail_stop_price(state)
+    if stop_price is not None:
+        order["stopPx"] = cast(StopPrice, to_decimal(stop_price))
     if pair.tail.delta is not None:
         order["oDelta"] = cast(PriceOffset, to_decimal(pair.tail.delta))
     return order
@@ -90,16 +91,13 @@ def tail_order_dict(state: PairCycleState) -> OrderDict:
 
 def tail_place_request(state: PairCycleState) -> PlaceOrderCommandRequest:
     quantity = resolve_tail_quantity(state)
+    stop_price = tail_stop_price(state)
     return PlaceOrderCommandRequest(
         pair_name=state.pair.name,
         side=opposite_side(state.pair.head.side).value,
         ordType=state.pair.tail.order_type,
         orderQty=None if quantity is None else cast(OrderQty, to_decimal(quantity)),
-        stopPx=(
-            None
-            if state.pair.tail_price_spec is None
-            else cast(StopPrice, to_decimal(state.pair.tail_price_spec))
-        ),
+        stopPx=None if stop_price is None else cast(StopPrice, to_decimal(stop_price)),
         oDelta=(
             None
             if state.pair.tail.delta is None
@@ -114,13 +112,14 @@ def tail_amend_order_dict(state: PairCycleState) -> OrderDict:
         raise ValueError("tail amend requires an existing tail identity")
     if not state.tail_identity.client_order_id or not state.tail_identity.exchange_order_id:
         raise ValueError("tail amend requires both client and exchange order IDs")
-    if state.pair.tail_price_spec is None:
+    stop_price = tail_stop_price(state)
+    if stop_price is None:
         raise ValueError("tail amend requires a planned tail price")
 
     order = tail_order_dict(state)
     order["clOrdID"] = state.tail_identity.client_order_id
     order["orderID"] = state.tail_identity.exchange_order_id
-    order["newPrice"] = cast(StopPrice, to_decimal(state.pair.tail_price_spec))
+    order["newPrice"] = cast(StopPrice, to_decimal(stop_price))
     quantity = resolve_tail_quantity(state)
     if quantity is not None:
         order["newQty"] = cast(OrderQty, to_decimal(quantity))
@@ -132,7 +131,8 @@ def tail_amend_request(state: PairCycleState) -> AmendOrderCommandRequest:
         raise ValueError("tail amend requires an existing tail identity")
     if not state.tail_identity.client_order_id or not state.tail_identity.exchange_order_id:
         raise ValueError("tail amend requires both client and exchange order IDs")
-    if state.pair.tail_price_spec is None:
+    stop_price = tail_stop_price(state)
+    if stop_price is None:
         raise ValueError("tail amend requires a planned tail price")
     quantity = resolve_tail_quantity(state)
     return AmendOrderCommandRequest(
@@ -141,7 +141,7 @@ def tail_amend_request(state: PairCycleState) -> AmendOrderCommandRequest:
         ordType=state.pair.tail.order_type,
         orderID=state.tail_identity.exchange_order_id,
         clOrdID=state.tail_identity.client_order_id,
-        newPrice=cast(StopPrice, to_decimal(state.pair.tail_price_spec)),
+        newPrice=cast(StopPrice, to_decimal(stop_price)),
         newQty=None if quantity is None else cast(OrderQty, to_decimal(quantity)),
     )
 
@@ -234,3 +234,10 @@ def tail_command(
 def with_played_quantity(state: PairCycleState, quantity: Decimal) -> PairCycleState:
     """Return updated pair state with a normalized played quantity."""
     return replace(state, played_quantity=max(quantity, Decimal("0")))
+
+
+def tail_stop_price(state: PairCycleState) -> Decimal | float | None:
+    """Resolve dynamic trail stop first, then the static transitional value."""
+    if state.tail_trail is not None:
+        return state.tail_trail.current_stop_price
+    return state.pair.tail_price_spec
