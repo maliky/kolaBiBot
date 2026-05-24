@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Iterable, Optional, Protocol, TypedDict, cast
 
 from kolabi.bot.indicators import (
@@ -56,6 +57,10 @@ class ExchangeAdapterLike(Protocol):
     ) -> OrderAck: ...
     def amend_order(self, order_id: str, **params: object) -> OrderAck: ...
     def cancel_order(self, order_id: str) -> OrderAck: ...
+
+
+class TriggerOrderReader(Protocol):
+    def live_trigger_orders(self) -> list[dict[str, Any]]: ...
 
 
 @dataclass
@@ -346,7 +351,9 @@ class AdapterExchangePort(ExchangePort):
         return self._place(command.request)
 
     async def place_tail(self, command: PlaceTailCommand) -> OrderAck:
-        return self._place(command.request)
+        ack = self._place(command.request)
+        await self._verify_tail_trigger(command.request, ack)
+        return ack
 
     async def amend_head(self, command: AmendHeadCommand) -> OrderAck:
         return self._amend_head(command.request)
@@ -380,6 +387,38 @@ class AdapterExchangePort(ExchangePort):
             **params,
         )
 
+    async def _verify_tail_trigger(
+        self,
+        request: PlaceOrderCommandRequest,
+        ack: OrderAck,
+    ) -> None:
+        if request.stopPx is None or request.orderQty is None:
+            return
+        if not hasattr(self.adapter, "live_trigger_orders"):
+            return
+        if not _ack_can_rest_as_trigger(ack):
+            raise RuntimeError(
+                "tail trigger order rejected by exchange: "
+                f"pair={request.pair_name} clOrdID={request.clOrdID or '-'} "
+                f"orderID={ack.order_id} status={ack.status} "
+                f"stopPx={request.stopPx} qty={request.orderQty}"
+            )
+        reader = cast(TriggerOrderReader, self.adapter)
+        deadline = asyncio.get_running_loop().time() + 10.0
+        while True:
+            orders = reader.live_trigger_orders()
+            match = _matching_tail_trigger_order(orders, request, ack)
+            if match is not None:
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError(
+                    "tail trigger order not visible after placement: "
+                    f"pair={request.pair_name} clOrdID={request.clOrdID or '-'} "
+                    f"orderID={ack.order_id} status={ack.status} "
+                    f"stopPx={request.stopPx} qty={request.orderQty}"
+                )
+            await asyncio.sleep(0.5)
+
     def _amend_head(self, request: AmendOrderCommandRequest) -> OrderAck:
         params: dict[str, Any] = {}
         if request.newPrice is not None:
@@ -404,3 +443,75 @@ class AdapterExchangePort(ExchangePort):
         if request.text is not None:
             params["text"] = request.text
         return self.adapter.amend_order(request.orderID, **params)
+
+
+def _matching_tail_trigger_order(
+    orders: list[dict[str, Any]],
+    request: PlaceOrderCommandRequest,
+    ack: OrderAck,
+) -> dict[str, Any] | None:
+    for order in orders:
+        if not _matches_tail_identity(order, request, ack):
+            continue
+        if request.side and not _matches_text(order.get("side"), request.side):
+            continue
+        if not _matches_quantity(order.get("qty"), request.orderQty):
+            continue
+        if not _matches_price(order.get("stop_price"), request.stopPx):
+            continue
+        if not bool(order.get("reduce_only", False)):
+            continue
+        return order
+    return None
+
+
+def _ack_can_rest_as_trigger(ack: OrderAck) -> bool:
+    status = ack.status.replace(" ", "_").replace("-", "_").lower()
+    return status in {"new", "open", "placed", "submitted"}
+
+
+def _matches_tail_identity(
+    order: dict[str, Any],
+    request: PlaceOrderCommandRequest,
+    ack: OrderAck,
+) -> bool:
+    client_id = str(order.get("client_order_id") or "")
+    order_id = str(order.get("order_id") or "")
+    if request.clOrdID and client_id == request.clOrdID:
+        return True
+    return bool(ack.order_id) and order_id == str(ack.order_id)
+
+
+def _matches_text(left: object, right: str) -> bool:
+    return str(left or "").lower() == right.lower()
+
+
+def _matches_quantity(left: object, right: object | None) -> bool:
+    if right is None:
+        return True
+    left_decimal = _decimal_or_none(left)
+    right_decimal = _decimal_or_none(right)
+    if left_decimal is None or right_decimal is None:
+        return False
+    return abs(left_decimal - right_decimal) <= Decimal("0.00000001")
+
+
+def _matches_price(left: object, right: object | None) -> bool:
+    if right is None:
+        return True
+    left_decimal = _decimal_or_none(left)
+    right_decimal = _decimal_or_none(right)
+    if left_decimal is None or right_decimal is None:
+        return False
+    tolerance = max(Decimal("0.01"), abs(right_decimal) * Decimal("0.000001"))
+    return abs(left_decimal - right_decimal) <= tolerance
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, (int, float, str)):
+        return Decimal(str(value))
+    return None

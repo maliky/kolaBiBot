@@ -268,10 +268,18 @@ class KrakenRuntimeStateClient:
         records: list[PrivateOrderRecord] = []
         for row in rows:
             if after_local_timestamp is not None:
-                if row.local_timestamp < after_local_timestamp:
+                row_timestamp = _normalise_cursor_timestamp(
+                    row.local_timestamp,
+                    after_local_timestamp,
+                )
+                cursor_timestamp = _normalise_cursor_timestamp(
+                    after_local_timestamp,
+                    row.local_timestamp,
+                )
+                if row_timestamp < cursor_timestamp:
                     continue
                 if (
-                    row.local_timestamp == after_local_timestamp
+                    row_timestamp == cursor_timestamp
                     and after_local_id is not None
                     and row.id <= after_local_id
                 ):
@@ -497,6 +505,13 @@ def _public_indicator_records(
             )
         )
     return tuple(records)
+
+
+def _normalise_cursor_timestamp(value: datetime, peer: datetime) -> datetime:
+    """Compare SQLite naive timestamps with aware runtime cursors safely."""
+    if value.tzinfo is None or peer.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:

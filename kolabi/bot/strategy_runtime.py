@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from itertools import count
 from typing import Protocol, cast
@@ -231,21 +231,32 @@ class KrakenPrivateOrderPollingSource:
         self.poll_seconds = poll_seconds
         self.after_local_timestamp: datetime | None = None
         self.after_local_id: int | None = None
+        self._pending_records: list[PrivateOrderRecord] = []
+        self._cursor_initialised = False
 
     async def pump(self, runtime: RuntimeQueueLike) -> None:
         while runtime.running:
+            if not self._cursor_initialised:
+                self.after_local_timestamp = runtime.state.launched_at - timedelta(seconds=5)
+                self.after_local_id = None
+                self._cursor_initialised = True
             records = self.client.fetch_private_orders_since(
                 after_local_timestamp=self.after_local_timestamp,
                 after_local_id=self.after_local_id,
                 symbol=runtime.symbol,
             )
-            for record in records:
+            candidates = tuple(self._pending_records) + records
+            self._pending_records = []
+            for record in candidates:
                 occurred_at = _record_timestamp(record)
-                if occurred_at is not None:
-                    self.after_local_timestamp = occurred_at
-                self.after_local_id = record.local_id
+                is_new_record = record in records
+                if is_new_record:
+                    if occurred_at is not None:
+                        self.after_local_timestamp = occurred_at
+                    self.after_local_id = record.local_id
                 pair_state = runtime.head_pair_state_for_record(record)
                 if pair_state is None:
+                    self._pending_records.append(record)
                     continue
                 fact = private_order_fact_from_record(
                     record,
@@ -322,10 +333,7 @@ class StrategyRuntime:
 
     @property
     def all_pairs_terminal(self) -> bool:
-        return all(
-            pair_state.head_state in {HeadState.CLOSED, HeadState.FAILED}
-            for pair_state in self.state.pairs.values()
-        )
+        return all(_pair_runtime_complete(pair_state) for pair_state in self.state.pairs.values())
 
     async def enqueue(self, event: EggMove) -> None:
         await self.event_queue.put(event)
@@ -445,13 +453,24 @@ class StrategyRuntime:
             occurred_at=datetime.now(timezone.utc),
         )
         if not self.simulate:
-            return (submitted,)
-        played_quantity = _played_quantity_from_request(command.request)
+            live_played_quantity = _played_quantity_from_ack(ack)
+            if live_played_quantity is None or live_played_quantity <= 0:
+                return (submitted,)
+            confirmed = simulated_private_fill_from_submission(
+                submitted,
+                played_quantity=live_played_quantity,
+                closed=_ack_is_terminal(ack),
+            )
+            confirmed = _copy_reference_price(confirmed, submitted)
+            return (submitted, confirmed)
+        simulated_played_quantity = _played_quantity_from_request(command.request)
+        submitted_with_reference = _with_simulated_reference_price(submitted, command)
         confirmed = simulated_private_fill_from_submission(
-            submitted,
-            played_quantity=played_quantity,
+            submitted_with_reference,
+            played_quantity=simulated_played_quantity,
             closed=True,
         )
+        confirmed = _copy_reference_price(confirmed, submitted_with_reference)
         return (submitted, confirmed)
 
 
@@ -487,6 +506,60 @@ def _pair_state_from_spec(pair):
     from kolabi.bot.domain import PairCycleState
 
     return PairCycleState(pair=pair)
+
+
+def _pair_runtime_complete(pair_state: PairCycleState) -> bool:
+    """Return true only when head and required tail work have completed."""
+    if pair_state.head_state == HeadState.FAILED:
+        return True
+    if pair_state.head_state != HeadState.CLOSED:
+        return False
+    played = pair_state.played_quantity is not None and pair_state.played_quantity > 0
+    if not played:
+        return True
+    return pair_state.tail_state in {
+        TailState.SUBMITTED,
+        TailState.LIVING,
+        TailState.CLOSED,
+        TailState.FAILED,
+    }
+
+
+def _with_simulated_reference_price(
+    submitted: EggMove,
+    command: PlaceHeadCommand,
+) -> EggMove:
+    """Give relative tails a deterministic reference in simulation mode."""
+    reply = dict(submitted.reply or {})
+    if "reference_price" not in reply:
+        reference = command.request.price or command.request.stopPx or Decimal("100")
+        reply["reference_price"] = float(reference)
+    return replace(submitted, reply=reply)
+
+
+def _copy_reference_price(move: EggMove, source: EggMove) -> EggMove:
+    source_reply = source.reply or {}
+    reference = source_reply.get("reference_price", source_reply.get("price"))
+    if reference is None:
+        return move
+    reply = dict(move.reply or {})
+    reply["reference_price"] = reference
+    return replace(move, reply=reply)
+
+
+def _played_quantity_from_ack(ack: OrderAck) -> Decimal | None:
+    if ack.executed_qty is None:
+        return None
+    return Decimal(str(ack.executed_qty))
+
+
+def _ack_is_terminal(ack: OrderAck) -> bool:
+    return ack.status.replace(" ", "_").replace("-", "_").lower() in {
+        "filled",
+        "closed",
+        "fully_filled",
+        "full_fill",
+    }
 
 
 def _record_matches_identity(record, identity: OrderIdentity) -> bool:
