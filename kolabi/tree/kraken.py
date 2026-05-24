@@ -146,6 +146,7 @@ class KrakenTree:
         self._book_message_count = 0
         self._trace_count = 0
         self._last_trace_cap_logged = False
+        self._last_status_log_line: str | None = None
 
     async def run(self) -> None:
         """Tourne en continu et relance la session websocket apres erreur."""
@@ -336,16 +337,18 @@ class KrakenTree:
         self._last_log_at = now
         if self._latest_book is None:
             return
-        self.logger.info(
-            format_market_status(
-                config=self.config,
-                metrics=self._latest_book.metrics,
-                stored_count=self._stored_count,
-                persisted=snapshot is not None,
-                raw_message_count=self._raw_message_count,
-                book_message_count=self._book_message_count,
-            )
+        status_line = format_market_status(
+            config=self.config,
+            metrics=self._latest_book.metrics,
+            stored_count=self._stored_count,
+            persisted=snapshot is not None,
+            raw_message_count=self._raw_message_count,
+            book_message_count=self._book_message_count,
         )
+        if status_line == self._last_status_log_line:
+            return
+        self._last_status_log_line = status_line
+        self.logger.info(status_line)
 
     def trace_message(self, message: object, raw_payload: str) -> None:
         """Ecrit les messages websocket bruts si le mode trace est actif."""

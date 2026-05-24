@@ -638,6 +638,35 @@ def test_handle_message_logs_position_delta_event(tmp_path, caplog):
     assert "side=long" in caplog.text
 
 
+def test_handle_message_suppresses_unchanged_position_event(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "open_positions",
+        "positions": [
+            {
+                "instrument": "PI_XBTUSD",
+                "side": "long",
+                "size": 1.0,
+                "entry_price": 76000.0,
+                "liquidation_price": 70000.0,
+                "leverage": 3.0,
+            }
+        ],
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+        stream.handle_message(message)
+    assert caplog.text.count("position_event feed=open_positions symbol=PI_XBTUSD") == 1
+
+
 def test_handle_message_logs_private_notice_delta_event(tmp_path, caplog):
     db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))

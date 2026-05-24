@@ -144,6 +144,24 @@ def test_scheduler_leaves_gap_when_book_does_not_change(tmp_path):
         assert len(snapshots) == 1
 
 
+def test_status_log_suppresses_identical_lines(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+    tree = KrakenTree(
+        KrakenConfig(db_url=db_url, pair="PI_XBTUSD", log_interval_seconds=0)
+    )
+    tree.ingest_book(
+        [{"price": 101, "qty": 1}],
+        [{"price": 99, "qty": 1}],
+        fixed_time(0),
+    )
+
+    with caplog.at_level("INFO"):
+        tree.log_due(fixed_time(0), snapshot=None)
+        tree.log_due(fixed_time(1), snapshot=None)
+
+    assert caplog.text.count("kraken_tree env=demo") == 1
+
+
 def test_indicator_client_filters_pair_and_environment(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
     btc_tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))

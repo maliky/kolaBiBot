@@ -521,6 +521,10 @@ class KrakenFuturesPrivateStream:
         self._last_balances: dict[str, tuple[float, float, float]] = (
             self.store.latest_balance_by_asset()
         )
+        self._last_positions: dict[
+            tuple[str, str],
+            tuple[float, float | None, float | None, float | None],
+        ] = {}
 
     async def run(self) -> None:
         """Tourne en continu avec reconnexion conservative."""
@@ -730,6 +734,8 @@ class KrakenFuturesPrivateStream:
                 for position in positions:
                     self.store.record_position(position)
                     if not feed.endswith("snapshot"):
+                        if not self._position_changed(position):
+                            continue
                         self.logger.info(
                             "kraken_account position_event feed=%s symbol=%s side=%s size=%.8f entry_price=%s liquidation_price=%s leverage=%s",
                             feed,
@@ -767,6 +773,18 @@ class KrakenFuturesPrivateStream:
         current = (balance.available, balance.locked, balance.total)
         previous = self._last_balances.get(balance.asset)
         self._last_balances[balance.asset] = current
+        return previous != current
+
+    def _position_changed(self, position: PositionWrite) -> bool:
+        key = (position.symbol, position.side)
+        current = (
+            position.size,
+            position.entry_price,
+            position.liquidation_price,
+            position.leverage,
+        )
+        previous = self._last_positions.get(key)
+        self._last_positions[key] = current
         return previous != current
 
 
