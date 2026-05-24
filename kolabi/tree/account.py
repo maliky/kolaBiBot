@@ -616,19 +616,119 @@ class KrakenFuturesPrivateStream:
         self.store.record_raw_event(message)
         try:
             if feed.startswith("open_orders"):
-                for order in iter_order_payloads(message):
-                    self.store.ensure_order(map_order(order))
+                orders = iter_order_payloads(message)
+                if feed.endswith("snapshot"):
+                    self.logger.info(
+                        "kraken_account private_snapshot feed=%s rows=%d",
+                        feed,
+                        len(orders),
+                    )
+                for order in orders:
+                    mapped = map_order(order)
+                    persisted = self.store.ensure_order(mapped)
+                    if not feed.endswith("snapshot"):
+                        reason = optional_str(order.get("reason")) or "-"
+                        stop_price = first_float(order, "stop_price", "stopPrice")
+                        reduce_only = bool(
+                            order.get("reduce_only") or order.get("reduceOnly") or False
+                        )
+                        self.logger.info(
+                            "kraken_account order_event feed=%s symbol=%s order_id=%s client_id=%s side=%s type=%s status=%s qty=%.8f filled=%.8f price=%s stop_price=%s reduce_only=%s reason=%s",
+                            feed,
+                            persisted.symbol,
+                            persisted.exchange_order_id or "-",
+                            persisted.client_order_id or "-",
+                            persisted.side,
+                            persisted.order_type,
+                            persisted.status,
+                            persisted.quantity,
+                            persisted.filled_quantity,
+                            persisted.price,
+                            stop_price,
+                            reduce_only,
+                            reason,
+                        )
             elif feed.startswith("fills"):
-                for fill in iter_fill_payloads(message):
-                    self.store.record_fill_event(map_fill_event(fill))
+                fills = iter_fill_payloads(message)
+                if feed.endswith("snapshot"):
+                    self.logger.info(
+                        "kraken_account private_snapshot feed=%s rows=%d",
+                        feed,
+                        len(fills),
+                    )
+                for fill in fills:
+                    mapped = map_fill_event(fill)
+                    self.store.record_fill_event(mapped)
+                    if not feed.endswith("snapshot"):
+                        self.logger.info(
+                            "kraken_account fill_event feed=%s symbol=%s order_id=%s fill_id=%s side=%s type=%s qty=%.8f price=%.8f liquidity=%s fee=%s fee_ccy=%s",
+                            feed,
+                            mapped.symbol,
+                            mapped.exchange_order_id or "-",
+                            mapped.exchange_fill_id or "-",
+                            mapped.side,
+                            mapped.order_type,
+                            mapped.quantity,
+                            mapped.price,
+                            mapped.liquidity_role or "-",
+                            mapped.fee,
+                            mapped.fee_currency or "-",
+                        )
             elif feed.startswith("balances"):
-                for balance in map_balances(message):
+                balances = map_balances(message)
+                if feed.endswith("snapshot"):
+                    self.logger.info(
+                        "kraken_account private_snapshot feed=%s rows=%d",
+                        feed,
+                        len(balances),
+                    )
+                for balance in balances:
                     self.store.record_balance(balance)
+                    if not feed.endswith("snapshot"):
+                        self.logger.info(
+                            "kraken_account balance_event feed=%s asset=%s available=%.8f locked=%.8f total=%.8f",
+                            feed,
+                            balance.asset,
+                            balance.available,
+                            balance.locked,
+                            balance.total,
+                        )
             elif feed.startswith("open_positions"):
-                for position in map_positions(message):
+                positions = map_positions(message)
+                if feed.endswith("snapshot"):
+                    self.logger.info(
+                        "kraken_account private_snapshot feed=%s rows=%d",
+                        feed,
+                        len(positions),
+                    )
+                for position in positions:
                     self.store.record_position(position)
+                    if not feed.endswith("snapshot"):
+                        self.logger.info(
+                            "kraken_account position_event feed=%s symbol=%s side=%s size=%.8f entry_price=%s liquidation_price=%s leverage=%s",
+                            feed,
+                            position.symbol,
+                            position.side,
+                            position.size,
+                            position.entry_price,
+                            position.liquidation_price,
+                            position.leverage,
+                        )
             elif feed.startswith(("account_log", "notifications_auth")):
-                pass
+                kind = str(message.get("type") or message.get("event") or "unknown")
+                order_id = optional_str(
+                    first_present(message, "order_id", "orderId")
+                ) or "-"
+                notice = optional_str(
+                    first_present(message, "message", "reason")
+                ) or "-"
+                self.logger.info(
+                    "kraken_account private_notice feed=%s kind=%s order_id=%s message=%s",
+                    feed,
+                    kind,
+                    order_id,
+                    notice,
+                )
         except Exception as exc:
             self.store.record_connection_status(
                 "private_ws", "error", last_error=f"{feed}: {exc}"
@@ -769,7 +869,12 @@ def iter_order_payloads(message: JsonMapT) -> list[JsonMapT]:
     if isinstance(message.get("orders"), list):
         return [item for item in message["orders"] if isinstance(item, Mapping)]
     order = message.get("order")
-    return [order] if isinstance(order, Mapping) else []
+    if isinstance(order, Mapping):
+        return [order]
+    # Some Kraken cancel deltas arrive as top-level order_id/is_cancel payloads.
+    if message.get("order_id") is not None or message.get("orderId") is not None:
+        return [message]
+    return []
 
 
 def iter_fill_payloads(message: JsonMapT) -> list[JsonMapT]:
@@ -863,6 +968,30 @@ def map_balances(message: JsonMapT) -> list[BalanceWrite]:
                         asset=str(asset),
                         available=total,
                         locked=0.0,
+                        total=total,
+                        raw_payload=dict(message),
+                        source_timestamp=source_time,
+                    )
+                )
+    flex_futures = message.get("flex_futures")
+    if isinstance(flex_futures, Mapping):
+        currencies = flex_futures.get("currencies")
+        if isinstance(currencies, Mapping):
+            for asset, value in currencies.items():
+                if not isinstance(value, Mapping):
+                    continue
+                available = first_float(value, "available_balance", "availableBalance")
+                if available is None:
+                    available = first_float(value, "balance_value", "balanceValue")
+                total = first_float(value, "balance_value", "balanceValue")
+                if total is None:
+                    total = available or 0.0
+                locked = max(total - (available or 0.0), 0.0)
+                rows.append(
+                    BalanceWrite(
+                        asset=str(asset),
+                        available=available or 0.0,
+                        locked=locked,
                         total=total,
                         raw_payload=dict(message),
                         source_timestamp=source_time,

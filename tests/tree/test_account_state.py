@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from kolabi.tree import account as account_module
@@ -305,6 +306,308 @@ def test_handle_message_persists_raw_event_and_fill_snapshot(tmp_path):
         assert raw.correlation_id == "OID-5"
         assert order.exchange_order_id == "OID-5"
         assert fill.exchange_fill_id == "FID-5"
+
+
+def test_handle_message_logs_order_delta_event(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "open_orders",
+        "order": {
+            "instrument": "PI_XBTUSD",
+            "direction": 0,
+            "type": "limit",
+            "qty": 10,
+            "filled": 0,
+            "limit_price": 1000,
+            "order_id": "OID-L1",
+            "cli_ord_id": "CID-L1",
+            "status": "new",
+            "stop_price": 950.0,
+            "reduce_only": True,
+            "reason": "new_placed_order_by_user",
+        },
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "order_event feed=open_orders" in caplog.text
+    assert "order_id=OID-L1" in caplog.text
+    assert "status=new" in caplog.text
+    assert "stop_price=950.0" in caplog.text
+    assert "reduce_only=True" in caplog.text
+    assert "reason=new_placed_order_by_user" in caplog.text
+
+
+def test_handle_message_logs_cancel_status_on_order_event(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "open_orders",
+        "order": {
+            "instrument": "PI_XBTUSD",
+            "direction": 0,
+            "type": "limit",
+            "qty": 10,
+            "filled": 0,
+            "limit_price": 1000,
+            "order_id": "OID-C1",
+            "cli_ord_id": "CID-C1",
+            "is_cancel": True,
+            "reason": "requested_by_user",
+        },
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "order_event feed=open_orders" in caplog.text
+    assert "order_id=OID-C1" in caplog.text
+    assert "status=canceled" in caplog.text
+
+
+def test_handle_message_logs_cancel_status_for_root_order_delta(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "open_orders",
+        "order_id": "OID-C2",
+        "is_cancel": True,
+        "reason": "cancelled_by_user",
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "order_event feed=open_orders" in caplog.text
+    assert "order_id=OID-C2" in caplog.text
+    assert "status=canceled" in caplog.text
+    assert "reason=cancelled_by_user" in caplog.text
+
+
+def test_handle_message_enriches_root_cancel_with_existing_order_state(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    stream.handle_message(
+        {
+            "feed": "open_orders",
+            "order": {
+                "instrument": "PI_XBTUSD",
+                "direction": 0,
+                "type": "limit",
+                "qty": 10,
+                "filled": 0,
+                "limit_price": 1000,
+                "order_id": "OID-C3",
+                "cli_ord_id": "CID-C3",
+                "status": "new",
+            },
+        }
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(
+            {
+                "feed": "open_orders",
+                "order_id": "OID-C3",
+                "is_cancel": True,
+                "reason": "cancelled_by_user",
+            }
+        )
+    assert "order_event feed=open_orders" in caplog.text
+    assert "order_id=OID-C3" in caplog.text
+    assert "symbol=PI_XBTUSD" in caplog.text
+    assert "type=limit" in caplog.text
+    assert "qty=10.00000000" in caplog.text
+    assert "status=canceled" in caplog.text
+
+
+def test_handle_message_logs_fill_delta_event(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "fills",
+        "fill": {
+            "buy": True,
+            "fill_id": "FID-L1",
+            "instrument": "PI_XBTUSD",
+            "order_id": "OID-L1",
+            "order_type": "market",
+            "price": 76448.0,
+            "qty": 1.0,
+            "fill_type": "taker",
+            "fee_paid": 6.55e-09,
+            "fee_currency": "BTC",
+        },
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "fill_event feed=fills" in caplog.text
+    assert "order_id=OID-L1" in caplog.text
+    assert "fill_id=FID-L1" in caplog.text
+    assert "type=market" in caplog.text
+    assert "fee=6.55e-09" in caplog.text
+    assert "fee_ccy=BTC" in caplog.text
+
+
+def test_handle_message_logs_snapshot_summary_only(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "open_orders_snapshot",
+        "orders": [
+            {
+                "instrument": "PI_XBTUSD",
+                "direction": 0,
+                "type": "limit",
+                "qty": 10,
+                "filled": 0,
+                "limit_price": 1000,
+                "order_id": "OID-S1",
+            },
+            {
+                "instrument": "PI_XBTUSD",
+                "direction": 1,
+                "type": "limit",
+                "qty": 5,
+                "filled": 0,
+                "limit_price": 1100,
+                "order_id": "OID-S2",
+            },
+        ],
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "private_snapshot feed=open_orders_snapshot rows=2" in caplog.text
+    assert "order_event feed=open_orders_snapshot" not in caplog.text
+
+
+def test_handle_message_logs_balance_delta_event(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "balances",
+        "holding": {"USD": 100.0},
+        "timestamp": 1779577521578,
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "balance_event feed=balances asset=USD" in caplog.text
+
+
+def test_handle_message_logs_position_delta_event(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "open_positions",
+        "positions": [
+            {
+                "instrument": "PI_XBTUSD",
+                "side": "long",
+                "size": 1.0,
+                "entry_price": 76000.0,
+                "liquidation_price": 70000.0,
+                "leverage": 3.0,
+            }
+        ],
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "position_event feed=open_positions symbol=PI_XBTUSD" in caplog.text
+    assert "side=long" in caplog.text
+
+
+def test_handle_message_logs_private_notice_delta_event(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "notifications_auth",
+        "event": "stop_triggered",
+        "order_id": "OID-N1",
+        "message": "stop triggered",
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "private_notice feed=notifications_auth" in caplog.text
+    assert "order_id=OID-N1" in caplog.text
+
+
+def test_map_balances_handles_flex_futures_currencies_shape():
+    rows = map_balances(
+        {
+            "feed": "balances",
+            "timestamp": 1778025600000,
+            "flex_futures": {
+                "currencies": {
+                    "USD": {"available_balance": 20548.5, "balance_value": 20558.5},
+                    "BTC": {"available_balance": "0.01", "balance_value": "0.02"},
+                }
+            },
+        }
+    )
+    by_asset = {row.asset: row for row in rows}
+    assert by_asset["USD"].available == 20548.5
+    assert by_asset["USD"].total == 20558.5
+    assert by_asset["USD"].locked == 10.0
+    assert by_asset["BTC"].available == 0.01
+    assert by_asset["BTC"].total == 0.02
 
 
 def test_raw_event_retention_limit_keeps_latest_events(tmp_path):
