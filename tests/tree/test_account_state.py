@@ -538,6 +538,26 @@ def test_handle_message_logs_balance_delta_event(tmp_path, caplog):
     assert "balance_event feed=balances asset=USD" in caplog.text
 
 
+def test_handle_message_suppresses_null_balance_logs(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "balances",
+        "holding": {"USD": None},
+        "timestamp": 1779577521578,
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "balance_event feed=balances asset=USD" not in caplog.text
+
+
 def test_handle_message_logs_position_delta_event(tmp_path, caplog):
     db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))

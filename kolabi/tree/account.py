@@ -685,6 +685,8 @@ class KrakenFuturesPrivateStream:
                 for balance in balances:
                     self.store.record_balance(balance)
                     if not feed.endswith("snapshot"):
+                        if _is_null_balance(balance):
+                            continue
                         self.logger.info(
                             "kraken_account balance_event feed=%s asset=%s available=%.8f locked=%.8f total=%.8f",
                             feed,
@@ -1309,6 +1311,11 @@ def parse_kraken_time(value: object) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+def _is_null_balance(balance: BalanceWrite) -> bool:
+    """Treat fully zero balances as null-noise for log emission."""
+    return balance.available == 0.0 and balance.locked == 0.0 and balance.total == 0.0
 
 
 def map_side(value: object) -> str:
