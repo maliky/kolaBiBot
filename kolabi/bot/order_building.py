@@ -240,4 +240,11 @@ def tail_stop_price(state: PairCycleState) -> Decimal | float | None:
     """Resolve dynamic trail stop first, then the static transitional value."""
     if state.tail_trail is not None:
         return state.tail_trail.current_stop_price
+    tail_type = (state.pair.tail_price_spec_type or "").lower()
+    amount_type = state.pair.amount_type.lower()
+    if "t%" in tail_type or "t%" in amount_type or "td" in tail_type or "td" in amount_type:
+        raise ValueError(
+            f"Order pair '{state.pair.name}' needs an initialised tail trail "
+            "before placing or amending a relative tail"
+        )
     return state.pair.tail_price_spec

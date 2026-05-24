@@ -17,19 +17,21 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from itertools import count
-from typing import Protocol
+from typing import Protocol, cast
 
 from kolabi.bot.chronos import Chronos, ChronosNotice
 from kolabi.bot.domain import (
     EggMove,
     HeadState,
     OrderIdentity,
+    PairCycleState,
     StrategySpec,
     StrategyState,
     TailState,
 )
 from kolabi.bot.ids import head_client_order_id, tail_client_order_id
 from kolabi.bot.order_building import head_order_dict
+from kolabi.bot.pricing import reference_price
 from kolabi.bot.dragon import (
     MarketSnapshotFact,
     head_hooked_event,
@@ -44,6 +46,7 @@ from kolabi.bot.dragon import (
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     DragonSong,
+    OrderDict,
     OrderQty,
     PlaceOrderCommandRequest,
     PlaceHeadCommand,
@@ -74,6 +77,8 @@ class RuntimeQueueLike(Protocol):
     async def enqueue(self, event: EggMove) -> None: ...
 
     def record_targets_head(self, record: object) -> bool: ...
+
+    def head_pair_state_for_record(self, record: object) -> PairCycleState | None: ...
 
 
 class PublicMarketStateReader(Protocol):
@@ -218,9 +223,11 @@ class KrakenPrivateOrderPollingSource:
         self,
         client: PrivateOrderStateReader,
         *,
+        public_client: PublicRuntimeStateReader | None = None,
         poll_seconds: float = 1.0,
     ) -> None:
         self.client = client
+        self.public_client = public_client
         self.poll_seconds = poll_seconds
         self.after_local_timestamp: datetime | None = None
         self.after_local_id: int | None = None
@@ -237,10 +244,12 @@ class KrakenPrivateOrderPollingSource:
                 if occurred_at is not None:
                     self.after_local_timestamp = occurred_at
                 self.after_local_id = record.local_id
-                if not runtime.record_targets_head(record):
+                pair_state = runtime.head_pair_state_for_record(record)
+                if pair_state is None:
                     continue
                 fact = private_order_fact_from_record(record)
                 move = head_move_from_private_fact(fact)
+                move = self._with_reference_price(move, pair_state, runtime.symbol)
                 event_id = (
                     f"private-order:{record.local_id}"
                     if record.local_id is not None
@@ -250,6 +259,26 @@ class KrakenPrivateOrderPollingSource:
             if runtime.all_pairs_terminal:
                 return
             await asyncio.sleep(self.poll_seconds)
+
+    def _with_reference_price(
+        self,
+        move: EggMove,
+        pair_state: PairCycleState,
+        symbol: str,
+    ) -> EggMove:
+        """Attach side-aware public reference price for relative tail initialisation."""
+        public_client = self.public_client
+        if public_client is None and hasattr(self.client, "fetch_market_state"):
+            public_client = cast(PublicRuntimeStateReader, self.client)
+        if public_client is None:
+            return move
+        market = public_client.fetch_market_state(symbol)
+        reference = reference_price(pair_state.pair.head.side, market)
+        if reference <= 0:
+            return move
+        reply = dict(move.reply or {})
+        reply["reference_price"] = reference
+        return replace(move, reply=reply)
 
 
 class StrategyRuntime:
@@ -348,18 +377,21 @@ class StrategyRuntime:
         )
 
     def record_targets_head(self, record) -> bool:
+        return self.head_pair_state_for_record(record) is not None
+
+    def head_pair_state_for_record(self, record) -> PairCycleState | None:
         for pair_state in self.state.pairs.values():
             tail_identity = pair_state.tail_identity
             if tail_identity is not None and _record_matches_identity(
                 record, tail_identity
             ):
-                return False
+                return None
             head_identity = pair_state.head_identity
             if head_identity is not None and _record_matches_identity(
                 record, head_identity
             ):
-                return True
-        return False
+                return pair_state
+        return None
 
     def _prepare_command(self, command: DragonSong) -> DragonSong:
         if isinstance(command, PlaceHeadCommand) and command.request.clOrdID is None:
@@ -386,7 +418,7 @@ class StrategyRuntime:
             return replace(
                 command,
                 request=request,
-                legacy_order=legacy_order,
+                legacy_order=cast(OrderDict, legacy_order),
             )
         return command
 
