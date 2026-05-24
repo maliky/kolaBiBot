@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, Iterable, Optional, Sequence, cast
 from urllib.parse import urlencode
 
@@ -64,6 +65,7 @@ class KrakenFuturesAdapter(ExchangeABC):
         self.public_db_url = public_db_url or env_cfg.public_db_url
         self.dummy = False
         self.dummyID = ""
+        self._last_nonce = 0
         self._engine = create_engine(self.account_db_url)
         self._public_engine = create_engine(self.public_db_url)
         self._sessionmaker = sessionmaker(
@@ -95,6 +97,11 @@ class KrakenFuturesAdapter(ExchangeABC):
             (key, value) for key, value in params if value is not None and value != ""
         ]
 
+    def _next_nonce(self) -> str:
+        now = int(time.time() * 1000)
+        self._last_nonce = max(now, self._last_nonce + 1)
+        return str(self._last_nonce)
+
     def _request(
         self,
         method: str,
@@ -113,7 +120,7 @@ class KrakenFuturesAdapter(ExchangeABC):
         for attempt in range(1, retry_attempts + 1):
             headers: Dict[str, str] = {}
             if auth:
-                nonce = str(int(time.time() * 1000))
+                nonce = self._next_nonce()
                 post_data = urlencode(payload)
                 headers = {
                     "APIKey": self.api_key,
@@ -158,7 +165,12 @@ class KrakenFuturesAdapter(ExchangeABC):
             if not isinstance(data, dict):
                 raise RuntimeError(f"Unexpected Kraken payload type: {type(data)!r}")
             if data.get("result") == "error":
-                raise RuntimeError(str(data))
+                error = RuntimeError(str(data))
+                if "nonceBelowThreshold" in str(data) and attempt < retry_attempts:
+                    time.sleep(0.25 * attempt)
+                    last_error = error
+                    continue
+                raise error
             return data
         assert last_error is not None
         raise last_error
@@ -259,14 +271,25 @@ class KrakenFuturesAdapter(ExchangeABC):
                 .first()
             )
             if row is not None:
+                if row.tick_size is not None:
+                    return {
+                        "symbol": row.symbol,
+                        "tradeable": row.tradeable,
+                        "tickSize": row.tick_size,
+                        "contractSize": row.contract_size,
+                        "minQuantity": row.min_quantity,
+                        "type": row.instrument_type,
+                        **dict(row.raw_payload or {}),
+                    }
+                refreshed = self.validate_symbol(target_symbol)
                 return {
                     "symbol": row.symbol,
                     "tradeable": row.tradeable,
-                    "tickSize": row.tick_size,
+                    "tickSize": _optional_float(refreshed.get("tickSize")),
                     "contractSize": row.contract_size,
                     "minQuantity": row.min_quantity,
                     "type": row.instrument_type,
-                    **dict(row.raw_payload or {}),
+                    **dict(refreshed),
                 }
         instrument = self.validate_symbol(target_symbol)
         return {
@@ -304,6 +327,22 @@ class KrakenFuturesAdapter(ExchangeABC):
         if side.lower() == "buy":
             return ticker.ask * 1.01
         return ticker.bid * 0.99
+
+    def _cached_tick_size(self) -> float | None:
+        with self._public_sessionmaker() as session:
+            row = (
+                session.execute(
+                    select(ExchangeInstrument.tick_size).where(
+                        ExchangeInstrument.exchange == "kraken",
+                        ExchangeInstrument.environment == self.environment,
+                        ExchangeInstrument.market_type == "futures",
+                        ExchangeInstrument.symbol == self.symbol,
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        return float(row) if row else None
 
     @staticmethod
     def _legacy_ack_from_order(
@@ -585,12 +624,15 @@ class KrakenFuturesAdapter(ExchangeABC):
         if reduce_only and "ReduceOnly" not in exec_flags:
             exec_flags.append("ReduceOnly")
         exec_inst = ",".join(exec_flags)
+        tick_size = self._cached_tick_size()
+        rounded_price = _round_price_to_tick(price, tick_size)
+        rounded_stop = _round_price_to_tick(stopPx, tick_size)
         response = self.place(
             orderQty=float(orderQty),
             side=side,
             ordType=type_,
-            price=float(price) if price is not None else None,
-            stopPx=float(stopPx) if stopPx is not None else None,
+            price=rounded_price,
+            stopPx=rounded_stop,
             execInst=exec_inst,
             **params,
         )
@@ -646,11 +688,29 @@ def _extract_min_quantity_from_instrument(instrument: Dict[str, Any]) -> float:
 
 
 def _extract_order_like(payload: Dict[str, Any]) -> Dict[str, Any]:
-    for key in ("sendStatus", "editStatus", "cancelStatus", "order", "result"):
+    for key in (
+        "sendStatus",
+        "editStatus",
+        "cancelStatus",
+        "order",
+        "orderTrigger",
+        "trigger",
+        "result",
+    ):
         value = payload.get(key)
         if isinstance(value, dict):
             if "order" in value and isinstance(value["order"], dict):
                 return value["order"]
+            if "orderTrigger" in value and isinstance(value["orderTrigger"], dict):
+                merged = dict(value)
+                merged.update(
+                    {
+                        nested_key: nested_value
+                        for nested_key, nested_value in value["orderTrigger"].items()
+                        if nested_key not in merged
+                    }
+                )
+                return merged
             return value
     return payload
 
@@ -706,12 +766,17 @@ def _merge_order_payload_defaults(
 
 
 def _matches_symbol(order: Dict[str, Any], symbol: str) -> bool:
-    return str(order.get("instrument") or order.get("symbol") or "") == symbol
+    merged = _merge_trigger_order_payload(order)
+    return str(merged.get("instrument") or merged.get("symbol") or "") == symbol
 
 
 def _is_trigger_order(order: Dict[str, Any]) -> bool:
-    order_type = str(order.get("type") or order.get("orderType") or "").lower()
+    merged = _merge_trigger_order_payload(order)
+    if isinstance(order.get("orderTrigger"), dict):
+        return True
+    order_type = str(merged.get("type") or merged.get("orderType") or "").lower()
     if order_type in {
+        "stp",
         "stop",
         "stop_loss",
         "stoploss",
@@ -737,32 +802,77 @@ def _is_trigger_order(order: Dict[str, Any]) -> bool:
         "trailingStopMaxDeviation",
         "trailing_stop_max_deviation",
     ):
-        value = order.get(key)
+        value = merged.get(key)
         if value not in (None, "", 0, 0.0):
             return True
     return False
 
 
 def _normalize_live_order(order: Dict[str, Any]) -> Dict[str, Any]:
+    merged = _merge_trigger_order_payload(order)
     filled = _optional_float(
-        _first_present_value(order, "filled", "filled_quantity", "filledSize")
+        _first_present_value(merged, "filled", "filled_quantity", "filledSize")
     )
     return {
-        "order_id": str(order.get("order_id") or order.get("orderId") or ""),
-        "client_order_id": str(order.get("cli_ord_id") or order.get("cliOrdId") or ""),
-        "symbol": str(order.get("instrument") or order.get("symbol") or ""),
-        "side": str(order.get("direction") or order.get("side") or ""),
-        "order_type": str(order.get("type") or order.get("orderType") or ""),
-        "qty": _normalise_live_quantity(order, filled),
+        "order_id": str(
+            merged.get("order_id")
+            or merged.get("orderId")
+            or merged.get("uid")
+            or merged.get("id")
+            or ""
+        ),
+        "client_order_id": str(
+            merged.get("cli_ord_id")
+            or merged.get("cliOrdId")
+            or merged.get("clientId")
+            or merged.get("client_order_id")
+            or ""
+        ),
+        "symbol": str(merged.get("instrument") or merged.get("symbol") or ""),
+        "side": _normalise_live_side(merged),
+        "order_type": str(merged.get("type") or merged.get("orderType") or ""),
+        "qty": _normalise_live_quantity(merged, filled),
         "filled": filled,
         "price": _optional_float(
-            _first_present_value(order, "limit_price", "limitPrice", "price")
+            _first_present_value(merged, "limit_price", "limitPrice", "price")
         ),
         "stop_price": _optional_float(
-            _first_present_value(order, "stop_price", "stopPrice", "triggerPrice")
+            _first_present_value(
+                merged,
+                "stop_price",
+                "stopPrice",
+                "triggerPrice",
+                "trigger_price",
+            )
         ),
-        "status": _map_order_status_from_payload(order),
+        "trigger_signal": str(
+            merged.get("triggerSignal") or merged.get("trigger_signal") or ""
+        ),
+        "reduce_only": _truthy(
+            _first_present_value(merged, "reduce_only", "reduceOnly")
+        ),
+        "status": _map_order_status_from_payload(merged),
     }
+
+
+def _merge_trigger_order_payload(order: Dict[str, Any]) -> Dict[str, Any]:
+    trigger = order.get("orderTrigger")
+    if not isinstance(trigger, dict):
+        return order
+    merged = dict(order)
+    for key, value in trigger.items():
+        if key not in merged or merged[key] in (None, ""):
+            merged[key] = value
+    return merged
+
+
+def _normalise_live_side(order: Dict[str, Any]) -> str:
+    value = order.get("direction") or order.get("side") or ""
+    if str(value) == "0":
+        return "buy"
+    if str(value) == "1":
+        return "sell"
+    return str(value).lower()
 
 
 def _normalise_live_quantity(order: Dict[str, Any], filled: float | None) -> float | None:
@@ -792,7 +902,7 @@ def _map_trigger_signal(exec_inst: str) -> str | None:
     if "lastprice" in normalized:
         return "last"
     if "indexprice" in normalized:
-        return "spot"
+        return "index"
     return None
 
 
@@ -806,6 +916,27 @@ def _optional_float(value: object) -> float | None:
     if isinstance(value, (int, float, str)):
         return float(value)
     raise TypeError(f"cannot convert {type(value)!r} to float")
+
+
+def _round_price_to_tick(value: object | None, tick_size: float | None) -> float | None:
+    if value is None:
+        return None
+    price = Decimal(str(value))
+    if tick_size is None or tick_size <= 0:
+        return float(price)
+    tick = Decimal(str(tick_size))
+    rounded = (price / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
+    return float(rounded)
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "t", "yes", "y"}
+    return False
 
 
 def _first_present_value(payload: Dict[str, Any], *keys: str) -> object | None:
@@ -864,6 +995,18 @@ def _extract_available_margin(payload: Dict[str, Any]) -> float:
 
 
 def _map_order_status_from_payload(payload: Dict[str, Any]) -> str:
+    status = str(payload.get("status", "") or "").strip()
+    normalized_status = status.replace(" ", "").replace("_", "").replace("-", "").lower()
+    if normalized_status in {"placed", "new", "open", "edited", "untouched"}:
+        return "New"
+    if normalized_status in {"partiallyfilled", "partialfill"}:
+        return "PartiallyFilled"
+    if normalized_status in {"filled", "fullfill"}:
+        return "Filled"
+    if normalized_status in {"cancelled", "canceled"}:
+        return "Canceled"
+    if normalized_status:
+        return "Rejected"
     reason = str(payload.get("reason", "") or "").lower()
     if payload.get("is_cancel") is True:
         if "fill" in reason:

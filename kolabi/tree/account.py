@@ -141,6 +141,7 @@ class FillEvent:
     """Execution recue d'un flux avant resolution de l'ordre local."""
 
     exchange_order_id: str | None
+    client_order_id: str | None
     symbol: str
     side: str
     order_type: str
@@ -359,6 +360,7 @@ class AccountStateStore:
                 status="filled",
                 quantity=event.quantity,
                 exchange_order_id=event.exchange_order_id,
+                client_order_id=event.client_order_id,
                 filled_quantity=event.quantity,
                 raw_payload=event.raw_payload,
                 source_timestamp=event.source_timestamp,
@@ -683,22 +685,22 @@ class KrakenFuturesPrivateStream:
                         len(fills),
                     )
                 for fill in fills:
-                    mapped = map_fill_event(fill)
-                    self.store.record_fill_event(mapped)
+                    mapped_fill = map_fill_event(fill)
+                    self.store.record_fill_event(mapped_fill)
                     if not feed.endswith("snapshot"):
                         self.logger.info(
                             "kraken_account fill_event feed=%s symbol=%s order_id=%s fill_id=%s side=%s type=%s qty=%.8f price=%.8f liquidity=%s fee=%s fee_ccy=%s",
                             feed,
-                            mapped.symbol,
-                            mapped.exchange_order_id or "-",
-                            mapped.exchange_fill_id or "-",
-                            mapped.side,
-                            mapped.order_type,
-                            mapped.quantity,
-                            mapped.price,
-                            mapped.liquidity_role or "-",
-                            mapped.fee,
-                            mapped.fee_currency or "-",
+                            mapped_fill.symbol,
+                            mapped_fill.exchange_order_id or "-",
+                            mapped_fill.exchange_fill_id or "-",
+                            mapped_fill.side,
+                            mapped_fill.order_type,
+                            mapped_fill.quantity,
+                            mapped_fill.price,
+                            mapped_fill.liquidity_role or "-",
+                            mapped_fill.fee,
+                            mapped_fill.fee_currency or "-",
                         )
             elif feed.startswith("balances"):
                 balances = map_balances(message)
@@ -977,6 +979,7 @@ def map_fill_event(payload: JsonMapT) -> FillEvent:
     """Mappe un fill Kraken Futures vers FillEvent."""
     return FillEvent(
         exchange_order_id=optional_str(payload.get("order_id") or payload.get("orderId")),
+        client_order_id=optional_str(payload.get("cli_ord_id") or payload.get("cliOrdId")),
         symbol=str(payload.get("instrument") or payload.get("symbol") or "unknown"),
         side=map_side(first_present(payload, "direction", "side", "buy")),
         order_type=str(
@@ -1013,13 +1016,13 @@ def map_balances(message: JsonMapT) -> list[BalanceWrite]:
         container = message.get(container_key)
         if isinstance(container, Mapping):
             for asset, value in container.items():
-                total = as_float(value)
+                container_total = as_float(value)
                 rows.append(
                     BalanceWrite(
                         asset=str(asset),
-                        available=total,
+                        available=container_total,
                         locked=0.0,
-                        total=total,
+                        total=container_total,
                         raw_payload=dict(message),
                         source_timestamp=source_time,
                     )
@@ -1070,13 +1073,13 @@ def map_rest_balances(payload: JsonMapT) -> list[BalanceWrite]:
         if isinstance(value, Mapping):
             rows.extend(map_rest_balance_entry(asset, value))
             continue
-        total = as_float(value)
+        scalar_total = as_float(value)
         rows.append(
             BalanceWrite(
                 asset=str(asset),
-                available=total,
+                available=scalar_total,
                 locked=0.0,
-                total=total,
+                total=scalar_total,
                 raw_payload=dict(payload),
             )
         )
@@ -1096,13 +1099,13 @@ def map_rest_balance_entry(asset_key: object, payload: JsonMapT) -> list[Balance
     source_time = parse_kraken_time(first_present(payload, "timestamp", "time"))
     if isinstance(holding, Mapping):
         for asset, value in holding.items():
-            total = as_float(value)
+            holding_total = as_float(value)
             rows.append(
                 BalanceWrite(
                     asset=str(asset),
-                    available=total,
+                    available=holding_total,
                     locked=0.0,
-                    total=total,
+                    total=holding_total,
                     raw_payload=dict(payload),
                     source_timestamp=source_time,
                 )
@@ -1283,7 +1286,7 @@ def prune_raw_events(
         )
 
 
-def count_private_rows(session: Session) -> dict[str, int]:
+def count_private_rows(session: Session) -> dict[str, object]:
     """Compte les tables privees principales pour la CLI."""
     return {
         "balance_count": int(

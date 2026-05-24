@@ -34,6 +34,33 @@ from kolabi.shared.core.runtime_types import (
     to_decimal,
 )
 
+
+def _tail_order_type(raw: str) -> str:
+    """Return the base order type after legacy tail suffixes are removed."""
+    cleaned = raw.strip()
+    if cleaned.endswith("-"):
+        cleaned = cleaned[:-1]
+    if cleaned.endswith(("f", "i")) and cleaned.lower() not in {"limit"}:
+        cleaned = cleaned[:-1]
+    return cleaned or raw.strip()
+
+
+def _tail_exec_inst(raw: str) -> str | None:
+    """Translate legacy tail suffixes into adapter execution instructions."""
+    cleaned = raw.strip()
+    flags: list[str] = []
+    if cleaned.endswith("-"):
+        flags.append("ReduceOnly")
+    base = cleaned[:-1] if cleaned.endswith("-") else cleaned
+    if base.endswith("f"):
+        flags.append("MarkPrice")
+    elif base.endswith("i"):
+        flags.append("IndexPrice")
+    elif cleaned.endswith("-"):
+        flags.append("LastPrice")
+    return ",".join(flags) if flags else None
+
+
 def head_order_dict(pair: OrderPairSpec, *, client_order_id: str | None = None) -> OrderDict:
     """Build the head order payload from the static pair specification."""
     order: OrderDict = {
@@ -75,9 +102,12 @@ def tail_order_dict(state: PairCycleState) -> OrderDict:
     pair = state.pair
     order: OrderDict = {
         "side": opposite_side(pair.head.side).value,
-        "ordType": pair.tail.order_type,
+        "ordType": _tail_order_type(pair.tail.order_type),
         "pair_name": pair.name,
     }
+    exec_inst = _tail_exec_inst(pair.tail.order_type)
+    if exec_inst is not None:
+        order["execInst"] = exec_inst
     quantity = resolve_tail_quantity(state)
     if quantity is not None:
         order["orderQty"] = cast(OrderQty, to_decimal(quantity))
@@ -95,9 +125,10 @@ def tail_place_request(state: PairCycleState) -> PlaceOrderCommandRequest:
     return PlaceOrderCommandRequest(
         pair_name=state.pair.name,
         side=opposite_side(state.pair.head.side).value,
-        ordType=state.pair.tail.order_type,
+        ordType=_tail_order_type(state.pair.tail.order_type),
         orderQty=None if quantity is None else cast(OrderQty, to_decimal(quantity)),
         stopPx=None if stop_price is None else cast(StopPrice, to_decimal(stop_price)),
+        execInst=_tail_exec_inst(state.pair.tail.order_type),
         oDelta=(
             None
             if state.pair.tail.delta is None
@@ -138,7 +169,7 @@ def tail_amend_request(state: PairCycleState) -> AmendOrderCommandRequest:
     return AmendOrderCommandRequest(
         pair_name=state.pair.name,
         side=opposite_side(state.pair.head.side).value,
-        ordType=state.pair.tail.order_type,
+        ordType=_tail_order_type(state.pair.tail.order_type),
         orderID=state.tail_identity.exchange_order_id,
         clOrdID=state.tail_identity.client_order_id,
         newPrice=cast(StopPrice, to_decimal(stop_price)),
