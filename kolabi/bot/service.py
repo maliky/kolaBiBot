@@ -303,7 +303,7 @@ class BotService:
             return None
         return KrakenPrivateOrderPollingSource(
             self.runtime_state,
-            public_client=self.runtime_state,
+            public_client=cast(PublicRuntimeStateReader, self.runtime_state),
         )
 
     def _ensure_exchange_config(self) -> None:
@@ -349,10 +349,10 @@ class AdapterExchangePort(ExchangePort):
         return self._place(command.request)
 
     async def amend_head(self, command: AmendHeadCommand) -> OrderAck:
-        return self._amend(command.request)
+        return self._amend_head(command.request)
 
     async def amend_tail(self, command: AmendTailCommand) -> OrderAck:
-        return self._amend(command.request)
+        return self._amend_tail(command.request)
 
     async def cancel(self, command: CancelCommand) -> OrderAck:
         return self.adapter.cancel_order(command.request.clOrdID)
@@ -380,10 +380,25 @@ class AdapterExchangePort(ExchangePort):
             **params,
         )
 
-    def _amend(self, request: AmendOrderCommandRequest) -> OrderAck:
+    def _amend_head(self, request: AmendOrderCommandRequest) -> OrderAck:
         params: dict[str, Any] = {}
         if request.newPrice is not None:
             params["price"] = request.newPrice
+        return self._amend_with_params(request, params)
+
+    def _amend_tail(self, request: AmendOrderCommandRequest) -> OrderAck:
+        params: dict[str, Any] = {}
+        if request.newPrice is not None:
+            params["stopPx"] = request.newPrice
+        return self._amend_with_params(request, params)
+
+    def _amend_with_params(
+        self,
+        request: AmendOrderCommandRequest,
+        params: dict[str, Any],
+    ) -> OrderAck:
+        if request.clOrdID is not None:
+            params["clOrdID"] = request.clOrdID
         if request.newQty is not None:
             params["orderQty"] = request.newQty
         if request.text is not None:

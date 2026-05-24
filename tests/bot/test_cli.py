@@ -64,34 +64,29 @@ def test_run_once_parser_accepts_legacy_short_flags() -> None:
     assert pair.amount_type == "qAt%pD"
 
 
-def test_run_once_parser_keeps_percent_tail_token_from_atype() -> None:
+def test_run_once_parser_keeps_percent_tail_percent_head_grammar() -> None:
     parser = build_parser()
 
     args = parser.parse_args(
         [
             "run-once",
             "-m",
-            "M",
-            "-t",
-            "0",
-            "1440",
-            "-O",
-            "120",
-            "-c",
-            "buy",
-            "-a",
-            "qAt%p%",
+            "XSellPercentTail",
             "-x",
-            "-0.25",
-            "0.25",
+            "-1",
+            "1",
             "-q",
-            "3",
+            "1",
             "-T",
-            "1.5",
+            "0.5",
             "-o",
             "M",
             "-y",
             "S-",
+            "-c",
+            "sell",
+            "-a",
+            "qAt%p%",
             "--dry-run",
         ]
     )
@@ -101,7 +96,7 @@ def test_run_once_parser_keeps_percent_tail_token_from_atype() -> None:
     assert pair.head_quantity_type == "qA"
     assert pair.tail_price_spec_type == "t%"
     assert pair.head_price_type == "p%"
-    assert pair.tail_price_spec == 1.5
+    assert pair.tail_price_spec == 0.5
 
 
 def test_run_once_command_dry_run_prints_canonical_structure(capsys) -> None:

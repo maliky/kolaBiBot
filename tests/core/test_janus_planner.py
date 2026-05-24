@@ -33,7 +33,14 @@ from kolabi.shared.core.runtime_types import (
 )
 
 
-def sample_pair(name: str, *, tail_order_type: str = "Stop") -> OrderPairSpec:
+def sample_pair(
+    name: str,
+    *,
+    tail_order_type: str = "Stop",
+    tail_price_spec: float = 99.0,
+    tail_price_spec_type: str = "tA",
+    amount_type: str = "qApD",
+) -> OrderPairSpec:
     return OrderPairSpec(
         name=name,
         window=TimeWindow(start_minutes=-1.0, end_minutes=10.0),
@@ -46,9 +53,9 @@ def sample_pair(name: str, *, tail_order_type: str = "Stop") -> OrderPairSpec:
         head_quantity=2,
         head_quantity_type="qA",
         tail=TailSpec(side=Side.SELL, order_type=tail_order_type, delta=0.5),
-        tail_price_spec=99.0,
-        tail_price_spec_type="tA",
-        amount_type="qApD",
+        tail_price_spec=tail_price_spec,
+        tail_price_spec_type=tail_price_spec_type,
+        amount_type=amount_type,
     )
 
 
@@ -235,15 +242,20 @@ def test_tail_commands_use_dynamic_trail_stop_when_present() -> None:
     assert amend.request.newPrice == Decimal("101.2")
 
 
-def test_percent_tail_without_trail_reference_fails_loudly() -> None:
+def test_relative_tail_without_trail_fails_loudly() -> None:
     state = PairCycleState(
-        pair=percent_tail_pair("pair-a"),
+        pair=sample_pair(
+            "pair-a",
+            tail_price_spec=0.5,
+            tail_price_spec_type="t%",
+            amount_type="qAt%p%",
+        ),
         head_state=HeadState.LIVING,
         tail_state=TailState.LIVING,
-        played_quantity=Decimal("3"),
+        played_quantity=Decimal("1"),
     )
 
-    with pytest.raises(ValueError, match="requires a reference-priced tail trail"):
+    with pytest.raises(ValueError, match="initialised tail trail"):
         plan_runtime_commands(
             state,
             (PairIntent(PairIntentKind.PLACE_TAIL),),

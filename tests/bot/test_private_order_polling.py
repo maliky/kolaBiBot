@@ -138,6 +138,9 @@ def test_private_order_poller_emits_head_confirmation_from_db(tmp_path) -> None:
         def record_targets_head(self, record) -> bool:
             return True
 
+        def head_pair_state_for_record(self, record) -> PairCycleState | None:
+            return self.state.pairs["pair-a"]
+
     runtime: _RuntimeLike = _Runtime()
     asyncio.run(source.pump(runtime))
 
@@ -146,46 +149,66 @@ def test_private_order_poller_emits_head_confirmation_from_db(tmp_path) -> None:
     assert emitted[0].kind.value == "played_not_canceled"
 
 
-def test_private_order_poller_enriches_head_fill_with_public_reference() -> None:
+def test_private_order_poller_injects_side_aware_reference_price() -> None:
     now = datetime.now(timezone.utc)
+    record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="partially_filled",
+        exchange_order_id="OID-H",
+        client_order_id="CID-H",
+        quantity=2.0,
+        filled_quantity=1.0,
+        local_id=1,
+        local_timestamp=now.isoformat(),
+    )
 
     class _Market:
-        best_bid = 100.0
-        best_ask = 100.5
-        mid_price = 100.25
-        recorded_at = "tick-1"
+        best_bid = 99.0
+        best_ask = 101.0
+        mid_price = 100.0
+        recorded_at = now.isoformat()
 
     class _Client:
-        def fetch_private_orders_since(self, **_kwargs):
-            return (
-                PrivateOrderRecord(
-                    symbol="PI_XBTUSD",
-                    exchange_order_id="OID-H",
-                    client_order_id="CID-H",
-                    status="filled",
-                    side="buy",
-                    quantity=3.0,
-                    filled_quantity=3.0,
-                    source_timestamp=now.isoformat(),
-                    local_timestamp=now.isoformat(),
-                    local_id=1,
-                ),
-            )
+        def __init__(self) -> None:
+            self.sent = False
 
-        def fetch_market_state(self, symbol=None):
+        def fetch_private_orders_since(self, **_kwargs):
+            if self.sent:
+                return ()
+            self.sent = True
+            return (record,)
+
+        def fetch_market_state(self, symbol: str | None = None):
+            assert symbol == "PI_XBTUSD"
             return _Market()
 
     class _Runtime:
-        symbol = "PI_XBTUSD"
-        running = True
-
         def __init__(self) -> None:
+            pair = sample_pair("pair-a")
+            pair = OrderPairSpec(
+                name=pair.name,
+                window=pair.window,
+                try_num=pair.try_num,
+                dr_pause=pair.dr_pause,
+                timeout=pair.timeout,
+                head=HeadSpec(side=Side.SELL, order_type="Market"),
+                head_price=pair.head_price,
+                head_price_type=pair.head_price_type,
+                head_quantity=pair.head_quantity,
+                head_quantity_type=pair.head_quantity_type,
+                tail=pair.tail,
+                tail_price_spec=0.5,
+                tail_price_spec_type="t%",
+                amount_type="qAt%p%",
+            )
+            self.symbol = "PI_XBTUSD"
+            self.running = True
             self.state = StrategyState(
                 launched_at=now,
                 strategy_id="demo",
                 pairs={
                     "pair-a": PairCycleState(
-                        pair=percent_tail_pair("pair-a"),
+                        pair=pair,
                         head_identity=OrderIdentity(
                             pair_name="pair-a",
                             role="head",
@@ -195,24 +218,24 @@ def test_private_order_poller_enriches_head_fill_with_public_reference() -> None
                     )
                 },
             )
-            self.events = []
 
         @property
         def all_pairs_terminal(self) -> bool:
-            return bool(self.events)
+            return False
 
         async def enqueue(self, event) -> None:
-            self.events.append(event)
+            emitted.append(event)
+            self.running = False
 
         def record_targets_head(self, record) -> bool:
-            return True
+            return self.head_pair_state_for_record(record) is not None
 
-    runtime = _Runtime()
+        def head_pair_state_for_record(self, record) -> PairCycleState | None:
+            return self.state.pairs["pair-a"]
+
+    emitted = []
     source = KrakenPrivateOrderPollingSource(_Client(), poll_seconds=0.0)
 
-    asyncio.run(source.pump(runtime))
+    asyncio.run(source.pump(_Runtime()))
 
-    assert len(runtime.events) == 1
-    assert runtime.events[0].pair_name == "pair-a"
-    assert runtime.events[0].reply is not None
-    assert runtime.events[0].reply["reference_price"] == 100.0
+    assert emitted[0].reply["reference_price"] == 101.0

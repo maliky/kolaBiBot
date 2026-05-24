@@ -142,6 +142,45 @@ def test_partial_fill_tail_uses_played_quantity_not_planned_quantity() -> None:
     assert intents[0].kind == PairIntentKind.PLACE_TAIL
 
 
+def test_percent_tail_uses_reference_derived_stop() -> None:
+    pair = OrderPairSpec(
+        name="pair-a",
+        window=TimeWindow(start_minutes=-1.0, end_minutes=1.0),
+        try_num=1,
+        dr_pause=None,
+        timeout=None,
+        head=HeadSpec(side=Side.SELL, order_type="Market", delta=None),
+        head_price=(-1.0, 1.0),
+        head_price_type="p%",
+        head_quantity=2,
+        head_quantity_type="qA",
+        tail=TailSpec(side=Side.BUY, order_type="Stop", delta=None),
+        tail_price_spec=0.5,
+        tail_price_spec_type="t%",
+        amount_type="qAt%p%",
+    )
+    next_state, intents = step_pair(
+        PairCycleState(pair=pair, head_state=HeadState.SUBMITTED),
+        EggMove(
+            kind=EggMoveKind.PLAYED_NOT_CANCELED,
+            occurred_at=datetime.now(timezone.utc),
+            symbol="PI_XBTUSD",
+            reply={
+                "orderID": "OID-1",
+                "clOrdID": "CID-1",
+                "cumQty": 1.0,
+                "orderQty": 2.0,
+                "reference_price": 100.0,
+            },
+        ),
+    )
+
+    assert next_state.tail_trail is not None
+    assert next_state.tail_trail.current_stop_price == Decimal("100.5")
+    assert len(intents) == 1
+    assert intents[0].kind == PairIntentKind.PLACE_TAIL
+
+
 def test_step_pair_zero_fill_cancel_fails_without_tail() -> None:
     next_state, intents = step_pair(
         submitted_state(),
