@@ -2,78 +2,30 @@
 #+OPTIONS: toc:2 num:nil
 
 * <2026-05-24 dim. 20:10> Percent tail live failure notes
+stop sell at 75869
+stop buy at 76525.5
+stop buy at 77514.5
 
-- The parser kept =qAt%p%= correctly, but live execution still failed because
-  later boundaries did not preserve all tail semantics.
-- Older demo attempts show stop tails persisted with =price=1.5= and
-  =reduce_only= false. That confirms the raw =-T= fallback bug and the missing
-  =S-= reduce-only translation.
-- The latest demo attempt shows a filled head order but no later tail order in
-  the private DB. That points to runtime completion and private event delivery:
-  the bot can report success after the head while the protective tail has not
-  been submitted.
-- A private fill can arrive before the runtime has recorded the submitted head
-  identity. If the poller advances its cursor while the record is unmatched, the
-  event is lost for this run.
-- Account fill mapping receives =cli_ord_id= in raw Kraken payloads, but
-  fill-created order rows can lose it unless the fill event carries the client
-  order id through persistence.
+- A private fill can arrive before the runtime has recorded the submitted head  identity. If the poller advances its cursor while the record is unmatched, the  event is lost for this run.
+- Account fill mapping receives =cli_ord_id= in raw Kraken payloads, but  fill-created order rows can lose it unless the fill event carries the client  order id through persistence.
 
 Limitations:
 
-- Kraken demo WS and local SQLite persistence are asynchronous; a correct fix
-  can still wait on delayed DB rows and should fail loudly on timeout rather
-  than pretend the pair completed.
-- Kraken =fairPrice= does not map one-to-one to the old BitMEX vocabulary here;
-  =Sf-= is treated as mark-price trigger until a more precise Kraken source is
-  wired.
-- This pass keeps Chronos, Isis, Horus, and Ogun ownership boundaries; the
-  interpreter waits for completion, but reducer decisions remain pure.
+- Kraken =fairPrice= does not map one-to-one to the old BitMEX vocabulary here;  =Sf-= is treated as mark-price trigger until a more precise Kraken source is  wired.
 
 Implementation result:
 
-- Tail vocabulary is translated at the pure command boundary: =S-= becomes
-  ordType =S= plus =ReduceOnly,LastPrice=, =Sf-= becomes =ReduceOnly,MarkPrice=,
-  and =Si-= becomes =ReduceOnly,IndexPrice=.
-- Relative =t%= and =tD= tails still fail loudly if no =tail_trail= exists;
-  private head fills now receive side-aware =reference_price= before Isis sees
-  the event.
-- Private polling now starts from =launched_at - 5s=, buffers fresh unmatched
-  private records, and retries them after head identity is known instead of
-  losing the event.
-- Fill-created order rows now preserve Kraken =cli_ord_id= as
-  =client_order_id=, but already-running account stream processes must be
-  restarted before this persistence change is visible in live DB rows.
-- Live demo with an instrumented executor on =2026-05-24 20:09 UTC= produced a
-  head market order followed by a reduce-only stop tail:
-  =PlaceTailCommand(... ordType='S', stopPx=75454.94, execInst='ReduceOnly,LastPrice')=.
-  The stop was derived from reference =76604.0= at =1.5%=, not the raw =1.5=.
-  # I confirm for the head but inferm for the tail. I do not see it on the kraken demo plateform.
+- Tail vocabulary is translated at the pure command boundary: =S-= becomes  ordType =S= plus =ReduceOnly,LastPrice=, =Sf-= becomes =ReduceOnly,MarkPrice=,  and =Si-= becomes =ReduceOnly,IndexPrice=.
+- Relative =t%= and =tD= tails still fail loudly if no =tail_trail= exists;  private head fills now receive side-aware =reference_price= before Isis sees  the event.
+  # > What is this side-aware reference price ? does not sound functional
+- Private polling now starts from =launched_at - 5s=, buffers fresh unmatched  private records, and retries them after head identity is known instead of  losing the event.
+  # Why was the event lost what mechanisme and route did it take to get lost ?
 
 Remaining limitations:
 
-- The active account stream on this host was started before the patch during
-  validation; its DB rows can still omit =client_order_id= until restarted.
-- Demo DB status can lag actual REST position state. During validation,
-  =close-all= verified the exchange position was flat even while preflight still
-  showed a stale local position snapshot.
-- A future recovery patch should make =run-once= print the executed command list
-  or persist a run-local command journal so tail placement can be audited without
-  relying on the account websocket DB.
-
-Trace: I changed the percent-tail approach from trusting local tail state to
-proving the tail exists through Kraken trigger-orders. The head fill still flows
-through the pure pair reducer, but tail success is now accepted only after the
-exchange returns a matching reduce-only trigger order. This should make the
-missing-tail failure visible as a runtime error instead of a false successful
-run.
-
-Live proof: on =2026-05-24 21:05 UTC=, =MProof4= reported success only after
-=trigger-orders= returned =kolabi-MProof4-tail-20260524210509= as a reduce-only
-sell stop with =stop_price= =75483.0=. The raw percent tail had to be rounded to
-the Kraken =PI_XBTUSD= tick size; unrounded values were rejected before this
-patch.
-
+- Demo DB status can lag actual REST position state. During validation,  =close-all= verified the exchange position was flat even while preflight still  showed a stale local position snapshot.
+# > where does preflight takes its info from ?  
+- A future recovery patch should make =run-once= print the executed command list  or persist a run-local command journal so tail placement can be audited without relying on the account websocket DB.
 
 * <2026-05-20 Wed 16:18> Vocab
  - Hooked order :: ready to submit.
