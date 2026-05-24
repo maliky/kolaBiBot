@@ -117,7 +117,6 @@ def test_adapter_exchange_port_forwards_execinst_once(monkeypatch) -> None:
             "side": "sell",
             "orderQty": 11,
             "price": 75000.0,
-            "stopPx": None,
             "type_": "Limit",
             "clOrdID": "CID-1",
             "execInst": "ParticipateDoNotInitiate",

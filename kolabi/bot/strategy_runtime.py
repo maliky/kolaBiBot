@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from itertools import count
-from typing import Protocol, cast
+from typing import Protocol
 
 from kolabi.bot.chronos import Chronos, ChronosNotice
 from kolabi.bot.domain import (
@@ -28,6 +28,7 @@ from kolabi.bot.domain import (
     StrategyState,
 )
 from kolabi.bot.ids import head_client_order_id
+from kolabi.bot.order_building import head_order_dict
 from kolabi.bot.dragon import (
     MarketSnapshotFact,
     head_hooked_event,
@@ -40,7 +41,6 @@ from kolabi.bot.dragon import (
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     DragonSong,
-    OrderDict,
     OrderQty,
     PlaceOrderCommandRequest,
     PlaceHeadCommand,
@@ -348,14 +348,17 @@ class StrategyRuntime:
 
     def _prepare_command(self, command: DragonSong) -> DragonSong:
         if isinstance(command, PlaceHeadCommand) and command.request.clOrdID is None:
+            pair = self.state.pairs[command.request.pair_name].pair
             clordid = head_client_order_id(
-                self.state.pairs[command.request.pair_name].pair,
+                pair,
                 at=datetime.now(timezone.utc),
             )
             request = replace(command.request, clOrdID=clordid)
-            order = dict(command.legacy_order or {})
-            order["clOrdID"] = clordid
-            return replace(command, request=request, legacy_order=cast(OrderDict, order))
+            return replace(
+                command,
+                request=request,
+                legacy_order=head_order_dict(pair, client_order_id=clordid),
+            )
         return command
 
     def _followup_events(self, command: DragonSong, ack: OrderAck) -> tuple[EggMove, ...]:

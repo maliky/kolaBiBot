@@ -25,10 +25,12 @@ from kolabi.shared.config import ExchangeConfig, load_exchange_config
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
+    AmendOrderCommandRequest,
     AmendTailCommand,
     CancelCommand,
     ExchangePort,
     PlaceHeadCommand,
+    PlaceOrderCommandRequest,
     PlaceTailCommand,
 )
 from kolabi.shared.exchanges import get_adapter
@@ -352,8 +354,14 @@ class AdapterExchangePort(ExchangePort):
     async def cancel(self, command: CancelCommand) -> OrderAck:
         return self.adapter.cancel_order(command.request.clOrdID)
 
-    def _place(self, request: Any) -> OrderAck:
+    def _place(self, request: PlaceOrderCommandRequest) -> OrderAck:
+        if request.orderQty is None:
+            raise ValueError(f"Missing orderQty for place request on pair '{request.pair_name}'")
         params: dict[str, Any] = {}
+        if request.price is not None:
+            params["price"] = request.price
+        if request.stopPx is not None:
+            params["stopPx"] = request.stopPx
         if request.clOrdID is not None:
             params["clOrdID"] = request.clOrdID
         if request.execInst is not None:
@@ -365,13 +373,11 @@ class AdapterExchangePort(ExchangePort):
         return self.adapter.place_order(
             request.side,
             request.orderQty,
-            price=request.price,
-            stopPx=request.stopPx,
             type_=request.ordType,
             **params,
         )
 
-    def _amend(self, request: Any) -> OrderAck:
+    def _amend(self, request: AmendOrderCommandRequest) -> OrderAck:
         params: dict[str, Any] = {}
         if request.newPrice is not None:
             params["price"] = request.newPrice

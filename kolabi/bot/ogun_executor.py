@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import cast
 
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
@@ -57,13 +56,13 @@ class OgunExecutor:
 
     async def _dispatch(self, command: DragonSong) -> OrderAck:
         if isinstance(command, PlaceHeadCommand):
-            return cast(OrderAck, await self.port.place_head(command))
+            return await self.port.place_head(command)
         if isinstance(command, PlaceTailCommand):
-            return cast(OrderAck, await self.port.place_tail(command))
+            return await self.port.place_tail(command)
         if isinstance(command, AmendHeadCommand):
-            return cast(OrderAck, await self.port.amend_head(command))
+            return await self.port.amend_head(command)
         if isinstance(command, AmendTailCommand):
-            return cast(OrderAck, await self.port.amend_tail(command))
+            return await self.port.amend_tail(command)
         if isinstance(command, CancelCommand):
-            return cast(OrderAck, await self.port.cancel(command))
+            return await self.port.cancel(command)
         raise TypeError(f"Unsupported DragonSong type: {type(command)!r}")
