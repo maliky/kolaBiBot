@@ -398,6 +398,25 @@ class AccountStateStore:
             session.refresh(row)
             return row
 
+    def latest_balance_by_asset(self) -> dict[str, tuple[float, float, float]]:
+        """Retourne le dernier solde connu par actif depuis la DB."""
+        with self.sessionmaker() as session:
+            rows = session.execute(
+                select(AccountBalance)
+                .where(
+                    AccountBalance.exchange == self.config.exchange,
+                    AccountBalance.environment == self.config.environment,
+                    AccountBalance.account_scope == self.config.account_scope,
+                )
+                .order_by(AccountBalance.id.desc())
+            ).scalars()
+            latest: dict[str, tuple[float, float, float]] = {}
+            for row in rows:
+                if row.asset in latest:
+                    continue
+                latest[row.asset] = (row.available, row.locked, row.total)
+            return latest
+
     def record_position(self, position: PositionWrite) -> AccountPosition:
         """Persiste une position normalisee."""
         with self.sessionmaker() as session:
@@ -499,6 +518,9 @@ class KrakenFuturesPrivateStream:
         self.credentials = credentials
         self.logger = setup_logging(config.log_level)
         self._running = True
+        self._last_balances: dict[str, tuple[float, float, float]] = (
+            self.store.latest_balance_by_asset()
+        )
 
     async def run(self) -> None:
         """Tourne en continu avec reconnexion conservative."""
@@ -687,6 +709,8 @@ class KrakenFuturesPrivateStream:
                     if not feed.endswith("snapshot"):
                         if _is_null_balance(balance):
                             continue
+                        if not self._balance_changed(balance):
+                            continue
                         self.logger.info(
                             "kraken_account balance_event feed=%s asset=%s available=%.8f locked=%.8f total=%.8f",
                             feed,
@@ -731,12 +755,19 @@ class KrakenFuturesPrivateStream:
                     order_id,
                     notice,
                 )
+
         except Exception as exc:
             self.store.record_connection_status(
                 "private_ws", "error", last_error=f"{feed}: {exc}"
             )
             raise
         self.store.record_connection_status("private_ws", "healthy")
+
+    def _balance_changed(self, balance: BalanceWrite) -> bool:
+        current = (balance.available, balance.locked, balance.total)
+        previous = self._last_balances.get(balance.asset)
+        self._last_balances[balance.asset] = current
+        return previous != current
 
 
 class KrakenFuturesRestReconciler:

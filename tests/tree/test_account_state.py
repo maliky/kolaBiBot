@@ -14,6 +14,7 @@ from kolabi.shared.persistence import (
 from kolabi.tree.account import (
     AccountStateStore,
     AccountStreamConfig,
+    BalanceWrite,
     FillWrite,
     OrderWrite,
     map_balances,
@@ -536,6 +537,56 @@ def test_handle_message_logs_balance_delta_event(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         stream.handle_message(message)
     assert "balance_event feed=balances asset=USD" in caplog.text
+
+
+def test_handle_message_suppresses_unchanged_balance_logs(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "balances",
+        "holding": {"USD": 100.0},
+        "timestamp": 1779577521578,
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+        stream.handle_message(message)
+    assert caplog.text.count("balance_event feed=balances asset=USD") == 1
+
+
+def test_handle_message_suppresses_balance_log_if_same_as_db(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    config = AccountStreamConfig(db_url=db_url)
+    store = AccountStateStore(config)
+    store.record_balance(
+        BalanceWrite(
+            asset="USD",
+            available=100.0,
+            locked=0.0,
+            total=100.0,
+        )
+    )
+    message = {
+        "feed": "balances",
+        "holding": {"USD": 100.0},
+        "timestamp": 1779577521578,
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        config,
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "balance_event feed=balances asset=USD" not in caplog.text
 
 
 def test_handle_message_suppresses_null_balance_logs(tmp_path, caplog):
