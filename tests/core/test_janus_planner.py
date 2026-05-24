@@ -52,6 +52,27 @@ def sample_pair(name: str, *, tail_order_type: str = "Stop") -> OrderPairSpec:
     )
 
 
+def percent_tail_pair(name: str) -> OrderPairSpec:
+    pair = sample_pair(name)
+    return OrderPairSpec(
+        name=pair.name,
+        window=pair.window,
+        try_num=pair.try_num,
+        dr_pause=pair.dr_pause,
+        timeout=pair.timeout,
+        head=pair.head,
+        head_price=pair.head_price,
+        head_price_type="p%",
+        head_quantity=pair.head_quantity,
+        head_quantity_type=pair.head_quantity_type,
+        tail=pair.tail,
+        tail_price_spec=1.5,
+        tail_price_spec_type="t%",
+        amount_type="qAt%p%",
+        hook_name=pair.hook_name,
+    )
+
+
 def sample_state(
     *,
     name: str = "pair-a",
@@ -212,6 +233,22 @@ def test_tail_commands_use_dynamic_trail_stop_when_present() -> None:
     assert place.request.stopPx == Decimal("101.2")
     assert isinstance(amend, AmendTailCommand)
     assert amend.request.newPrice == Decimal("101.2")
+
+
+def test_percent_tail_without_trail_reference_fails_loudly() -> None:
+    state = PairCycleState(
+        pair=percent_tail_pair("pair-a"),
+        head_state=HeadState.LIVING,
+        tail_state=TailState.LIVING,
+        played_quantity=Decimal("3"),
+    )
+
+    with pytest.raises(ValueError, match="requires a reference-priced tail trail"):
+        plan_runtime_commands(
+            state,
+            (PairIntent(PairIntentKind.PLACE_TAIL),),
+            symbol=Symbol("PI_XBTUSD"),
+        )
 
 
 def test_amend_tail_without_identity_raises() -> None:

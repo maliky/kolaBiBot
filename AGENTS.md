@@ -32,6 +32,7 @@
 - Keep comments bilingual when touching legacy sections.
 - Use British English as the working language for code, docs, and reports unless the user explicitly asks otherwise.
 - Preserve the existing Org formatting style in repo docs such as `README.org`, `DEV.org`, and `MANUAL.org`; extend the local pattern instead of reformatting the whole file.
+- For `.org` documentation, do not hard-wrap lines at 80 columns; keep original long lines and let the user manage wrapping.
 - Treat comment lines starting with `# >` in Org files as operator notes for Codex; satisfy them when the surrounding task touches that section, and then remove or replace them with the concrete result.
 - Final summaries for the user should be formatted as org-mode bullets/headings done with - and simple *.
 - Avoid non-legally-safe glyphs (no arrows like  →, “, fancy quotes, en/em dashes, – etc.); stick to plain ASCII.

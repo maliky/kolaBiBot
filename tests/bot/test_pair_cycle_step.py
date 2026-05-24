@@ -19,7 +19,9 @@ from kolabi.bot.domain import (
     TailState,
     TimeWindow,
 )
+from kolabi.bot.horus import plan_runtime_commands
 from kolabi.bot.pair_cycle import step_pair
+from kolabi.shared.core.runtime_types import PlaceTailCommand, Symbol
 
 
 def sample_pair() -> OrderPairSpec:
@@ -50,6 +52,27 @@ def sample_pair() -> OrderPairSpec:
     )
 
 
+def percent_tail_pair() -> OrderPairSpec:
+    pair = sample_pair()
+    return OrderPairSpec(
+        name=pair.name,
+        window=pair.window,
+        try_num=pair.try_num,
+        dr_pause=pair.dr_pause,
+        timeout=pair.timeout,
+        head=pair.head,
+        head_price=pair.head_price,
+        head_price_type="p%",
+        head_quantity=pair.head_quantity,
+        head_quantity_type=pair.head_quantity_type,
+        tail=pair.tail,
+        tail_price_spec=1.5,
+        tail_price_spec_type="t%",
+        amount_type="qAt%p%",
+        hook_name=pair.hook_name,
+    )
+
+
 def egg_move(kind: EggMoveKind, *, played_quantity: float = 0.0) -> EggMove:
     return EggMove(
         kind=kind,
@@ -68,6 +91,13 @@ def egg_move(kind: EggMoveKind, *, played_quantity: float = 0.0) -> EggMove:
 def submitted_state() -> PairCycleState:
     return PairCycleState(
         pair=sample_pair(),
+        head_state=HeadState.SUBMITTED,
+    )
+
+
+def submitted_percent_tail_state() -> PairCycleState:
+    return PairCycleState(
+        pair=percent_tail_pair(),
         head_state=HeadState.SUBMITTED,
     )
 
@@ -229,6 +259,25 @@ def test_private_confirmation_required_for_tail_hook() -> None:
 
     assert next_state.head_state == HeadState.NEW
     assert intents == ()
+
+
+def test_percent_tail_place_uses_reference_price_not_raw_tail_spec() -> None:
+    next_state, intents = step_pair(
+        submitted_percent_tail_state(),
+        egg_move(EggMoveKind.PLAYED_NOT_CANCELED, played_quantity=3.0),
+    )
+
+    commands = plan_runtime_commands(
+        next_state,
+        intents,
+        symbol=Symbol("PI_XBTUSD"),
+    )
+
+    assert next_state.tail_trail is not None
+    assert next_state.tail_trail.current_stop_price == Decimal("98.500")
+    assert len(commands) == 1
+    assert isinstance(commands[0], PlaceTailCommand)
+    assert commands[0].request.stopPx == Decimal("98.500")
 
 
 def test_market_tick_with_tail_identity_emits_amend_only_on_improvement() -> None:

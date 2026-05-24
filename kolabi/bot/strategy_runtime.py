@@ -24,6 +24,7 @@ from kolabi.bot.domain import (
     EggMove,
     HeadState,
     OrderIdentity,
+    PairCycleState,
     StrategySpec,
     StrategyState,
     TailState,
@@ -41,6 +42,7 @@ from kolabi.bot.dragon import (
     simulated_private_fill_from_submission,
     tail_submitted_from_ack,
 )
+from kolabi.bot.pricing import reference_price
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     DragonSong,
@@ -218,9 +220,13 @@ class KrakenPrivateOrderPollingSource:
         self,
         client: PrivateOrderStateReader,
         *,
+        public_client: PublicRuntimeStateReader | None = None,
         poll_seconds: float = 1.0,
     ) -> None:
         self.client = client
+        self.public_client = public_client or (
+            client if hasattr(client, "fetch_market_state") else None
+        )
         self.poll_seconds = poll_seconds
         self.after_local_timestamp: datetime | None = None
         self.after_local_id: int | None = None
@@ -239,8 +245,19 @@ class KrakenPrivateOrderPollingSource:
                 self.after_local_id = record.local_id
                 if not runtime.record_targets_head(record):
                     continue
-                fact = private_order_fact_from_record(record)
+                pair_state = _head_pair_state_for_record(runtime.state, record)
+                fact = private_order_fact_from_record(
+                    record,
+                    pair_name=None if pair_state is None else pair_state.pair.name,
+                )
                 move = head_move_from_private_fact(fact)
+                if pair_state is not None:
+                    move = _with_public_reference_price(
+                        move,
+                        pair_state=pair_state,
+                        public_client=self.public_client,
+                        symbol=runtime.symbol,
+                    )
                 event_id = (
                     f"private-order:{record.local_id}"
                     if record.local_id is not None
@@ -463,6 +480,35 @@ def _record_matches_identity(record, identity: OrderIdentity) -> bool:
     ):
         return True
     return False
+
+
+def _head_pair_state_for_record(
+    state: StrategyState,
+    record: object,
+) -> PairCycleState | None:
+    for pair_state in state.pairs.values():
+        head_identity = pair_state.head_identity
+        if head_identity is not None and _record_matches_identity(record, head_identity):
+            return pair_state
+    return None
+
+
+def _with_public_reference_price(
+    move: EggMove,
+    *,
+    pair_state: PairCycleState,
+    public_client: PublicRuntimeStateReader | None,
+    symbol: str,
+) -> EggMove:
+    if public_client is None:
+        return move
+    market = public_client.fetch_market_state(symbol)
+    reference = reference_price(pair_state.pair.head.side, market)
+    if reference <= 0:
+        return move
+    reply = dict(move.reply or {})
+    reply["reference_price"] = reference
+    return replace(move, reply=reply)
 
 
 def _record_timestamp(record) -> datetime | None:

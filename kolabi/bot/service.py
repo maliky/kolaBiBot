@@ -301,7 +301,10 @@ class BotService:
     def _build_private_source(self, *, simulate: bool):
         if simulate or self.runtime_state is None:
             return None
-        return KrakenPrivateOrderPollingSource(self.runtime_state)
+        return KrakenPrivateOrderPollingSource(
+            self.runtime_state,
+            public_client=self.runtime_state,
+        )
 
     def _ensure_exchange_config(self) -> None:
         if self.exchange_config is not None:
