@@ -23,14 +23,22 @@ from sqlalchemy import (
     delete,
     event,
     func,
+    inspect,
     select,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Mapped, Session, mapped_column, relationship, sessionmaker
 
 from kolabi.shared.kraken_futures import kraken_futures_environment
 from kolabi.shared.logging import setup_logging
-from kolabi.shared.persistence import Base, MarketIndicator, MarketLevel, MarketSnapshot
+from kolabi.shared.persistence import (
+    Base,
+    MarketIndicator,
+    MarketLevel,
+    MarketSnapshot,
+    RawExchangeEvent,
+)
 
 BookLevelT = tuple[float, float]
 BookSignatureT = tuple[tuple[BookLevelT, ...], tuple[BookLevelT, ...]]
@@ -55,6 +63,8 @@ class KrakenConfig:
     log_interval_seconds: float = 6.0
     retention_minutes: int = 30
     reconnect_seconds: int = 5
+    raw_retention_minutes: int = 1440
+    raw_retention_limit: int = 100000
     trace_ws: bool = False
     trace_ws_format: str = "compact"
     trace_ws_max_lines: int = 0
@@ -128,6 +138,7 @@ class KrakenTree:
         self.logger = setup_logging(config.log_level)
         self.engine = build_engine(config.db_url)
         Base.metadata.create_all(self.engine)
+        upgrade_public_schema(self.engine)
         self.sessionmaker = sessionmaker(
             bind=self.engine,
             expire_on_commit=False,
@@ -194,12 +205,85 @@ class KrakenTree:
         )
         message = json.loads(payload)
         self._raw_message_count += 1
+        self.record_raw_event(message, stream_kind="public_ws")
         self.trace_message(message, payload)
         parsed = extract_book_payload(message)
         if parsed is None:
             return None
         self._book_message_count += 1
         return self.ingest_payload(parsed, datetime.now(timezone.utc))
+
+    def record_raw_event(
+        self,
+        message: dict[str, object],
+        stream_kind: str = "public_ws",
+    ) -> RawExchangeEvent:
+        """Persiste le payload brut public avec collapse des doublons consecutifs."""
+        event_type = str(message.get("feed") or message.get("event") or "unknown")
+        payload = dict(message)
+        source_timestamp = parse_kraken_time(
+            first_present(payload, "timestamp", "time", "last_update_time")
+        )
+        now = datetime.now(timezone.utc)
+        with self.sessionmaker() as session:
+            previous = (
+                session.execute(
+                    select(RawExchangeEvent)
+                    .where(
+                        RawExchangeEvent.exchange == self.config.exchange,
+                        RawExchangeEvent.environment == self.config.environment,
+                        RawExchangeEvent.stream_kind == stream_kind,
+                        RawExchangeEvent.event_type == event_type,
+                    )
+                    .order_by(RawExchangeEvent.received_at.desc(), RawExchangeEvent.id.desc())
+                )
+                .scalars()
+                .first()
+            )
+            if previous is not None and previous.payload == payload:
+                previous.duplicate_count = int(previous.duplicate_count or 0) + 1
+                previous.last_seen_at = now
+                prune_raw_events(
+                    session,
+                    config=self.config,
+                    retention_minutes=self.config.raw_retention_minutes,
+                    retention_limit=self.config.raw_retention_limit,
+                    now=now,
+                    stream_kind=stream_kind,
+                )
+                session.commit()
+                session.refresh(previous)
+                return previous
+
+            row = RawExchangeEvent(
+                exchange=self.config.exchange,
+                environment=self.config.environment,
+                market_type=self.config.market_type,
+                account_scope="public",
+                symbol=raw_event_symbol(payload),
+                stream_kind=stream_kind,
+                event_type=event_type,
+                correlation_id=raw_event_correlation_id(payload),
+                exchange_sequence=optional_str(payload.get("seq")),
+                payload=payload,
+                source_timestamp=source_timestamp,
+                duplicate_count=0,
+                last_seen_at=now,
+                received_at=now,
+                created_at=now,
+            )
+            session.add(row)
+            prune_raw_events(
+                session,
+                config=self.config,
+                retention_minutes=self.config.raw_retention_minutes,
+                retention_limit=self.config.raw_retention_limit,
+                now=now,
+                stream_kind=stream_kind,
+            )
+            session.commit()
+            session.refresh(row)
+            return row
 
     def ingest_payload(self, payload: BookPayload, received_at: datetime) -> PendingBook:
         """Applique un snapshot ou un delta puis derive les indicateurs."""
@@ -494,6 +578,64 @@ def cast_dbapi_connection(connection: object) -> Any:
     return connection
 
 
+def upgrade_public_schema(engine: Engine) -> None:
+    """Apply additive SQLite schema upgrades for existing public DBs."""
+    if getattr(engine.dialect, "name", "") != "sqlite":
+        return
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    with engine.begin() as connection:
+        if "raw_exchange_events" in tables:
+            ensure_columns(
+                connection,
+                "raw_exchange_events",
+                {
+                    "environment": "VARCHAR(32)",
+                    "market_type": "VARCHAR(32)",
+                    "account_scope": "VARCHAR(64)",
+                    "symbol": "VARCHAR(64)",
+                    "exchange_sequence": "VARCHAR(128)",
+                    "source_timestamp": "DATETIME",
+                    "duplicate_count": "INTEGER",
+                    "last_seen_at": "DATETIME",
+                    "received_at": "DATETIME",
+                },
+            )
+            connection.execute(
+                text(
+                    "UPDATE raw_exchange_events "
+                    "SET duplicate_count = COALESCE(duplicate_count, 0) "
+                    "WHERE duplicate_count IS NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE raw_exchange_events "
+                    "SET last_seen_at = COALESCE(last_seen_at, received_at) "
+                    "WHERE last_seen_at IS NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_identity "
+                    "ON raw_exchange_events "
+                    "(exchange, environment, stream_kind, event_type, correlation_id)"
+                )
+            )
+
+
+def ensure_columns(connection: Any, table_name: str, columns: dict[str, str]) -> None:
+    existing = {
+        str(row[1])
+        for row in connection.execute(text(f"PRAGMA table_info({table_name})"))
+    }
+    for column_name, column_type in columns.items():
+        if column_name not in existing:
+            connection.execute(
+                text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+            )
+
+
 def subscription_message(config: KrakenConfig) -> dict[str, object]:
     """Construit le message d'abonnement Kraken Futures book."""
     return {
@@ -666,6 +808,50 @@ def parse_kraken_time(value: object) -> datetime | None:
     return None
 
 
+def first_present(payload: dict[str, object], *keys: str) -> object:
+    """Retourne le premier champ present meme si sa valeur vaut 0."""
+    for key in keys:
+        if key in payload:
+            return payload[key]
+    return None
+
+
+def optional_str(value: object) -> str | None:
+    """Convertit une valeur optionnelle en str."""
+    if value is None or value == "":
+        return None
+    return str(value)
+
+
+def raw_event_symbol(payload: dict[str, object]) -> str | None:
+    direct = optional_str(payload.get("product_id") or payload.get("symbol"))
+    if direct:
+        return direct
+    for key in ("asks", "bids", "orders", "fills"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    nested = optional_str(item.get("product_id") or item.get("symbol"))
+                    if nested:
+                        return nested
+    return None
+
+
+def raw_event_correlation_id(payload: dict[str, object]) -> str | None:
+    direct = optional_str(
+        payload.get("order_id")
+        or payload.get("orderId")
+        or payload.get("fill_id")
+        or payload.get("fillId")
+        or payload.get("cli_ord_id")
+        or payload.get("cliOrdId")
+    )
+    if direct:
+        return direct
+    return optional_str(payload.get("seq"))
+
+
 def calculate_metrics(
     asks: Sequence[BookLevelT], bids: Sequence[BookLevelT]
 ) -> BookMetrics:
@@ -789,6 +975,48 @@ def prune_old_market_data(
         delete(MarketIndicator).where(MarketIndicator.snapshot_id.in_(old_ids))
     )
     session.execute(delete(MarketSnapshot).where(MarketSnapshot.local_timestamp < cutoff))
+
+
+def prune_raw_events(
+    session: Session,
+    *,
+    config: KrakenConfig,
+    retention_minutes: int,
+    retention_limit: int,
+    now: datetime,
+    stream_kind: str = "public_ws",
+) -> None:
+    """Apply bounded raw public-event retention for one stream identity."""
+    base_filters = (
+        RawExchangeEvent.exchange == config.exchange,
+        RawExchangeEvent.environment == config.environment,
+        RawExchangeEvent.stream_kind == stream_kind,
+    )
+    if retention_minutes > 0:
+        cutoff = now - timedelta(minutes=retention_minutes)
+        session.execute(
+            delete(RawExchangeEvent)
+            .where(
+                *base_filters,
+                RawExchangeEvent.received_at < cutoff,
+            )
+            .execution_options(synchronize_session=False)
+        )
+    if retention_limit > 0:
+        keep_ids = (
+            select(RawExchangeEvent.id)
+            .where(*base_filters)
+            .order_by(RawExchangeEvent.received_at.desc(), RawExchangeEvent.id.desc())
+            .limit(retention_limit)
+        )
+        session.execute(
+            delete(RawExchangeEvent)
+            .where(
+                *base_filters,
+                RawExchangeEvent.id.notin_(keep_ids),
+            )
+            .execution_options(synchronize_session=False)
+        )
 
 
 def prune_old_indicators(

@@ -6,7 +6,12 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from kolabi.bot.indicators import KrakenDbIndicatorClient
-from kolabi.shared.persistence import MarketIndicator, MarketLevel, MarketSnapshot
+from kolabi.shared.persistence import (
+    MarketIndicator,
+    MarketLevel,
+    MarketSnapshot,
+    RawExchangeEvent,
+)
 from kolabi.tree.kraken import (
     KrakenConfig,
     KrakenTree,
@@ -336,3 +341,27 @@ def test_delta_before_snapshot_raises():
 
     with pytest.raises(ValueError):
         apply_book_payload(None, delta, depth=3)
+
+
+def test_public_raw_event_consecutive_duplicate_is_collapsed(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+    tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
+    message = {
+        "feed": "notifications_auth",
+        "notifications": [],
+    }
+
+    tree.handle_message(json.dumps(message))
+    tree.handle_message(json.dumps(message))
+
+    with Session(tree.engine) as session:
+        rows = (
+            session.execute(
+                select(RawExchangeEvent).order_by(RawExchangeEvent.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].event_type == "notifications_auth"
+        assert rows[0].duplicate_count == 1
