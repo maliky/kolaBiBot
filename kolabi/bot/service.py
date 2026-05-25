@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Iterable, Optional, Protocol, TypedDict, cast
@@ -346,23 +348,34 @@ class AdapterExchangePort(ExchangePort):
                 **exchange_config.adapter_kwargs,
             ),
         )
+        self._raw_log_path = Path("logs") / f"{exchange.lower()}-exchange-raw.ndjson"
+        self._raw_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     async def place_head(self, command: PlaceHeadCommand) -> OrderAck:
-        return self._place(command.request)
+        ack = self._place(command.request)
+        self._write_raw_event("place_head", command.request, ack)
+        return ack
 
     async def place_tail(self, command: PlaceTailCommand) -> OrderAck:
         ack = self._place(command.request)
+        self._write_raw_event("place_tail", command.request, ack)
         await self._verify_tail_trigger(command.request, ack)
         return ack
 
     async def amend_head(self, command: AmendHeadCommand) -> OrderAck:
-        return self._amend_head(command.request)
+        ack = self._amend_head(command.request)
+        self._write_raw_event("amend_head", command.request, ack)
+        return ack
 
     async def amend_tail(self, command: AmendTailCommand) -> OrderAck:
-        return self._amend_tail(command.request)
+        ack = self._amend_tail(command.request)
+        self._write_raw_event("amend_tail", command.request, ack)
+        return ack
 
     async def cancel(self, command: CancelCommand) -> OrderAck:
-        return self.adapter.cancel_order(command.request.clOrdID)
+        ack = self.adapter.cancel_order(command.request.clOrdID)
+        self._write_raw_event("cancel", command.request, ack)
+        return ack
 
     def _place(self, request: PlaceOrderCommandRequest) -> OrderAck:
         if request.orderQty is None:
@@ -444,6 +457,24 @@ class AdapterExchangePort(ExchangePort):
             params["text"] = request.text
         return self.adapter.amend_order(request.orderID, **params)
 
+    def _write_raw_event(self, action: str, request: object, ack: OrderAck) -> None:
+        payload = {
+            "action": action,
+            "request": _request_to_dict(request),
+            "ack": {
+                "order_id": ack.order_id,
+                "status": ack.status,
+                "price": ack.price,
+                "orig_qty": ack.orig_qty,
+                "executed_qty": ack.executed_qty,
+                "side": ack.side,
+            },
+            "raw_payload": getattr(ack, "raw_payload", None),
+        }
+        with self._raw_log_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, default=str, separators=(",", ":")))
+            stream.write("\n")
+
 
 def _matching_tail_trigger_order(
     orders: list[dict[str, Any]],
@@ -515,3 +546,11 @@ def _decimal_or_none(value: object) -> Decimal | None:
     if isinstance(value, (int, float, str)):
         return Decimal(str(value))
     return None
+
+
+def _request_to_dict(request: object) -> dict[str, object]:
+    if isinstance(request, dict):
+        return dict(request)
+    if hasattr(request, "__dict__"):
+        return dict(vars(request))
+    return {"value": str(request)}

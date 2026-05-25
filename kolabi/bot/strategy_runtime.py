@@ -13,6 +13,7 @@ Role: interpreter shell.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -56,6 +57,8 @@ from kolabi.shared.core.runtime_types import (
     Symbol,
     to_decimal,
 )
+
+_LOGGER = logging.getLogger("kola")
 
 
 class CommandExecutor(Protocol):
@@ -370,6 +373,7 @@ class StrategyRuntime:
                     event = await asyncio.wait_for(self.event_queue.get(), timeout=0.2)
                 except TimeoutError:
                     continue
+                previous_pairs = dict(self.state.pairs)
                 for command in self.chronos.process_event(event):
                     prepared = self._prepare_command(command)
                     self.commands.append(prepared)
@@ -379,6 +383,7 @@ class StrategyRuntime:
                     for followup in self._followup_events(prepared, ack):
                         await self.enqueue(followup)
                 self.state = self.chronos.state
+                self._log_living_updates(previous_pairs)
         finally:
             await self.stop()
         return StrategyRunResult(
@@ -386,6 +391,39 @@ class StrategyRuntime:
             commands=tuple(self.commands),
             notices=tuple(self.chronos.notices),
         )
+
+    def _log_living_updates(self, previous_pairs: dict[str, PairCycleState]) -> None:
+        for pair_name, current in self.state.pairs.items():
+            previous = previous_pairs.get(pair_name)
+            if previous is None:
+                continue
+            if current.head_state not in {HeadState.LIVING, HeadState.CLOSED} and current.tail_state not in {
+                TailState.LIVING,
+                TailState.SUBMITTED,
+            }:
+                continue
+            quantity_changed = current.played_quantity != previous.played_quantity
+            stop_previous = (
+                None if previous.tail_trail is None else previous.tail_trail.current_stop_price
+            )
+            stop_current = (
+                None if current.tail_trail is None else current.tail_trail.current_stop_price
+            )
+            stop_changed = stop_current != stop_previous
+            state_changed = (
+                current.head_state != previous.head_state
+                or current.tail_state != previous.tail_state
+            )
+            if not (quantity_changed or stop_changed or state_changed):
+                continue
+            _LOGGER.info(
+                "pair_update pair=%s head_state=%s tail_state=%s played_qty=%s tail_stop=%s",
+                pair_name,
+                current.head_state.value,
+                current.tail_state.value if current.tail_state is not None else "-",
+                str(current.played_quantity) if current.played_quantity is not None else "-",
+                str(stop_current) if stop_current is not None else "-",
+            )
 
     def record_targets_head(self, record) -> bool:
         return self.head_pair_state_for_record(record) is not None
@@ -453,16 +491,10 @@ class StrategyRuntime:
             occurred_at=datetime.now(timezone.utc),
         )
         if not self.simulate:
-            live_played_quantity = _played_quantity_from_ack(ack)
-            if live_played_quantity is None or live_played_quantity <= 0:
-                return (submitted,)
-            confirmed = simulated_private_fill_from_submission(
-                submitted,
-                played_quantity=live_played_quantity,
-                closed=_ack_is_terminal(ack),
-            )
-            confirmed = _copy_reference_price(confirmed, submitted)
-            return (submitted, confirmed)
+            # Live/demo mode waits for private order records before progressing
+            # to HEAD_PLAYED and tail placement, preventing early reduce-only
+            # trigger rejects on just-acked market heads.
+            return (submitted,)
         simulated_played_quantity = _played_quantity_from_request(command.request)
         submitted_with_reference = _with_simulated_reference_price(submitted, command)
         confirmed = simulated_private_fill_from_submission(
@@ -517,12 +549,7 @@ def _pair_runtime_complete(pair_state: PairCycleState) -> bool:
     played = pair_state.played_quantity is not None and pair_state.played_quantity > 0
     if not played:
         return True
-    return pair_state.tail_state in {
-        TailState.SUBMITTED,
-        TailState.LIVING,
-        TailState.CLOSED,
-        TailState.FAILED,
-    }
+    return pair_state.tail_state in {TailState.CLOSED, TailState.FAILED}
 
 
 def _with_simulated_reference_price(

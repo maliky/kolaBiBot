@@ -1280,3 +1280,9 @@ python -m pytest -q \
   tests/tree/test_account_state.py \
   tests/tree/test_kraken_tree.py
 #+end_src
+
+* Tail Fix Trace 2026-05-25
+
+I changed live runtime flow so a head REST ack only emits HEAD_SUBMITTED; HEAD_PLAYED now comes from private order polling, which gates tail placement on confirmed fill. I added raw exchange interaction logging at the adapter port boundary to `logs/kraken-exchange-raw.ndjson` with request, ack, and raw payload fields for deterministic troubleshooting. I also kept trigger-order verification and updated runtime tests to require private fill confirmation before tail submission.
+
+Limitations: if private feed is stale or unavailable, tail placement is delayed or can time out by design; this fails loudly rather than placing a potentially invalid reduce-only trigger too early.
