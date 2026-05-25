@@ -11,22 +11,38 @@ Transitional: yes, extracted from `pair_cycle.py` as part of reducer cleanup.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
+
+import coolname
 
 from kolabi.bot.domain import OrderPairSpec
 
 
 def head_client_order_id(pair: OrderPairSpec, *, at: datetime | None = None) -> str:
-    """Build a bounded, exchange-safe client identifier for head submissions."""
-    safe_name = "".join(ch for ch in pair.name if ch.isalnum() or ch in {"_", "-"})
-    timestamp = at if at is not None else datetime.now(timezone.utc)
-    stamp = timestamp.strftime("%Y%m%d%H%M%S")
-    return f"kolabi-{safe_name}-head-{stamp}"[:64]
+    """Build a readable, exchange-safe client identifier for head submissions."""
+    del pair
+    return _client_order_id("H", at=at)
 
 
 def tail_client_order_id(pair: OrderPairSpec, *, at: datetime | None = None) -> str:
-    """Build a bounded, exchange-safe client identifier for tail submissions."""
-    safe_name = "".join(ch for ch in pair.name if ch.isalnum() or ch in {"_", "-"})
+    """Build a readable, exchange-safe client identifier for tail submissions."""
+    del pair
+    return _client_order_id("T", at=at)
+
+
+def _client_order_id(prefix: str, *, at: datetime | None = None) -> str:
     timestamp = at if at is not None else datetime.now(timezone.utc)
-    stamp = timestamp.strftime("%Y%m%d%H%M%S")
-    return f"kolabi-{safe_name}-tail-{stamp}"[:64]
+    stamp = timestamp.strftime("%y%m%d%H%M%S")
+    word = _slug_word()
+    candidate = f"{prefix}-{word}-{stamp}".lower()
+    safe = re.sub(r"[^a-z0-9-]+", "-", candidate).strip("-")
+    return safe[:64]
+
+
+def _slug_word() -> str:
+    slug = coolname.generate_slug(2)
+    words = [word for word in slug.split("-") if word]
+    if words:
+        return words[0]
+    return "signal"
