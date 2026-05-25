@@ -453,16 +453,10 @@ class StrategyRuntime:
             occurred_at=datetime.now(timezone.utc),
         )
         if not self.simulate:
-            live_played_quantity = _played_quantity_from_ack(ack)
-            if live_played_quantity is None or live_played_quantity <= 0:
-                return (submitted,)
-            confirmed = simulated_private_fill_from_submission(
-                submitted,
-                played_quantity=live_played_quantity,
-                closed=_ack_is_terminal(ack),
-            )
-            confirmed = _copy_reference_price(confirmed, submitted)
-            return (submitted, confirmed)
+            # Live/demo mode waits for private order records before progressing
+            # to HEAD_PLAYED and tail placement, preventing early reduce-only
+            # trigger rejects on just-acked market heads.
+            return (submitted,)
         simulated_played_quantity = _played_quantity_from_request(command.request)
         submitted_with_reference = _with_simulated_reference_price(submitted, command)
         confirmed = simulated_private_fill_from_submission(
