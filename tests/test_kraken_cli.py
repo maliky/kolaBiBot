@@ -287,6 +287,35 @@ def test_cancel_all_command_accepts_client_order_id_only(monkeypatch, capsys):
     assert '"order_id": "CID-2"' in output
 
 
+def test_cancel_all_survives_live_open_orders_503_with_fallback(monkeypatch, capsys):
+    adapter = DummyAdapter()
+    monkeypatch.setattr(
+        adapter,
+        "live_open_orders",
+        lambda: (_ for _ in ()).throw(RuntimeError("Kraken HTTP 503 on /openorders")),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "live_trigger_orders",
+        lambda: (_ for _ in ()).throw(RuntimeError("Kraken HTTP 503 on /openorders")),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "open_orders",
+        lambda: [{"orderID": "OID-FALLBACK", "symbol": "PI_XBTUSD"}],
+    )
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.build_adapter",
+        lambda exchange, symbol, environment: adapter,
+    )
+
+    exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "cancel-all"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"order_id": "OID-FALLBACK"' in output
+
+
 def test_open_orders_command_prints_live_resting_orders(monkeypatch, capsys):
     adapter = DummyAdapter()
     monkeypatch.setattr(
@@ -398,6 +427,33 @@ def test_close_all_reports_verification_timeout_without_traceback(monkeypatch, c
     output = capsys.readouterr().out
     assert '"verification_error":' in output
     assert '"closed": false' in output
+
+
+def test_close_all_survives_cancel_fetch_503_and_still_closes_position(monkeypatch, capsys):
+    adapter = DummyAdapter()
+    adapter._position = Position(symbol="PI_XBTUSD", qty=2.0, entry_price=1.0)
+    monkeypatch.setattr(
+        adapter,
+        "live_open_orders",
+        lambda: (_ for _ in ()).throw(RuntimeError("Kraken HTTP 503 on /openorders")),
+    )
+    monkeypatch.setattr(
+        adapter,
+        "live_trigger_orders",
+        lambda: (_ for _ in ()).throw(RuntimeError("Kraken HTTP 503 on /openorders")),
+    )
+    monkeypatch.setattr(adapter, "open_orders", lambda: [])
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.build_adapter",
+        lambda exchange, symbol, environment: adapter,
+    )
+
+    exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "close-all"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"cancelled": []' in output
+    assert '"closed": true' in output
 
 
 def test_top_level_help_lists_subcommand_descriptions():

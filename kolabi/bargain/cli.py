@@ -304,12 +304,19 @@ def _verify_market_submission(
 def _cancel_all_orders(adapter: Any) -> list[dict[str, object]]:
     """Annuler tous les ordres ouverts et triggers pour le symbole configure."""
     payloads: list[dict[str, object]] = []
-    live_orders = list(adapter.live_open_orders()) + list(adapter.live_trigger_orders())
-    for order in live_orders:
+    cancelled_ids: set[str] = set()
+    for order in _safe_cancel_order_candidates(adapter):
         order_id = _extract_cancelable_order_id(order)
         if not order_id:
             continue
-        payloads.append(ack_to_payload(adapter.cancel_order(str(order_id))))
+        order_key = str(order_id)
+        if order_key in cancelled_ids:
+            continue
+        try:
+            payloads.append(ack_to_payload(adapter.cancel_order(order_key)))
+            cancelled_ids.add(order_key)
+        except Exception:
+            continue
     return payloads
 
 
@@ -329,6 +336,28 @@ def _extract_cancelable_order_id(order: dict[str, object]) -> object | None:
         if value:
             return value
     return None
+
+
+def _safe_cancel_order_candidates(adapter: Any) -> list[dict[str, object]]:
+    """Fetch cancel candidates from preferred live sources with defensive fallbacks."""
+    candidates: list[dict[str, object]] = []
+    for source_name in (
+        "live_open_orders",
+        "live_trigger_orders",
+        "open_orders",
+        "live_trigger_orders_db",
+    ):
+        source = getattr(adapter, source_name, None)
+        if not callable(source):
+            continue
+        try:
+            rows = source()
+        except Exception:
+            continue
+        if not isinstance(rows, list):
+            continue
+        candidates.extend([row for row in rows if isinstance(row, dict)])
+    return candidates
 
 
 def _close_position(adapter: Any) -> dict[str, object] | None:
