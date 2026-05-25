@@ -328,6 +328,8 @@ class PrivateOrderRecord:
     status: str
     exchange_order_id: str | None = None
     client_order_id: str | None = None
+    reason: str | None = None
+    is_cancel: bool | None = None
     side: str | None = None
     order_type: str | None = None
     price: float | None = None

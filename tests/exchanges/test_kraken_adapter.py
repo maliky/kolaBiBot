@@ -409,6 +409,49 @@ def test_open_orders_reads_private_db(tmp_path):
     assert rows[0]["orderID"] == "OID-1"
 
 
+def test_live_trigger_orders_db_reads_open_stop_rows(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=db_url,
+        session=cast(Any, DummySession([])),
+    )
+    Base.metadata.create_all(adapter._engine)
+    with Session(adapter._engine) as session:
+        session.add(
+            ExchangeOrder(
+                local_uuid="u-stop",
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                account_scope="default",
+                symbol="PI_XBTUSD",
+                exchange_order_id="OID-T",
+                client_order_id="CID-T",
+                side="sell",
+                order_type="stop",
+                status="open",
+                price=77000.5,
+                quantity=2,
+                filled_quantity=0,
+                reduce_only=True,
+            )
+        )
+        session.commit()
+
+    orders = adapter.live_trigger_orders_db()
+
+    assert len(orders) == 1
+    assert orders[0]["order_id"] == "OID-T"
+    assert orders[0]["client_order_id"] == "CID-T"
+    assert orders[0]["stop_price"] == 77000.5
+    assert orders[0]["reduce_only"] is True
+
+
 def test_extract_available_margin_reads_auxiliary_available_funds():
     payload = {
         "accounts": {

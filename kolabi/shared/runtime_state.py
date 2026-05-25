@@ -515,11 +515,14 @@ def _normalise_cursor_timestamp(value: datetime, peer: datetime) -> datetime:
 
 
 def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
+    reason, is_cancel = _order_reason_flags_from_payload(row.raw_payload)
     return PrivateOrderRecord(
         symbol=row.symbol,
         status=row.status,
         exchange_order_id=row.exchange_order_id,
         client_order_id=row.client_order_id,
+        reason=reason,
+        is_cancel=is_cancel,
         side=row.side,
         order_type=row.order_type,
         price=row.price,
@@ -531,6 +534,18 @@ def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
         local_timestamp=row.local_timestamp.isoformat(),
         local_id=row.id,
     )
+
+
+def _order_reason_flags_from_payload(
+    payload: object,
+) -> tuple[str | None, bool | None]:
+    if not isinstance(payload, dict):
+        return None, None
+    reason_obj = payload.get("reason")
+    reason = str(reason_obj) if isinstance(reason_obj, str) and reason_obj else None
+    is_cancel_obj = payload.get("is_cancel")
+    is_cancel = is_cancel_obj if isinstance(is_cancel_obj, bool) else None
+    return reason, is_cancel
 
 
 def _private_fill_record(symbol: str) -> PrivateFillRecord:

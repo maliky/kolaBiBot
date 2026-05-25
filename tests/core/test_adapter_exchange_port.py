@@ -39,6 +39,7 @@ class _FakeAdapter:
 class _TailAdapter:
     placed: tuple[tuple[Any, ...], dict[str, Any]] | None = None
     trigger_orders: list[dict[str, Any]] = []
+    db_trigger_orders: list[dict[str, Any]] = []
 
     def __init__(self, **_kwargs: Any) -> None:
         type(self).placed = None
@@ -49,6 +50,9 @@ class _TailAdapter:
 
     def live_trigger_orders(self) -> list[dict[str, Any]]:
         return type(self).trigger_orders
+
+    def live_trigger_orders_db(self) -> list[dict[str, Any]]:
+        return type(self).db_trigger_orders
 
     def amend_order(self, order_id: str, **params: Any) -> OrderAck:
         raise AssertionError("not used")
@@ -163,6 +167,7 @@ def test_place_tail_requires_matching_live_trigger_order(monkeypatch) -> None:
 
 def test_place_tail_fails_when_trigger_order_is_not_visible(monkeypatch) -> None:
     _TailAdapter.trigger_orders = []
+    _TailAdapter.db_trigger_orders = []
     monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _exchange: _TailAdapter)
     monkeypatch.setattr("kolabi.bot.service.asyncio.sleep", _raise_timeout)
     port = AdapterExchangePort(exchange="kraken", exchange_config=_config())
@@ -186,6 +191,139 @@ def test_place_tail_fails_when_trigger_order_is_not_visible(monkeypatch) -> None
                 )
             )
         )
+
+
+def test_place_tail_rejected_ack_but_visible_trigger_is_accepted(monkeypatch) -> None:
+    class _RejectedButVisibleAdapter(_TailAdapter):
+        def place_order(self, *args: Any, **kwargs: Any) -> OrderAck:
+            type(self).placed = (args, kwargs)
+            return OrderAck(order_id="OID-R", status="Rejected", orig_qty=1.0, side="sell")
+
+    _RejectedButVisibleAdapter.trigger_orders = [
+        {
+            "order_id": "OID-V",
+            "client_order_id": "CID-R",
+            "symbol": "PI_XBTUSD",
+            "side": "sell",
+            "qty": 1.0,
+            "stop_price": 99.5,
+            "reduce_only": True,
+            "status": "New",
+        }
+    ]
+    _RejectedButVisibleAdapter.db_trigger_orders = []
+    monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _exchange: _RejectedButVisibleAdapter)
+    port = AdapterExchangePort(exchange="kraken", exchange_config=_config())
+
+    ack = asyncio.run(
+        port.place_tail(
+            PlaceTailCommand(
+                kind=RuntimeCommandKind.PLACE,
+                symbol=Symbol("PI_XBTUSD"),
+                pair_name="pair-a",
+                request=PlaceOrderCommandRequest(
+                    pair_name="pair-a",
+                    side="sell",
+                    ordType="S",
+                    orderQty=1.0,
+                    stopPx=99.49,
+                    execInst="ReduceOnly,LastPrice",
+                    clOrdID="CID-R",
+                ),
+            )
+        )
+    )
+
+    assert ack.status == "Rejected"
+
+
+def test_place_tail_rejected_ack_without_visibility_still_fails(monkeypatch) -> None:
+    class _RejectedAdapter(_TailAdapter):
+        def place_order(self, *args: Any, **kwargs: Any) -> OrderAck:
+            type(self).placed = (args, kwargs)
+            return OrderAck(order_id="OID-R", status="Rejected", orig_qty=1.0, side="sell")
+
+    _RejectedAdapter.trigger_orders = []
+    _RejectedAdapter.db_trigger_orders = []
+    monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _exchange: _RejectedAdapter)
+    port = AdapterExchangePort(exchange="kraken", exchange_config=_config())
+
+    with pytest.raises(RuntimeError, match="tail trigger order rejected by exchange"):
+        asyncio.run(
+            port.place_tail(
+                PlaceTailCommand(
+                    kind=RuntimeCommandKind.PLACE,
+                    symbol=Symbol("PI_XBTUSD"),
+                    pair_name="pair-a",
+                    request=PlaceOrderCommandRequest(
+                        pair_name="pair-a",
+                        side="sell",
+                        ordType="S",
+                        orderQty=1.0,
+                        stopPx=99.0,
+                        execInst="ReduceOnly,LastPrice",
+                        clOrdID="CID-R",
+                    ),
+                )
+            )
+        )
+
+
+def test_place_tail_rejected_ack_is_accepted_when_db_evidence_appears(monkeypatch) -> None:
+    class _RejectedDbEvidenceAdapter(_TailAdapter):
+        calls = 0
+
+        def place_order(self, *args: Any, **kwargs: Any) -> OrderAck:
+            type(self).placed = (args, kwargs)
+            return OrderAck(order_id="OID-R", status="Rejected", orig_qty=1.0, side="sell")
+
+        def live_trigger_orders(self) -> list[dict[str, Any]]:
+            type(self).calls += 1
+            if type(self).calls >= 2:
+                type(self).db_trigger_orders = [
+                    {
+                        "order_id": "OID-DB",
+                        "client_order_id": "CID-DB",
+                        "symbol": "PI_XBTUSD",
+                        "side": "sell",
+                        "qty": 1.0,
+                        "stop_price": 99.0,
+                        "reduce_only": True,
+                        "status": "New",
+                    }
+                ]
+            return []
+
+    _RejectedDbEvidenceAdapter.calls = 0
+    _RejectedDbEvidenceAdapter.db_trigger_orders = []
+    monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _exchange: _RejectedDbEvidenceAdapter)
+    port = AdapterExchangePort(
+        exchange="kraken",
+        exchange_config=_config(),
+        verify_timeout_seconds=0.2,
+        verify_poll_seconds=0.01,
+    )
+
+    ack = asyncio.run(
+        port.place_tail(
+            PlaceTailCommand(
+                kind=RuntimeCommandKind.PLACE,
+                symbol=Symbol("PI_XBTUSD"),
+                pair_name="pair-a",
+                request=PlaceOrderCommandRequest(
+                    pair_name="pair-a",
+                    side="sell",
+                    ordType="S",
+                    orderQty=1.0,
+                    stopPx=99.0,
+                    execInst="ReduceOnly,LastPrice",
+                    clOrdID="CID-DB",
+                ),
+            )
+        )
+    )
+
+    assert ack.status == "Rejected"
 
 
 async def _raise_timeout(_seconds: float) -> None:

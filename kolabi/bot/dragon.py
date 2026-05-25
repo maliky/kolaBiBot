@@ -202,7 +202,7 @@ def private_order_fact_from_record(
         order_id=record.exchange_order_id,
         client_order_id=record.client_order_id,
         status=record.status,
-        reason=None,
+        reason=record.reason,
         filled_quantity=_decimal_or_zero(record.filled_quantity),
         total_quantity=_decimal_or_zero(record.quantity),
         occurred_at=occurred_at,

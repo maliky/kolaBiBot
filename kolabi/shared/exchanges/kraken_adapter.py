@@ -524,6 +524,16 @@ class KrakenFuturesAdapter(ExchangeABC):
             if _matches_symbol(order, self.symbol) and _is_trigger_order(order)
         ]
 
+    def live_trigger_orders_db(self) -> list[Dict[str, Any]]:
+        """Retourne les trigger orders ouverts depuis la DB privee locale."""
+        rows = self._read_orders_from_db()
+        open_statuses = {"new", "open", "partiallyfilled", "partial_fill"}
+        return [
+            _normalize_db_trigger_order(row)
+            for row in rows
+            if _db_order_is_open_trigger(row, open_statuses)
+        ]
+
     def open_orders(self) -> list[Dict[str, Any]]:
         rows = self._read_orders_from_db()
         if rows:
@@ -1045,6 +1055,34 @@ def _db_order_to_legacy(row: ExchangeOrder) -> Dict[str, Any]:
         "transactTime": (
             row.source_timestamp or row.local_timestamp or datetime.now(timezone.utc)
         ).isoformat(),
+    }
+
+
+def _db_order_is_open_trigger(
+    row: ExchangeOrder,
+    open_statuses: set[str],
+) -> bool:
+    status = row.status.replace(" ", "").replace("_", "").lower()
+    if status not in open_statuses:
+        return False
+    order_type = str(row.order_type or "").lower()
+    return "stop" in order_type or order_type in {"s", "stp"}
+
+
+def _normalize_db_trigger_order(row: ExchangeOrder) -> Dict[str, Any]:
+    return {
+        "order_id": str(row.exchange_order_id or ""),
+        "client_order_id": str(row.client_order_id or ""),
+        "symbol": str(row.symbol or ""),
+        "side": str(row.side or "").lower(),
+        "order_type": str(row.order_type or ""),
+        "qty": float(row.quantity) if row.quantity is not None else None,
+        "filled": float(row.filled_quantity) if row.filled_quantity is not None else None,
+        "price": float(row.price) if row.price is not None else None,
+        "stop_price": float(row.price) if row.price is not None else None,
+        "trigger_signal": "",
+        "reduce_only": bool(row.reduce_only),
+        "status": _db_status_to_legacy(row.status),
     }
 
 

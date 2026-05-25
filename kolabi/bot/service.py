@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from pathlib import Path
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Iterable, Optional, Protocol, TypedDict, cast
@@ -42,6 +41,8 @@ from kolabi.shared.logging import setup_logging
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntimeState
 from kolabi.bot.ogun_executor import OgunExecutor
 
+_LOGGER = logging.getLogger("kola")
+
 
 class InstrumentRulesExchange(Protocol):
     def instrument_rules(self, symbol: str | None = None) -> dict[str, object]: ...
@@ -63,6 +64,7 @@ class ExchangeAdapterLike(Protocol):
 
 class TriggerOrderReader(Protocol):
     def live_trigger_orders(self) -> list[dict[str, Any]]: ...
+    def live_trigger_orders_db(self) -> list[dict[str, Any]]: ...
 
 
 @dataclass
@@ -85,6 +87,8 @@ class BotConfig:
     max_public_age_seconds: float = 15.0
     max_private_age_seconds: float = 30.0
     max_reconcile_age_seconds: float = 300.0
+    tail_verify_timeout_seconds: float = 11.0
+    tail_verify_poll_seconds: float = 0.5
 
 
 class BotService:
@@ -293,6 +297,8 @@ class BotService:
         port = AdapterExchangePort(
             exchange=self.config.exchange.lower(),
             exchange_config=self.exchange_config,
+            verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
+            verify_poll_seconds=self.config.tail_verify_poll_seconds,
         )
         return OgunExecutor(port)
 
@@ -336,7 +342,14 @@ async def _run_private_stack(
 class AdapterExchangePort(ExchangePort):
     """ExchangePort adapter backed by shared exchange adapters."""
 
-    def __init__(self, *, exchange: str, exchange_config: ExchangeConfig) -> None:
+    def __init__(
+        self,
+        *,
+        exchange: str,
+        exchange_config: ExchangeConfig,
+        verify_timeout_seconds: float = 11.0,
+        verify_poll_seconds: float = 0.5,
+    ) -> None:
         adapter_cls = get_adapter(exchange)
         self.adapter = cast(
             ExchangeAdapterLike,
@@ -348,34 +361,25 @@ class AdapterExchangePort(ExchangePort):
                 **exchange_config.adapter_kwargs,
             ),
         )
-        self._raw_log_path = Path("logs") / f"{exchange.lower()}-exchange-raw.ndjson"
-        self._raw_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.verify_timeout_seconds = verify_timeout_seconds
+        self.verify_poll_seconds = verify_poll_seconds
 
     async def place_head(self, command: PlaceHeadCommand) -> OrderAck:
-        ack = self._place(command.request)
-        self._write_raw_event("place_head", command.request, ack)
-        return ack
+        return self._place(command.request)
 
     async def place_tail(self, command: PlaceTailCommand) -> OrderAck:
         ack = self._place(command.request)
-        self._write_raw_event("place_tail", command.request, ack)
         await self._verify_tail_trigger(command.request, ack)
         return ack
 
     async def amend_head(self, command: AmendHeadCommand) -> OrderAck:
-        ack = self._amend_head(command.request)
-        self._write_raw_event("amend_head", command.request, ack)
-        return ack
+        return self._amend_head(command.request)
 
     async def amend_tail(self, command: AmendTailCommand) -> OrderAck:
-        ack = self._amend_tail(command.request)
-        self._write_raw_event("amend_tail", command.request, ack)
-        return ack
+        return self._amend_tail(command.request)
 
     async def cancel(self, command: CancelCommand) -> OrderAck:
-        ack = self.adapter.cancel_order(command.request.clOrdID)
-        self._write_raw_event("cancel", command.request, ack)
-        return ack
+        return self.adapter.cancel_order(command.request.clOrdID)
 
     def _place(self, request: PlaceOrderCommandRequest) -> OrderAck:
         if request.orderQty is None:
@@ -409,28 +413,52 @@ class AdapterExchangePort(ExchangePort):
             return
         if not hasattr(self.adapter, "live_trigger_orders"):
             return
-        if not _ack_can_rest_as_trigger(ack):
-            raise RuntimeError(
-                "tail trigger order rejected by exchange: "
-                f"pair={request.pair_name} clOrdID={request.clOrdID or '-'} "
-                f"orderID={ack.order_id} status={ack.status} "
-                f"stopPx={request.stopPx} qty={request.orderQty}"
-            )
         reader = cast(TriggerOrderReader, self.adapter)
-        deadline = asyncio.get_running_loop().time() + 10.0
+        deadline = asyncio.get_running_loop().time() + self.verify_timeout_seconds
+        last_live_orders: list[dict[str, Any]] = []
+        last_db_orders: list[dict[str, Any]] = []
+        contradictory_ack = not _ack_can_rest_as_trigger(ack)
         while True:
-            orders = reader.live_trigger_orders()
-            match = _matching_tail_trigger_order(orders, request, ack)
-            if match is not None:
+            live_orders = reader.live_trigger_orders()
+            db_orders = _trigger_orders_from_private_db(reader)
+            last_live_orders = live_orders
+            last_db_orders = db_orders
+            match, source = _match_trigger_evidence(
+                live_orders,
+                db_orders,
+                request,
+                ack,
+            )
+            if match is not None and source is not None:
+                if contradictory_ack:
+                    _LOGGER.warning(
+                        "tail trigger verified by %s despite contradictory ack: "
+                        "pair=%s clOrdID=%s orderID=%s ack_status=%s "
+                        "live_order_id=%s live_client_id=%s live_status=%s",
+                        source,
+                        request.pair_name,
+                        request.clOrdID or "-",
+                        ack.order_id,
+                        ack.status,
+                        match.get("order_id"),
+                        match.get("client_order_id"),
+                        match.get("status"),
+                    )
                 return
             if asyncio.get_running_loop().time() >= deadline:
+                err_kind = (
+                    "tail trigger order rejected by exchange"
+                    if contradictory_ack
+                    else "tail trigger order not visible after placement"
+                )
                 raise RuntimeError(
-                    "tail trigger order not visible after placement: "
+                    f"{err_kind}: "
                     f"pair={request.pair_name} clOrdID={request.clOrdID or '-'} "
                     f"orderID={ack.order_id} status={ack.status} "
-                    f"stopPx={request.stopPx} qty={request.orderQty}"
+                    f"stopPx={request.stopPx} qty={request.orderQty} "
+                    f"live_seen={len(last_live_orders)} db_seen={len(last_db_orders)}"
                 )
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(self.verify_poll_seconds)
 
     def _amend_head(self, request: AmendOrderCommandRequest) -> OrderAck:
         params: dict[str, Any] = {}
@@ -457,38 +485,25 @@ class AdapterExchangePort(ExchangePort):
             params["text"] = request.text
         return self.adapter.amend_order(request.orderID, **params)
 
-    def _write_raw_event(self, action: str, request: object, ack: OrderAck) -> None:
-        payload = {
-            "action": action,
-            "request": _request_to_dict(request),
-            "ack": {
-                "order_id": ack.order_id,
-                "status": ack.status,
-                "price": ack.price,
-                "orig_qty": ack.orig_qty,
-                "executed_qty": ack.executed_qty,
-                "side": ack.side,
-            },
-            "raw_payload": getattr(ack, "raw_payload", None),
-        }
-        with self._raw_log_path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(payload, default=str, separators=(",", ":")))
-            stream.write("\n")
-
-
 def _matching_tail_trigger_order(
     orders: list[dict[str, Any]],
     request: PlaceOrderCommandRequest,
     ack: OrderAck,
 ) -> dict[str, Any] | None:
     for order in orders:
-        if not _matches_tail_identity(order, request, ack):
+        client_id = str(order.get("client_order_id") or "")
+        order_id = str(order.get("order_id") or "")
+        clordid_match = bool(request.clOrdID) and client_id == request.clOrdID
+        orderid_match = bool(ack.order_id) and order_id == str(ack.order_id)
+        if not (clordid_match or orderid_match):
             continue
         if request.side and not _matches_text(order.get("side"), request.side):
             continue
         if not _matches_quantity(order.get("qty"), request.orderQty):
             continue
-        if not _matches_price(order.get("stop_price"), request.stopPx):
+        # clOrdID is the strongest identity anchor; exchange may quantize stop
+        # prices to tick size, so strict stop matching can be too brittle.
+        if not clordid_match and not _matches_price(order.get("stop_price"), request.stopPx):
             continue
         if not bool(order.get("reduce_only", False)):
             continue
@@ -496,21 +511,30 @@ def _matching_tail_trigger_order(
     return None
 
 
+def _match_trigger_evidence(
+    live_orders: list[dict[str, Any]],
+    db_orders: list[dict[str, Any]],
+    request: PlaceOrderCommandRequest,
+    ack: OrderAck,
+) -> tuple[dict[str, Any] | None, str | None]:
+    live_match = _matching_tail_trigger_order(live_orders, request, ack)
+    if live_match is not None:
+        return live_match, "rest_live"
+    db_match = _matching_tail_trigger_order(db_orders, request, ack)
+    if db_match is not None:
+        return db_match, "private_db"
+    return None, None
+
+
+def _trigger_orders_from_private_db(reader: TriggerOrderReader) -> list[dict[str, Any]]:
+    if not hasattr(reader, "live_trigger_orders_db"):
+        return []
+    return reader.live_trigger_orders_db()
+
+
 def _ack_can_rest_as_trigger(ack: OrderAck) -> bool:
     status = ack.status.replace(" ", "_").replace("-", "_").lower()
     return status in {"new", "open", "placed", "submitted"}
-
-
-def _matches_tail_identity(
-    order: dict[str, Any],
-    request: PlaceOrderCommandRequest,
-    ack: OrderAck,
-) -> bool:
-    client_id = str(order.get("client_order_id") or "")
-    order_id = str(order.get("order_id") or "")
-    if request.clOrdID and client_id == request.clOrdID:
-        return True
-    return bool(ack.order_id) and order_id == str(ack.order_id)
 
 
 def _matches_text(left: object, right: str) -> bool:
@@ -546,11 +570,3 @@ def _decimal_or_none(value: object) -> Decimal | None:
     if isinstance(value, (int, float, str)):
         return Decimal(str(value))
     return None
-
-
-def _request_to_dict(request: object) -> dict[str, object]:
-    if isinstance(request, dict):
-        return dict(request)
-    if hasattr(request, "__dict__"):
-        return dict(vars(request))
-    return {"value": str(request)}
