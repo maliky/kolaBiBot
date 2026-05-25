@@ -712,6 +712,47 @@ def test_handle_message_logs_private_notice_delta_event(tmp_path, caplog):
     assert "order_id=OID-N1" in caplog.text
 
 
+def test_handle_message_suppresses_empty_unknown_private_notice_info(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "notifications_auth",
+        "event": "notifications_auth",
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "private_notice feed=notifications_auth" not in caplog.text
+    assert "private_notice_ignored feed=notifications_auth" not in caplog.text
+
+
+def test_handle_message_logs_unknown_private_notice_with_order_id(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {
+        "feed": "notifications_auth",
+        "event": "unknown",
+        "order_id": "OID-N2",
+    }
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(message)
+    assert "private_notice feed=notifications_auth" in caplog.text
+    assert "order_id=OID-N2" in caplog.text
+
+
 def test_map_balances_handles_flex_futures_currencies_shape():
     rows = map_balances(
         {

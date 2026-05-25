@@ -756,13 +756,22 @@ class KrakenFuturesPrivateStream:
                 notice = optional_str(
                     first_present(message, "message", "reason")
                 ) or "-"
-                self.logger.info(
-                    "kraken_account private_notice feed=%s kind=%s order_id=%s message=%s",
-                    feed,
-                    kind,
-                    order_id,
-                    notice,
-                )
+                if _is_actionable_private_notice(kind, order_id, notice):
+                    self.logger.info(
+                        "kraken_account private_notice feed=%s kind=%s order_id=%s message=%s",
+                        feed,
+                        kind,
+                        order_id,
+                        notice,
+                    )
+                else:
+                    self.logger.debug(
+                        "kraken_account private_notice_ignored feed=%s kind=%s order_id=%s message=%s",
+                        feed,
+                        kind,
+                        order_id,
+                        notice,
+                    )
 
         except Exception as exc:
             self.store.record_connection_status(
@@ -1368,6 +1377,20 @@ def parse_kraken_time(value: object) -> datetime | None:
 def _is_null_balance(balance: BalanceWrite) -> bool:
     """Treat fully zero balances as null-noise for log emission."""
     return balance.available == 0.0 and balance.locked == 0.0 and balance.total == 0.0
+
+
+def _is_actionable_private_notice(kind: str, order_id: str, message: str) -> bool:
+    """Return True when a private notice carries operator-actionable payload."""
+    normalized_kind = kind.strip().lower()
+    normalized_order_id = order_id.strip()
+    normalized_message = message.strip()
+    if normalized_kind not in {"", "unknown", "notifications_auth", "subscribed"}:
+        return True
+    if normalized_order_id not in {"", "-"}:
+        return True
+    if normalized_message not in {"", "-"}:
+        return True
+    return False
 
 
 def map_side(value: object) -> str:
