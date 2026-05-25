@@ -33,6 +33,13 @@ from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import AmendTailCommand, RuntimeCommandKind, Symbol
 
 
+async def _run_runtime_for(runtime: StrategyRuntime, *, seconds: float = 0.05):
+    task = asyncio.create_task(runtime.run())
+    await asyncio.sleep(seconds)
+    await runtime.stop()
+    return await task
+
+
 def sample_strategy() -> tuple[OrderPairSpec, ...]:
     return (
         OrderPairSpec(
@@ -76,7 +83,7 @@ def test_strategy_runtime_simulation_advances_to_tail_state() -> None:
         executor=SimulatedExecutor(),
         simulate=True,
     )
-    result = asyncio.run(runtime.run())
+    result = asyncio.run(_run_runtime_for(runtime))
 
     assert result.commands
     assert result.state.pairs["pair-a"].tail_state in {
@@ -96,7 +103,7 @@ def test_strategy_runtime_simulation_initialises_relative_tail_reference() -> No
         simulate=True,
     )
 
-    result = asyncio.run(runtime.run())
+    result = asyncio.run(_run_runtime_for(runtime))
 
     assert result.state.pairs["pair-a"].tail_trail is not None
     assert result.state.pairs["pair-a"].tail_trail.entry_reference_price == Decimal("100.0")
@@ -161,6 +168,19 @@ def test_strategy_runtime_waits_for_tail_after_filled_head() -> None:
                 head_state=HeadState.CLOSED,
                 played_quantity=Decimal("1"),
                 tail_state=TailState.SUBMITTED,
+            )
+        },
+    )
+    assert runtime.all_pairs_terminal is False
+
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                played_quantity=Decimal("1"),
+                tail_state=TailState.CLOSED,
             )
         },
     )
