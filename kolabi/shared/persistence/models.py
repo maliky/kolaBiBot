@@ -384,3 +384,52 @@ class RawExchangeEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
+
+
+class ExchangeRestCall(Base):
+    """Adapter REST call audit trail for trading endpoint payloads."""
+
+    __tablename__ = "exchange_rest_calls"
+    __table_args__ = (
+        Index(
+            "ix_exchange_rest_calls_lookup",
+            "exchange",
+            "environment",
+            "market_type",
+            "symbol",
+            "path",
+            "created_at",
+        ),
+        Index(
+            "ix_exchange_rest_calls_correlation",
+            "exchange",
+            "client_order_id",
+            "exchange_order_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    local_uuid: Mapped[str] = mapped_column(String(36), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    environment: Mapped[str] = mapped_column(String(32), nullable=False)
+    market_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_scope: Mapped[str] = mapped_column(String(64), nullable=False, default="default")
+    symbol: Mapped[str | None] = mapped_column(String(64))
+    method: Mapped[str] = mapped_column(String(8), nullable=False)
+    path: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_params: Mapped[dict] = mapped_column(JSON, default=dict)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    result_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    response_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    error_text: Mapped[str | None] = mapped_column(String(1024))
+    client_order_id: Mapped[str | None] = mapped_column(String(128))
+    exchange_order_id: Mapped[str | None] = mapped_column(String(128))
+    endpoint_order_id: Mapped[str | None] = mapped_column(String(128))
+    correlation_id: Mapped[str | None] = mapped_column(String(128))
+    ack_status: Mapped[str | None] = mapped_column(String(32))
+    ack_order_id: Mapped[str | None] = mapped_column(String(128))
+    ack_client_order_id: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )

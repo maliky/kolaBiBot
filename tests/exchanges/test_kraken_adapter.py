@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, cast
 
+import pytest
 from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.exchanges.kraken_adapter import (
     KrakenFuturesAdapter,
@@ -14,14 +15,16 @@ from kolabi.shared.persistence import (
     ExchangeFill,
     ExchangeInstrument,
     ExchangeOrder,
+    ExchangeRestCall,
 )
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 
 class DummyResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code: int = 200):
         self.payload = payload
+        self.status_code = status_code
 
     def raise_for_status(self) -> None:
         return None
@@ -37,7 +40,11 @@ class DummySession:
 
     def request(self, **kwargs):
         self.calls.append(kwargs)
-        return DummyResponse(self.responses.pop(0))
+        current = self.responses.pop(0)
+        if isinstance(current, tuple) and len(current) == 2:
+            status_code, payload = current
+            return DummyResponse(payload, status_code=int(status_code))
+        return DummyResponse(current)
 
 
 def test_get_adapter_loads_kraken():
@@ -101,6 +108,71 @@ def test_place_maps_limit_order_to_sendorder(tmp_path):
     sent_payload = dict(session.calls[0]["data"])
     assert sent_payload["orderType"] == "lmt"
     assert sent_payload["postOnly"] is True
+    with Session(adapter._engine) as db_session:
+        rows = db_session.execute(select(ExchangeRestCall)).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].path == "/sendorder"
+    assert rows[0].result_kind == "ok"
+    assert rows[0].client_order_id == "CID-1"
+    assert rows[0].endpoint_order_id == "OID-1"
+
+
+def test_sendorder_http_error_is_persisted_for_forensics(tmp_path):
+    session = DummySession(
+        [
+            (503, {"raw_text": "Service Unavailable"}),
+            (503, {"raw_text": "Service Unavailable"}),
+            (503, {"raw_text": "Service Unavailable"}),
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    with pytest.raises(RuntimeError):
+        adapter.place(
+            orderQty=2,
+            side="buy",
+            ordType="Limit",
+            price=80000,
+            clOrdID="CID-ERR",
+        )
+
+    with Session(adapter._engine) as db_session:
+        rows = db_session.execute(select(ExchangeRestCall)).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].path == "/sendorder"
+    assert rows[0].result_kind == "http_error"
+    assert rows[0].http_status == 503
+    assert rows[0].client_order_id == "CID-ERR"
+
+
+def test_openorders_get_is_not_persisted_in_rest_call_audit(tmp_path):
+    session = DummySession(
+        [
+            {"result": "success", "openOrders": []},
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    assert adapter.live_open_orders() == []
+    with Session(adapter._engine) as db_session:
+        rows = db_session.execute(select(ExchangeRestCall)).scalars().all()
+    assert rows == []
 
 
 def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):

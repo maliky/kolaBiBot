@@ -23,8 +23,10 @@ from kolabi.shared.persistence import (
     ExchangeFill,
     ExchangeInstrument,
     ExchangeOrder,
+    ExchangeRestCall,
 )
 from kolabi.tree.account import sign_rest_auth
+from uuid import uuid4
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,7 @@ class KrakenFuturesAdapter(ExchangeABC):
             expire_on_commit=False,
             class_=Session,
         )
+        Base.metadata.create_all(self._engine)
         Base.metadata.create_all(self._public_engine)
 
     @staticmethod
@@ -149,6 +152,16 @@ class KrakenFuturesAdapter(ExchangeABC):
                     time.sleep(0.5 * attempt)
                     last_error = error
                     continue
+                self._record_rest_call(
+                    method=method,
+                    path=path,
+                    request_params=payload,
+                    attempt_count=attempt,
+                    http_status=None,
+                    response_payload={},
+                    result_kind="transport_error",
+                    error_text=str(error),
+                )
                 raise error from exc
             try:
                 data = response.json()
@@ -161,6 +174,16 @@ class KrakenFuturesAdapter(ExchangeABC):
                     time.sleep(0.5 * attempt)
                     last_error = error
                     continue
+                self._record_rest_call(
+                    method=method,
+                    path=path,
+                    request_params=payload,
+                    attempt_count=attempt,
+                    http_status=status_code,
+                    response_payload=data if isinstance(data, dict) else {"payload": data},
+                    result_kind="http_error",
+                    error_text=str(error),
+                )
                 raise error
             if not isinstance(data, dict):
                 raise RuntimeError(f"Unexpected Kraken payload type: {type(data)!r}")
@@ -170,10 +193,86 @@ class KrakenFuturesAdapter(ExchangeABC):
                     time.sleep(0.25 * attempt)
                     last_error = error
                     continue
+                self._record_rest_call(
+                    method=method,
+                    path=path,
+                    request_params=payload,
+                    attempt_count=attempt,
+                    http_status=status_code,
+                    response_payload=data,
+                    result_kind="exchange_error",
+                    error_text=str(error),
+                )
                 raise error
+            self._record_rest_call(
+                method=method,
+                path=path,
+                request_params=payload,
+                attempt_count=attempt,
+                http_status=status_code,
+                response_payload=data,
+                result_kind="ok",
+                error_text=None,
+            )
             return data
         assert last_error is not None
         raise last_error
+
+    def _record_rest_call(
+        self,
+        *,
+        method: str,
+        path: str,
+        request_params: Sequence[tuple[str, Any]],
+        attempt_count: int,
+        http_status: int | None,
+        response_payload: Dict[str, Any],
+        result_kind: str,
+        error_text: str | None,
+    ) -> None:
+        if not _should_persist_rest_call(method=method, path=path):
+            return
+        payload = response_payload if isinstance(response_payload, dict) else {"payload": response_payload}
+        order_like = _extract_order_like(payload) if payload else {}
+        endpoint_order_id = optional_str(
+            order_like.get("order_id") or order_like.get("orderId")
+        )
+        client_order_id = optional_str(
+            order_like.get("cli_ord_id")
+            or order_like.get("cliOrdId")
+            or request_params_dict(request_params).get("cliOrdId")
+        )
+        exchange_order_id = endpoint_order_id
+        ack_status = _map_order_status_from_payload(order_like) if order_like else None
+        ack_order_id = endpoint_order_id
+        ack_client_order_id = client_order_id
+        with self._sessionmaker() as session:
+            session.add(
+                ExchangeRestCall(
+                    local_uuid=str(uuid4()),
+                    exchange="kraken",
+                    environment=self.environment,
+                    market_type="futures",
+                    account_scope="default",
+                    symbol=self.symbol,
+                    method=method.upper(),
+                    path=path,
+                    request_params=request_params_dict(request_params),
+                    attempt_count=attempt_count,
+                    http_status=http_status,
+                    result_kind=result_kind,
+                    response_payload=payload,
+                    error_text=error_text,
+                    client_order_id=client_order_id,
+                    exchange_order_id=exchange_order_id,
+                    endpoint_order_id=endpoint_order_id,
+                    correlation_id=client_order_id or endpoint_order_id,
+                    ack_status=ack_status,
+                    ack_order_id=ack_order_id,
+                    ack_client_order_id=ack_client_order_id,
+                )
+            )
+            session.commit()
 
     def _ticker(self) -> _Ticker:
         payload = self._request("GET", f"/tickers/{self.symbol}")
@@ -955,6 +1054,24 @@ def _first_present_value(payload: Dict[str, Any], *keys: str) -> object | None:
         if value not in (None, ""):
             return value
     return None
+
+
+def request_params_dict(params: Sequence[tuple[str, Any]]) -> Dict[str, Any]:
+    """Convert ordered request params to a JSON-safe dict without auth headers."""
+    return {str(key): value for key, value in params}
+
+
+def _should_persist_rest_call(*, method: str, path: str) -> bool:
+    """Persist only trading REST calls needed for order-ack forensics."""
+    if method.upper() != "POST":
+        return False
+    return path in {"/sendorder", "/editorder", "/cancelorder"}
+
+
+def optional_str(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 def _first_float(payload: Dict[str, Any], *keys: str, default: float) -> float:
