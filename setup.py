@@ -39,6 +39,7 @@ setup(
         "python-binance",
         "requests",
         "dateparser",
+        "coolname",
         "websocket-client==0.53.0",
         "websockets>=15,<16",
     ],

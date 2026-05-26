@@ -5,3 +5,4 @@ requests
 sqlalchemy
 python-binance
 responses
+coolname
