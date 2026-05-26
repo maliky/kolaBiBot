@@ -1,3 +1,6 @@
+*log
+logs/*
+*.err
 DB.org
 Docs/*
 *.png
