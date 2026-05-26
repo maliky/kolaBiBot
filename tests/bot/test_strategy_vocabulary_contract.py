@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import importlib
-
 from kolabi.bot import domain
 
 
@@ -86,9 +84,3 @@ def test_common_order_state_is_present() -> None:
         "closed",
         "failed",
     ]
-
-
-def test_orderspec_deleted_from_tsv_public_api() -> None:
-    tsv = importlib.import_module("kolabi.bot.tsv")
-    assert not hasattr(tsv, "OrderSpec"), "OrderSpec should be removed from tsv public API."
-

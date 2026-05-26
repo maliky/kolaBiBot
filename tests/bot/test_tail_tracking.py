@@ -82,3 +82,20 @@ def test_fast_favourable_move_shortens_width_without_widening() -> None:
 
     assert Decimal("0") < moved.current_stop_price - Decimal("100")
     assert Decimal("110") - moved.current_stop_price <= trail.baseline_width
+
+
+def test_tail_tracking_handles_mixed_naive_and_aware_timestamps() -> None:
+    aware = datetime.now(timezone.utc)
+    naive = aware.replace(tzinfo=None)
+    pair = sample_pair(side=Side.BUY)
+    trail = initial_tail_trail(pair, Decimal("100"), aware)
+
+    moved = step_tail_trail(pair, trail, Decimal("102"), naive + timedelta(seconds=1))
+    moved_again = step_tail_trail(
+        pair,
+        moved,
+        Decimal("103"),
+        aware + timedelta(seconds=61),
+    )
+
+    assert moved_again.current_stop_price >= moved.current_stop_price

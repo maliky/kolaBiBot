@@ -10,6 +10,7 @@ from kolabi.bot.domain import (
     EggMoveKind,
     HeadSpec,
     HeadState,
+    OrderRole,
     OrderIdentity,
     OrderPairSpec,
     PairCycleState,
@@ -234,8 +235,10 @@ def test_public_polling_emits_market_ticks_for_living_tails() -> None:
         async def enqueue(self, event: EggMove) -> None:
             self.events.append(event)
 
-        def record_targets_head(self, record: object) -> bool:
-            return False
+        def pair_state_for_record(
+            self, record: object
+        ) -> tuple[PairCycleState, OrderRole] | None:
+            return None
 
     runtime = Runtime()
     source = KrakenPublicTriggerSource(Client(), poll_seconds=0.0)
@@ -282,3 +285,80 @@ def test_market_tick_reaches_horus_as_tail_amend_command() -> None:
     assert commands[0].kind == RuntimeCommandKind.AMEND
     assert commands[0].request.newPrice is not None
     assert commands[0].request.newPrice > Decimal("100")
+
+
+def test_tail_telemetry_rows_include_distance_and_last_update() -> None:
+    class Market:
+        best_bid = 102.0
+        best_ask = 102.5
+        mid_price = 102.25
+        recorded_at = "tick-1"
+
+    class Reader:
+        def fetch_market_state(self, symbol=None):
+            return Market()
+
+    pair = sample_strategy()[0]
+    trail = initial_tail_trail(pair, Decimal("100"), datetime.now(timezone.utc))
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+        public_state_reader=Reader(),
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.LIVING,
+                tail_mode=None,
+                tail_trail=trail,
+                played_quantity=Decimal("1"),
+            )
+        },
+    )
+
+    rows = runtime._collect_tail_telemetry_rows(datetime.now(timezone.utc))
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.initial_distance == float(trail.baseline_width)
+    assert row.current_distance == float(abs(Decimal("102.0") - trail.current_stop_price))
+    assert row.last_tail_update_at == trail.last_stop_update_at
+
+
+def test_runtime_matches_private_record_to_tail_identity() -> None:
+    pair = sample_strategy()[0]
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.SUBMITTED,
+                tail_identity=OrderIdentity(
+                    pair_name="pair-a",
+                    role="tail",
+                    client_order_id="CID-T",
+                    exchange_order_id="OID-T",
+                ),
+                played_quantity=Decimal("1"),
+            )
+        },
+    )
+
+    class _Record:
+        client_order_id = "CID-T"
+        exchange_order_id = "OID-T"
+
+    matched = runtime.pair_state_for_record(_Record())
+
+    assert matched is not None
+    assert matched[1] == OrderRole.TAIL

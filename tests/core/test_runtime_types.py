@@ -125,3 +125,15 @@ def test_confirmed_move_classification_follows_played_cancel_table() -> None:
         )
         == EggMoveKind.PLAYED_AND_CANCELED
     )
+    assert (
+        classify_confirmed_move(
+            ConfirmedOrder(
+                identity=identity,
+                state=HeadState.FAILED,
+                reason=OrderReason.WOULD_NOT_REDUCE_POSITION,
+                filled_quantity=Decimal("0"),
+                total_quantity=Decimal("1"),
+            )
+        )
+        == EggMoveKind.NOT_PLAYED_CANCELED
+    )

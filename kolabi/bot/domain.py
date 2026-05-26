@@ -144,7 +144,6 @@ PLAYED_REASONS = frozenset(
         OrderReason.POST_ONLY_WOULD_FILL,
         OrderReason.STOP_ORDER_TRIGGERED,
         OrderReason.WOULD_EXECUTE_SELF,
-        OrderReason.WOULD_NOT_REDUCE_POSITION,
     }
 )
 
@@ -258,6 +257,7 @@ class TailTrailState:
     current_stop_price: Decimal
     previous_stop_price: Decimal
     samples: tuple[TailTrailSample, ...]
+    last_stop_update_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -305,6 +305,7 @@ class EggMove:
     reply: Mapping[str, object] | None = None
     event_id: str | None = None
     pair_name: str | None = None
+    role: OrderRole | None = None
     is_private: bool = False
 
     def __post_init__(self) -> None:

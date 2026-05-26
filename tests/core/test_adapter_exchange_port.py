@@ -326,5 +326,46 @@ def test_place_tail_rejected_ack_is_accepted_when_db_evidence_appears(monkeypatc
     assert ack.status == "Rejected"
 
 
+def test_place_tail_visible_trigger_is_accepted_even_when_reduce_only_flag_is_false(
+    monkeypatch,
+) -> None:
+    _TailAdapter.trigger_orders = [
+        {
+            "order_id": "OID-T",
+            "client_order_id": "CID-T",
+            "symbol": "PI_XBTUSD",
+            "side": "sell",
+            "qty": 1.0,
+            "stop_price": 99.0,
+            "reduce_only": False,
+            "status": "New",
+        }
+    ]
+    _TailAdapter.db_trigger_orders = []
+    monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _exchange: _TailAdapter)
+    port = AdapterExchangePort(exchange="kraken", exchange_config=_config())
+
+    ack = asyncio.run(
+        port.place_tail(
+            PlaceTailCommand(
+                kind=RuntimeCommandKind.PLACE,
+                symbol=Symbol("PI_XBTUSD"),
+                pair_name="pair-a",
+                request=PlaceOrderCommandRequest(
+                    pair_name="pair-a",
+                    side="sell",
+                    ordType="S",
+                    orderQty=1.0,
+                    stopPx=99.0,
+                    execInst="ReduceOnly,LastPrice",
+                    clOrdID="CID-T",
+                ),
+            )
+        )
+    )
+
+    assert ack.order_id == "OID-T"
+
+
 async def _raise_timeout(_seconds: float) -> None:
     raise RuntimeError("tail trigger order not visible")

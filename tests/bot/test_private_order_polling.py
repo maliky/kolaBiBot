@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from typing import Protocol
+from typing import Protocol, cast
 
-from kolabi.bot.domain import HeadSpec, OrderIdentity, OrderPairSpec, PairCycleState, Side, StrategyState, TailSpec, TimeWindow
+from kolabi.bot.domain import EggMove, HeadSpec, OrderIdentity, OrderPairSpec, OrderRole, PairCycleState, Side, StrategyState, TailSpec, TimeWindow
 from kolabi.bot.strategy_runtime import KrakenPrivateOrderPollingSource
 from kolabi.shared.core.runtime_types import PrivateOrderRecord
 from kolabi.shared.persistence import Base, ExchangeOrder
@@ -91,7 +91,7 @@ def test_private_order_poller_emits_head_confirmation_from_db(tmp_path) -> None:
         symbol="PI_XBTUSD",
     )
     source = KrakenPrivateOrderPollingSource(client, poll_seconds=0.0)
-    emitted = []
+    emitted: list[EggMove] = []
 
     class _RuntimeLike(Protocol):
         strategy: object
@@ -104,7 +104,9 @@ def test_private_order_poller_emits_head_confirmation_from_db(tmp_path) -> None:
 
         async def enqueue(self, event: object) -> None: ...
 
-        def record_targets_head(self, record: object) -> bool: ...
+        def pair_state_for_record(
+            self, record: object
+        ) -> tuple[PairCycleState, OrderRole] | None: ...
 
     class _Runtime:
         def __init__(self) -> None:
@@ -132,14 +134,11 @@ def test_private_order_poller_emits_head_confirmation_from_db(tmp_path) -> None:
             return False
 
         async def enqueue(self, event) -> None:
-            emitted.append(event)
+            emitted.append(cast(EggMove, event))
             self.running = False
 
-        def record_targets_head(self, record) -> bool:
-            return True
-
-        def head_pair_state_for_record(self, record) -> PairCycleState | None:
-            return self.state.pairs["pair-a"]
+        def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
+            return self.state.pairs["pair-a"], OrderRole.HEAD
 
     runtime: _RuntimeLike = _Runtime()
     asyncio.run(source.pump(runtime))
@@ -224,20 +223,18 @@ def test_private_order_poller_injects_side_aware_reference_price() -> None:
             return False
 
         async def enqueue(self, event) -> None:
-            emitted.append(event)
+            emitted.append(cast(EggMove, event))
             self.running = False
 
-        def record_targets_head(self, record) -> bool:
-            return self.head_pair_state_for_record(record) is not None
+        def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
+            return self.state.pairs["pair-a"], OrderRole.HEAD
 
-        def head_pair_state_for_record(self, record) -> PairCycleState | None:
-            return self.state.pairs["pair-a"]
-
-    emitted = []
+    emitted: list[EggMove] = []
     source = KrakenPrivateOrderPollingSource(_Client(), poll_seconds=0.0)
 
     asyncio.run(source.pump(_Runtime()))
 
+    assert emitted[0].reply is not None
     assert emitted[0].reply["reference_price"] == 101.0
 
 
@@ -290,19 +287,16 @@ def test_private_order_poller_retries_fresh_unmatched_head_fill() -> None:
             return False
 
         async def enqueue(self, event) -> None:
-            emitted.append(event)
+            emitted.append(cast(EggMove, event))
             self.running = False
 
-        def record_targets_head(self, record) -> bool:
-            return self.head_pair_state_for_record(record) is not None
-
-        def head_pair_state_for_record(self, record) -> PairCycleState | None:
+        def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
             self.match_attempts += 1
             if self.match_attempts == 1:
                 return None
-            return self.state.pairs["pair-a"]
+            return self.state.pairs["pair-a"], OrderRole.HEAD
 
-    emitted = []
+    emitted: list[EggMove] = []
     client = _Client()
     runtime = _Runtime()
     source = KrakenPrivateOrderPollingSource(client, poll_seconds=0.0)
@@ -312,3 +306,68 @@ def test_private_order_poller_retries_fresh_unmatched_head_fill() -> None:
     assert client.calls == 2
     assert len(emitted) == 1
     assert emitted[0].kind.value == "played_and_canceled"
+
+
+def test_private_order_poller_matches_tail_identity_as_tail_role() -> None:
+    now = datetime.now(timezone.utc)
+    record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="filled",
+        exchange_order_id="OID-T",
+        client_order_id="CID-T",
+        quantity=3.0,
+        filled_quantity=3.0,
+        local_id=9,
+        local_timestamp=now.isoformat(),
+    )
+
+    class _Client:
+        def fetch_private_orders_since(self, **_kwargs):
+            return (record,)
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.symbol = "PI_XBTUSD"
+            self.running = True
+            self.state = StrategyState(
+                launched_at=now,
+                strategy_id="demo",
+                pairs={
+                    "pair-a": PairCycleState(
+                        pair=sample_pair("pair-a"),
+                        head_identity=OrderIdentity(
+                            pair_name="pair-a",
+                            role="head",
+                            client_order_id="CID-H",
+                            exchange_order_id="OID-H",
+                        ),
+                        tail_identity=OrderIdentity(
+                            pair_name="pair-a",
+                            role="tail",
+                            client_order_id="CID-T",
+                            exchange_order_id="OID-T",
+                        ),
+                    )
+                },
+            )
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return False
+
+        async def enqueue(self, event) -> None:
+            emitted.append(cast(EggMove, event))
+            self.running = False
+
+        def pair_state_for_record(self, rec) -> tuple[PairCycleState, OrderRole] | None:
+            if rec.client_order_id == "CID-T":
+                return self.state.pairs["pair-a"], OrderRole.TAIL
+            return None
+
+    emitted: list[EggMove] = []
+    source = KrakenPrivateOrderPollingSource(_Client(), poll_seconds=0.0)
+
+    asyncio.run(source.pump(_Runtime()))
+
+    assert len(emitted) == 1
+    assert emitted[0].role == OrderRole.TAIL

@@ -11,7 +11,7 @@ Role: pure logic.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from math import exp
 
@@ -34,6 +34,7 @@ def initial_tail_trail(
     occurred_at: datetime,
 ) -> TailTrailState:
     """Create initial tail trail from the active pair tail price grammar."""
+    occurred_at = _as_utc_aware(occurred_at)
     reference = to_decimal(reference_price)
     stop = _initial_stop_price(pair, reference)
     sample = TailTrailSample(occurred_at=occurred_at, reference_price=reference)
@@ -43,6 +44,7 @@ def initial_tail_trail(
         current_stop_price=stop,
         previous_stop_price=stop,
         samples=(sample,),
+        last_stop_update_at=occurred_at,
     )
 
 
@@ -55,6 +57,7 @@ def step_tail_trail(
     symbol: str | None = None,
 ) -> TailTrailState:
     """Advance tail trail by one market tick and improve protection only."""
+    occurred_at = _as_utc_aware(occurred_at)
     reference = to_decimal(reference_price)
     samples = _bounded_samples(
         trail.samples + (TailTrailSample(occurred_at=occurred_at, reference_price=reference),)
@@ -73,6 +76,7 @@ def step_tail_trail(
             current_stop_price=candidate,
             previous_stop_price=trail.current_stop_price,
             samples=samples,
+            last_stop_update_at=occurred_at,
         )
     return replace(trail, samples=samples)
 
@@ -137,17 +141,18 @@ def _current_variation(
     occurred_at: datetime,
     time_bin_seconds: int,
 ) -> Decimal:
+    occurred_at = _as_utc_aware(occurred_at)
     current_start = occurred_at - timedelta(seconds=time_bin_seconds)
     previous_start = occurred_at - timedelta(seconds=2 * time_bin_seconds)
     current = [
         sample.reference_price
         for sample in samples
-        if sample.occurred_at > current_start
+        if _as_utc_aware(sample.occurred_at) > current_start
     ]
     previous = [
         sample.reference_price
         for sample in samples
-        if previous_start < sample.occurred_at <= current_start
+        if previous_start < _as_utc_aware(sample.occurred_at) <= current_start
     ]
     if not current or not previous:
         return Decimal("0")
@@ -166,3 +171,9 @@ def _neg_exp_distribution(max_var: Decimal, count: int) -> tuple[Decimal, ...]:
         Decimal(str(-exp(float(Decimal("1") + step * Decimal(index)))))
         for index in range(count)
     )
+
+
+def _as_utc_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

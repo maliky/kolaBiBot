@@ -12,7 +12,11 @@ from kolabi.bot.indicators import (
     KrakenDbIndicatorClient,
 )
 from kolabi.bot.domain import OrderPairSpec, StrategySpec
-from kolabi.bot.persistence import OrderRecorder, PersistenceConfig
+from kolabi.bot.persistence import (
+    OrderRecorder,
+    PersistenceConfig,
+    TailTelemetryRecorder,
+)
 from kolabi.bot.strategy_runtime import (
     KrakenPrivateOrderPollingSource,
     KrakenPublicTriggerSource,
@@ -230,6 +234,20 @@ class BotService:
             executor=None if dry_run else self._build_executor(simulate=simulate),
             public_source=self._build_public_source(simulate=simulate),
             private_source=self._build_private_source(simulate=simulate),
+            public_state_reader=(
+                None
+                if simulate
+                else cast(PublicRuntimeStateReader | None, self.runtime_state)
+            ),
+            tail_telemetry_writer=(
+                None
+                if simulate or self._account_db_url is None
+                else TailTelemetryRecorder(PersistenceConfig(self._account_db_url))
+            ),
+            exchange=self.config.exchange.lower(),
+            environment=self.config.environment,
+            market_type="futures",
+            account_scope="default",
             simulate=simulate,
         )
         if dry_run:
@@ -504,8 +522,6 @@ def _matching_tail_trigger_order(
         # clOrdID is the strongest identity anchor; exchange may quantize stop
         # prices to tick size, so strict stop matching can be too brittle.
         if not clordid_match and not _matches_price(order.get("stop_price"), request.stopPx):
-            continue
-        if not bool(order.get("reduce_only", False)):
             continue
         return order
     return None

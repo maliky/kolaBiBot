@@ -24,6 +24,7 @@ from kolabi.bot.chronos import Chronos, ChronosNotice
 from kolabi.bot.domain import (
     EggMove,
     HeadState,
+    OrderRole,
     OrderIdentity,
     PairCycleState,
     StrategySpec,
@@ -31,6 +32,7 @@ from kolabi.bot.domain import (
     TailState,
 )
 from kolabi.bot.ids import head_client_order_id, tail_client_order_id
+from kolabi.bot.persistence import TailTelemetryRow
 from kolabi.bot.order_building import head_order_dict
 from kolabi.bot.dragon import (
     MarketSnapshotFact,
@@ -79,9 +81,7 @@ class RuntimeQueueLike(Protocol):
 
     async def enqueue(self, event: EggMove) -> None: ...
 
-    def record_targets_head(self, record: object) -> bool: ...
-
-    def head_pair_state_for_record(self, record: object) -> PairCycleState | None: ...
+    def pair_state_for_record(self, record: object) -> tuple[PairCycleState, OrderRole] | None: ...
 
 
 class PublicMarketStateReader(Protocol):
@@ -116,6 +116,10 @@ class PrivateOrderStateReader(Protocol):
 
 class StrategyRuntimeLike(RuntimeQueueLike, Protocol):
     strategy: StrategySpec
+
+
+class TailTelemetryWriter(Protocol):
+    def record_rows(self, rows: tuple[TailTelemetryRow, ...]) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -257,16 +261,18 @@ class KrakenPrivateOrderPollingSource:
                     if occurred_at is not None:
                         self.after_local_timestamp = occurred_at
                     self.after_local_id = record.local_id
-                pair_state = runtime.head_pair_state_for_record(record)
-                if pair_state is None:
+                resolved = runtime.pair_state_for_record(record)
+                if resolved is None:
                     self._pending_records.append(record)
                     continue
+                pair_state, role = resolved
                 fact = private_order_fact_from_record(
                     record,
                     pair_name=pair_state.pair.name,
                 )
                 move = head_move_from_private_fact(fact)
                 move = self._with_reference_price(move, pair_state, runtime.symbol)
+                move = replace(move, role=role)
                 event_id = (
                     f"private-order:{record.local_id}"
                     if record.local_id is not None
@@ -309,6 +315,13 @@ class StrategyRuntime:
         executor: CommandExecutor | None = None,
         public_source: RuntimeEventSource | None = None,
         private_source: RuntimeEventSource | None = None,
+        public_state_reader: PublicRuntimeStateReader | None = None,
+        tail_telemetry_writer: TailTelemetryWriter | None = None,
+        tail_telemetry_interval_seconds: float = 30.0,
+        exchange: str = "kraken",
+        environment: str = "demo",
+        market_type: str = "futures",
+        account_scope: str = "default",
         simulate: bool = False,
     ) -> None:
         self.strategy = strategy
@@ -316,6 +329,13 @@ class StrategyRuntime:
         self.executor = executor
         self.public_source = public_source
         self.private_source = private_source
+        self.public_state_reader = public_state_reader
+        self.tail_telemetry_writer = tail_telemetry_writer
+        self.tail_telemetry_interval_seconds = tail_telemetry_interval_seconds
+        self.exchange = exchange
+        self.environment = environment
+        self.market_type = market_type
+        self.account_scope = account_scope
         self.simulate = simulate
         launched_at = datetime.now(timezone.utc)
         self.state = StrategyState(
@@ -354,6 +374,12 @@ class StrategyRuntime:
             for source in sources
             if source is not None
         ]
+        if (
+            not self.simulate
+            and self.public_state_reader is not None
+            and self.tail_telemetry_writer is not None
+        ):
+            self._tasks.append(asyncio.create_task(self._pump_tail_telemetry()))
 
     async def stop(self) -> None:
         self.running = False
@@ -392,6 +418,69 @@ class StrategyRuntime:
             notices=tuple(self.chronos.notices),
         )
 
+    async def _pump_tail_telemetry(self) -> None:
+        interval = max(self.tail_telemetry_interval_seconds, 1.0)
+        while self.running:
+            now = datetime.now(timezone.utc)
+            rows = self._collect_tail_telemetry_rows(now)
+            if rows and self.tail_telemetry_writer is not None:
+                self.tail_telemetry_writer.record_rows(rows)
+            for row in rows:
+                _LOGGER.info(
+                    "tail_metrics pair=%s head_state=%s tail_state=%s ref=%s stop=%s initial_dist=%s current_dist=%s last_update_at=%s",
+                    row.pair_name,
+                    row.head_state,
+                    row.tail_state,
+                    f"{row.reference_price:.6f}",
+                    f"{row.stop_price:.6f}",
+                    f"{row.initial_distance:.6f}",
+                    f"{row.current_distance:.6f}",
+                    (
+                        row.last_tail_update_at.isoformat()
+                        if row.last_tail_update_at is not None
+                        else "-"
+                    ),
+                )
+            await asyncio.sleep(interval)
+
+    def _collect_tail_telemetry_rows(self, now: datetime) -> tuple[TailTelemetryRow, ...]:
+        reader = self.public_state_reader
+        if reader is None:
+            return ()
+        rows: list[TailTelemetryRow] = []
+        market = reader.fetch_market_state(self.symbol)
+        for pair_name, pair_state in self.state.pairs.items():
+            if (
+                pair_state.tail_trail is None
+                or pair_state.tail_state not in {TailState.HOOKED, TailState.SUBMITTED, TailState.LIVING}
+            ):
+                continue
+            ref = reference_price(pair_state.pair.head.side, market)
+            if ref <= 0:
+                continue
+            stop = pair_state.tail_trail.current_stop_price
+            rows.append(
+                TailTelemetryRow(
+                    exchange=self.exchange,
+                    environment=self.environment,
+                    market_type=self.market_type,
+                    account_scope=self.account_scope,
+                    strategy_id=self.state.strategy_id,
+                    pair_name=pair_name,
+                    symbol=self.symbol,
+                    head_state=pair_state.head_state.value,
+                    tail_state=pair_state.tail_state.value,
+                    tail_mode=None if pair_state.tail_mode is None else pair_state.tail_mode.value,
+                    reference_price=float(ref),
+                    stop_price=float(stop),
+                    initial_distance=float(pair_state.tail_trail.baseline_width),
+                    current_distance=float(abs(to_decimal(ref) - stop)),
+                    last_tail_update_at=pair_state.tail_trail.last_stop_update_at,
+                    recorded_at=now,
+                )
+            )
+        return tuple(rows)
+
     def _log_living_updates(self, previous_pairs: dict[str, PairCycleState]) -> None:
         for pair_name, current in self.state.pairs.items():
             previous = previous_pairs.get(pair_name)
@@ -425,21 +514,18 @@ class StrategyRuntime:
                 str(stop_current) if stop_current is not None else "-",
             )
 
-    def record_targets_head(self, record) -> bool:
-        return self.head_pair_state_for_record(record) is not None
-
-    def head_pair_state_for_record(self, record) -> PairCycleState | None:
+    def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
         for pair_state in self.state.pairs.values():
             tail_identity = pair_state.tail_identity
             if tail_identity is not None and _record_matches_identity(
                 record, tail_identity
             ):
-                return None
+                return pair_state, OrderRole.TAIL
             head_identity = pair_state.head_identity
             if head_identity is not None and _record_matches_identity(
                 record, head_identity
             ):
-                return pair_state
+                return pair_state, OrderRole.HEAD
         return None
 
     def _prepare_command(self, command: DragonSong) -> DragonSong:

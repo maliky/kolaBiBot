@@ -27,6 +27,7 @@ from kolabi.bot.domain import (
     PairIntentKind,
     OrderReason,
     PairCycleState,
+    OrderRole,
     TailMode,
     TailState,
 )
@@ -54,7 +55,11 @@ def step_pair(
         )
         return next_state, ()
 
-    if state.head_state in {HeadState.FAILED, HeadState.CLOSED}:
+    if (
+        state.head_state in {HeadState.FAILED, HeadState.CLOSED}
+        and move.kind != EggMoveKind.MARKET_TICK
+        and move.role != OrderRole.TAIL
+    ):
         return state, ()
 
     if move.kind == EggMoveKind.HEAD_HOOKED:
@@ -98,6 +103,13 @@ def step_pair(
         return next_state, ()
 
     if move.kind == EggMoveKind.NOT_PLAYED_NOR_CANCELED:
+        if move.role == OrderRole.TAIL:
+            next_state = replace(
+                state,
+                tail_state=TailState.SUBMITTED,
+                tail_identity=tail_identity_from_move(state, move),
+            )
+            return next_state, ()
         next_state = replace(
             state,
             head_state=HeadState.NEW,
@@ -107,6 +119,13 @@ def step_pair(
         return next_state, ()
 
     if move.kind == EggMoveKind.NOT_PLAYED_CANCELED:
+        if move.role == OrderRole.TAIL:
+            next_state = replace(
+                state,
+                tail_state=TailState.FAILED,
+                tail_identity=tail_identity_from_move(state, move),
+            )
+            return next_state, ()
         next_state = replace(
             state,
             head_state=HeadState.FAILED,
@@ -118,6 +137,13 @@ def step_pair(
         return next_state, ()
 
     if move.kind == EggMoveKind.PLAYED_NOT_CANCELED:
+        if move.role == OrderRole.TAIL:
+            next_state = replace(
+                state,
+                tail_state=TailState.LIVING,
+                tail_identity=tail_identity_from_move(state, move),
+            )
+            return next_state, ()
         played_quantity = played_quantity_from_move(state, move)
         if (
             state.head_state == HeadState.LIVING
@@ -137,6 +163,14 @@ def step_pair(
         return next_state, (_tail_intent_for_state(next_state),)
 
     if move.kind == EggMoveKind.PLAYED_AND_CANCELED:
+        if move.role == OrderRole.TAIL:
+            next_state = replace(
+                state,
+                tail_state=TailState.CLOSED,
+                tail_mode=TailMode.FLYING,
+                tail_identity=tail_identity_from_move(state, move),
+            )
+            return next_state, ()
         played_quantity = played_quantity_from_move(state, move)
         if (
             state.head_state == HeadState.CLOSED

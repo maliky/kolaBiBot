@@ -20,9 +20,14 @@ from kolabi.shared.core.runtime_types import decimal_to_float, to_decimal
 
 
 class MarketLike(Protocol):
-    best_bid: float | None
-    best_ask: float | None
-    mid_price: float | None
+    @property
+    def best_bid(self) -> float | None: ...
+
+    @property
+    def best_ask(self) -> float | None: ...
+
+    @property
+    def mid_price(self) -> float | None: ...
 
 
 def pair_window_is_open(

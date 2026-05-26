@@ -8,6 +8,7 @@ from kolabi.bot.domain import (
     EggMoveKind,
     HeadSpec,
     HeadState,
+    OrderReason,
     OrderRole,
     OrderPairSpec,
     OrderIdentity,
@@ -21,6 +22,7 @@ from kolabi.bot.domain import (
 )
 from kolabi.bot.horus import plan_runtime_commands
 from kolabi.bot.pair_cycle import step_pair
+from kolabi.bot.tail_tracking import initial_tail_trail
 from kolabi.shared.core.runtime_types import PlaceTailCommand, Symbol
 
 
@@ -185,6 +187,30 @@ def test_step_pair_zero_fill_cancel_fails_without_tail() -> None:
     next_state, intents = step_pair(
         submitted_state(),
         egg_move(EggMoveKind.NOT_PLAYED_CANCELED, played_quantity=0.0),
+    )
+
+    assert next_state.head_state == HeadState.FAILED
+    assert next_state.tail_state == TailState.LATENT
+    assert next_state.tail_mode is None
+    assert intents == ()
+
+
+def test_would_not_reduce_position_is_not_treated_as_played() -> None:
+    next_state, intents = step_pair(
+        submitted_state(),
+        EggMove(
+            kind=EggMoveKind.NOT_PLAYED_CANCELED,
+            occurred_at=datetime.now(timezone.utc),
+            symbol="PI_XBTUSD",
+            reply={
+                "orderID": "OID-1",
+                "clOrdID": "CID-1",
+                "cumQty": 0.0,
+                "orderQty": 2.0,
+                "execType": OrderReason.WOULD_NOT_REDUCE_POSITION.value,
+                "reference_price": 100.0,
+            },
+        ),
     )
 
     assert next_state.head_state == HeadState.FAILED
@@ -413,6 +439,40 @@ def test_closed_pair_ignores_later_market_tick() -> None:
     assert intents == ()
 
 
+def test_closed_head_with_active_tail_still_trails_on_market_tick() -> None:
+    trail = initial_tail_trail(sample_pair(), Decimal("100"), datetime.now(timezone.utc))
+    closed = PairCycleState(
+        pair=sample_pair(),
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.LIVING,
+        tail_mode=TailMode.FLYING,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        tail_trail=trail,
+        played_quantity=Decimal("1"),
+    )
+
+    next_state, intents = step_pair(
+        closed,
+        EggMove(
+            kind=EggMoveKind.MARKET_TICK,
+            occurred_at=datetime.now(timezone.utc),
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            reply={"reference_price": 102.0},
+        ),
+    )
+
+    assert next_state.tail_trail is not None
+    assert next_state.tail_trail.current_stop_price > trail.current_stop_price
+    assert len(intents) == 1
+    assert intents[0].kind == PairIntentKind.AMEND_TAIL
+
+
 def test_closed_pair_accepts_tail_submission_identity() -> None:
     closed = PairCycleState(
         pair=sample_pair(),
@@ -439,4 +499,82 @@ def test_closed_pair_accepts_tail_submission_identity() -> None:
         client_order_id="CID-T",
         exchange_order_id="OID-T",
     )
+    assert intents == ()
+
+
+def test_closed_head_accepts_tail_terminal_private_close() -> None:
+    closed = PairCycleState(
+        pair=sample_pair(),
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.SUBMITTED,
+        tail_mode=TailMode.FLYING,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        played_quantity=Decimal("3"),
+    )
+
+    next_state, intents = step_pair(
+        closed,
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=datetime.now(timezone.utc),
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={
+                "orderID": "OID-T",
+                "clOrdID": "CID-T",
+                "cumQty": 3.0,
+                "orderQty": 3.0,
+                "execType": OrderReason.STOP_ORDER_TRIGGERED.value,
+            },
+            is_private=True,
+        ),
+    )
+
+    assert next_state.head_state == HeadState.CLOSED
+    assert next_state.tail_state == TailState.CLOSED
+    assert intents == ()
+
+
+def test_closed_head_accepts_tail_terminal_private_fail() -> None:
+    closed = PairCycleState(
+        pair=sample_pair(),
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.SUBMITTED,
+        tail_mode=TailMode.FLYING,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        played_quantity=Decimal("3"),
+    )
+
+    next_state, intents = step_pair(
+        closed,
+        EggMove(
+            kind=EggMoveKind.NOT_PLAYED_CANCELED,
+            occurred_at=datetime.now(timezone.utc),
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={
+                "orderID": "OID-T",
+                "clOrdID": "CID-T",
+                "cumQty": 0.0,
+                "orderQty": 3.0,
+                "execType": OrderReason.CANCELLED_BY_USER.value,
+            },
+            is_private=True,
+        ),
+    )
+
+    assert next_state.head_state == HeadState.CLOSED
+    assert next_state.tail_state == TailState.FAILED
     assert intents == ()

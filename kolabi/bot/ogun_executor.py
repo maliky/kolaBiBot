@@ -43,7 +43,7 @@ class OgunExecutor:
         self.retry_policy = retry_policy or RetryPolicy()
 
     async def execute(self, command: DragonSong) -> OrderAck:
-        attempts = max(1, self.retry_policy.attempts)
+        attempts = self._attempts_for(command)
         delay = max(0.0, self.retry_policy.base_delay_seconds)
         for attempt in range(1, attempts + 1):
             try:
@@ -53,6 +53,13 @@ class OgunExecutor:
                     raise
                 await asyncio.sleep(delay * attempt)
         raise RuntimeError("unreachable retry loop")
+
+    def _attempts_for(self, command: DragonSong) -> int:
+        # Place commands must be emitted once; adapter-local HTTP retries are the
+        # only safe retry layer because a second send can duplicate live orders.
+        if isinstance(command, (PlaceHeadCommand, PlaceTailCommand)):
+            return 1
+        return max(1, self.retry_policy.attempts)
 
     async def _dispatch(self, command: DragonSong) -> OrderAck:
         if isinstance(command, PlaceHeadCommand):

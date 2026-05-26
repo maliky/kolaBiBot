@@ -296,6 +296,7 @@ def _with_target_pair(event: EggMove, pair_name: str | None) -> EggMove:
         reply=event.reply,
         event_id=event.event_id,
         pair_name=pair_name,
+        role=event.role,
         is_private=event.is_private,
     )
 

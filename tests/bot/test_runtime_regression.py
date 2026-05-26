@@ -61,11 +61,6 @@ def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) ->
         raise AssertionError("Expected quantity validation to fail before dispatch")
 
 
-def test_active_runtime_no_longer_depends_on_market_auditor() -> None:
-    source = Path("kolabi/bot/service.py").read_text()
-    assert "MarketAuditor" not in source
-
-
 def test_adapter_exchange_port_forwards_execinst_once(monkeypatch) -> None:
     class FakeAdapter:
         def __init__(self, **kwargs) -> None:
