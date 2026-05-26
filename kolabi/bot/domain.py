@@ -257,6 +257,9 @@ class TailTrailState:
     current_stop_price: Decimal
     previous_stop_price: Decimal
     samples: tuple[TailTrailSample, ...]
+    initial_stop_price: Decimal | None = None
+    last_reference_price: Decimal | None = None
+    last_amended_at: datetime | None = None
     last_stop_update_at: datetime | None = None
 
 

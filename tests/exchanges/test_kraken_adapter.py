@@ -490,6 +490,54 @@ def test_place_order_rounds_stop_price_to_cached_tick_size(tmp_path):
     assert sent_payload["stopPrice"] == 75436.5
 
 
+@pytest.mark.parametrize(
+    ("exec_inst", "expected_signal"),
+    (
+        ("ReduceOnly,LastPrice", "last"),
+        ("ReduceOnly,MarkPrice", "mark"),
+        ("ReduceOnly,IndexPrice", "index"),
+    ),
+)
+def test_place_order_maps_execinst_trigger_signal(exec_inst, expected_signal, tmp_path):
+    session = DummySession(
+        [
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "OID-T",
+                    "cli_ord_id": "CID-T",
+                    "status": "placed",
+                    "qty": 1,
+                    "filled": 0,
+                    "direction": 1,
+                    "stop_price": 75436.5,
+                },
+            }
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    adapter.place_order(
+        side="sell",
+        orderQty=1,
+        stopPx=75436.5,
+        type_="S",
+        execInst=exec_inst,
+        clOrdID="CID-T",
+    )
+
+    sent_payload = dict(session.calls[0]["data"])
+    assert sent_payload["triggerSignal"] == expected_signal
+
+
 def test_authenticated_requests_retry_with_increasing_nonce(tmp_path, monkeypatch):
     session = DummySession(
         [

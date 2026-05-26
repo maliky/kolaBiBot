@@ -4,7 +4,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from kolabi.bot.domain import HeadSpec, OrderPairSpec, Side, TailSpec, TimeWindow
-from kolabi.bot.tail_tracking import initial_tail_trail, step_tail_trail
+from kolabi.bot.tail_tracking import (
+    TailTrailingConfig,
+    initial_tail_trail,
+    step_tail_trail,
+)
 
 
 def sample_pair(*, side: Side, tail: float = 1.0, tail_type: str = "t%") -> OrderPairSpec:
@@ -26,62 +30,143 @@ def sample_pair(*, side: Side, tail: float = 1.0, tail_type: str = "t%") -> Orde
     )
 
 
-def test_buy_head_unfavourable_or_too_small_move_keeps_stop() -> None:
+def test_sell_tail_does_not_amend_when_reference_moves_down() -> None:
     now = datetime.now(timezone.utc)
     pair = sample_pair(side=Side.BUY)
     trail = initial_tail_trail(pair, Decimal("100"), now)
 
-    down = step_tail_trail(pair, trail, Decimal("99"), now + timedelta(seconds=1))
-    small_up = step_tail_trail(pair, trail, Decimal("100.5"), now + timedelta(seconds=2))
+    moved = step_tail_trail(pair, trail, Decimal("98"), now + timedelta(seconds=7))
 
-    assert down.current_stop_price == Decimal("99")
-    assert small_up.current_stop_price == Decimal("99")
+    assert moved.current_stop_price == trail.current_stop_price
 
 
-def test_buy_head_favourable_move_past_entry_moves_stop_up() -> None:
+def test_sell_tail_first_unblock_requires_twice_initial_distance() -> None:
     now = datetime.now(timezone.utc)
     pair = sample_pair(side=Side.BUY)
     trail = initial_tail_trail(pair, Decimal("100"), now)
 
-    moved = step_tail_trail(pair, trail, Decimal("102"), now + timedelta(seconds=1))
+    blocked = step_tail_trail(pair, trail, Decimal("100.9"), now + timedelta(seconds=7))
+    unblocked = step_tail_trail(pair, trail, Decimal("102.2"), now + timedelta(seconds=14))
 
-    assert moved.previous_stop_price == Decimal("99")
-    assert moved.current_stop_price > Decimal("100")
+    assert blocked.current_stop_price == trail.current_stop_price
+    assert unblocked.current_stop_price > trail.current_stop_price
+    assert unblocked.last_amended_at is not None
 
 
-def test_sell_head_unfavourable_or_too_small_move_keeps_stop() -> None:
+def test_sell_tail_respects_six_second_update_gate() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(side=Side.BUY)
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    first = step_tail_trail(pair, trail, Decimal("102.5"), now + timedelta(seconds=7))
+    second = step_tail_trail(pair, first, Decimal("104"), now + timedelta(seconds=10))
+    third = step_tail_trail(pair, second, Decimal("104.5"), now + timedelta(seconds=14))
+
+    assert second.current_stop_price == first.current_stop_price
+    assert third.current_stop_price > second.current_stop_price
+
+
+def test_sell_tail_respects_hysteresis() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(side=Side.BUY)
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    cfg = TailTrailingConfig(min_amend_ticks=2, min_amend_fraction_of_d0=Decimal("0"))
+    first = step_tail_trail(
+        pair,
+        trail,
+        Decimal("102.2"),
+        now + timedelta(seconds=7),
+        tick_size=Decimal("0.5"),
+        config=cfg,
+    )
+    second = step_tail_trail(
+        pair,
+        first,
+        Decimal("102.4"),
+        now + timedelta(seconds=14),
+        tick_size=Decimal("0.5"),
+        config=cfg,
+    )
+    assert second.current_stop_price == first.current_stop_price
+
+
+def test_buy_tail_does_not_amend_when_reference_moves_up() -> None:
     now = datetime.now(timezone.utc)
     pair = sample_pair(side=Side.SELL)
     trail = initial_tail_trail(pair, Decimal("100"), now)
 
-    up = step_tail_trail(pair, trail, Decimal("101"), now + timedelta(seconds=1))
-    small_down = step_tail_trail(pair, trail, Decimal("99.5"), now + timedelta(seconds=2))
+    moved = step_tail_trail(pair, trail, Decimal("103"), now + timedelta(seconds=7))
 
-    assert up.current_stop_price == Decimal("101")
-    assert small_down.current_stop_price == Decimal("101")
+    assert moved.current_stop_price == trail.current_stop_price
 
 
-def test_sell_head_favourable_move_past_entry_moves_stop_down() -> None:
+def test_buy_tail_first_unblock_requires_twice_initial_distance() -> None:
     now = datetime.now(timezone.utc)
     pair = sample_pair(side=Side.SELL)
     trail = initial_tail_trail(pair, Decimal("100"), now)
 
-    moved = step_tail_trail(pair, trail, Decimal("98"), now + timedelta(seconds=1))
+    blocked = step_tail_trail(pair, trail, Decimal("99.2"), now + timedelta(seconds=7))
+    unblocked = step_tail_trail(pair, trail, Decimal("97.7"), now + timedelta(seconds=14))
 
-    assert moved.previous_stop_price == Decimal("101")
-    assert moved.current_stop_price < Decimal("100")
+    assert blocked.current_stop_price == trail.current_stop_price
+    assert unblocked.current_stop_price < trail.current_stop_price
+    assert unblocked.last_amended_at is not None
 
 
-def test_fast_favourable_move_shortens_width_without_widening() -> None:
+def test_buy_tail_respects_six_second_update_gate() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(side=Side.SELL)
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    first = step_tail_trail(pair, trail, Decimal("97.5"), now + timedelta(seconds=7))
+    second = step_tail_trail(pair, first, Decimal("96.5"), now + timedelta(seconds=10))
+    third = step_tail_trail(pair, second, Decimal("96.0"), now + timedelta(seconds=14))
+
+    assert second.current_stop_price == first.current_stop_price
+    assert third.current_stop_price < second.current_stop_price
+
+
+def test_buy_tail_respects_hysteresis() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(side=Side.SELL)
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    cfg = TailTrailingConfig(min_amend_ticks=2, min_amend_fraction_of_d0=Decimal("0"))
+    first = step_tail_trail(
+        pair,
+        trail,
+        Decimal("97.7"),
+        now + timedelta(seconds=7),
+        tick_size=Decimal("0.5"),
+        config=cfg,
+    )
+    second = step_tail_trail(
+        pair,
+        first,
+        Decimal("97.6"),
+        now + timedelta(seconds=14),
+        tick_size=Decimal("0.5"),
+        config=cfg,
+    )
+    assert second.current_stop_price == first.current_stop_price
+
+
+def test_tick_rounding_prevents_subtick_noop_amend() -> None:
     now = datetime.now(timezone.utc)
     pair = sample_pair(side=Side.BUY)
     trail = initial_tail_trail(pair, Decimal("100"), now)
-    with_history = step_tail_trail(pair, trail, Decimal("100"), now + timedelta(seconds=1))
-
-    moved = step_tail_trail(pair, with_history, Decimal("110"), now + timedelta(seconds=70))
-
-    assert Decimal("0") < moved.current_stop_price - Decimal("100")
-    assert Decimal("110") - moved.current_stop_price <= trail.baseline_width
+    first = step_tail_trail(
+        pair,
+        trail,
+        Decimal("102.2"),
+        now + timedelta(seconds=7),
+        tick_size=Decimal("0.5"),
+    )
+    second = step_tail_trail(
+        pair,
+        first,
+        Decimal("102.2001"),
+        now + timedelta(seconds=14),
+        tick_size=Decimal("0.5"),
+    )
+    assert second.current_stop_price == first.current_stop_price
 
 
 def test_tail_tracking_handles_mixed_naive_and_aware_timestamps() -> None:
@@ -90,12 +175,22 @@ def test_tail_tracking_handles_mixed_naive_and_aware_timestamps() -> None:
     pair = sample_pair(side=Side.BUY)
     trail = initial_tail_trail(pair, Decimal("100"), aware)
 
-    moved = step_tail_trail(pair, trail, Decimal("102"), naive + timedelta(seconds=1))
+    moved = step_tail_trail(pair, trail, Decimal("102.2"), naive + timedelta(seconds=7))
     moved_again = step_tail_trail(
         pair,
         moved,
-        Decimal("103"),
-        aware + timedelta(seconds=61),
+        Decimal("103.2"),
+        aware + timedelta(seconds=14),
     )
 
     assert moved_again.current_stop_price >= moved.current_stop_price
+
+
+def test_tail_tracking_survives_extreme_reference_without_overflow() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(side=Side.BUY)
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+
+    moved = step_tail_trail(pair, trail, Decimal("999999"), now + timedelta(seconds=7))
+
+    assert moved.current_stop_price >= trail.current_stop_price
