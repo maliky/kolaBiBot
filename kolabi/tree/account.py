@@ -181,8 +181,24 @@ def upgrade_private_schema(engine: Any) -> None:
                     "symbol": "VARCHAR(64)",
                     "exchange_sequence": "VARCHAR(128)",
                     "source_timestamp": "DATETIME",
+                    "duplicate_count": "INTEGER",
+                    "last_seen_at": "DATETIME",
                     "received_at": "DATETIME",
                 },
+            )
+            connection.execute(
+                text(
+                    "UPDATE raw_exchange_events "
+                    "SET duplicate_count = COALESCE(duplicate_count, 0) "
+                    "WHERE duplicate_count IS NULL"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE raw_exchange_events "
+                    "SET last_seen_at = COALESCE(last_seen_at, received_at) "
+                    "WHERE last_seen_at IS NULL"
+                )
             )
             connection.execute(
                 text(
@@ -455,7 +471,36 @@ class AccountStateStore:
         source_timestamp = parse_kraken_time(
             first_present(payload, "timestamp", "time", "last_update_time")
         )
+        now = datetime.now(timezone.utc)
         with self.sessionmaker() as session:
+            previous = (
+                session.execute(
+                    select(RawExchangeEvent)
+                    .where(
+                        RawExchangeEvent.exchange == self.config.exchange,
+                        RawExchangeEvent.environment == self.config.environment,
+                        RawExchangeEvent.stream_kind == stream_kind,
+                        RawExchangeEvent.event_type == event_type,
+                    )
+                    .order_by(RawExchangeEvent.received_at.desc(), RawExchangeEvent.id.desc())
+                )
+                .scalars()
+                .first()
+            )
+            if previous is not None and previous.payload == payload:
+                previous.duplicate_count = int(previous.duplicate_count or 0) + 1
+                previous.last_seen_at = now
+                prune_raw_events(
+                    session,
+                    config=self.config,
+                    retention_minutes=self.config.raw_retention_minutes,
+                    retention_limit=self.config.raw_retention_limit,
+                    now=now,
+                    stream_kind=stream_kind,
+                )
+                session.commit()
+                session.refresh(previous)
+                return previous
             row = RawExchangeEvent(
                 exchange=self.config.exchange,
                 environment=self.config.environment,
@@ -468,8 +513,10 @@ class AccountStateStore:
                 exchange_sequence=optional_str(payload.get("seq")),
                 payload=payload,
                 source_timestamp=source_timestamp,
-                received_at=datetime.now(timezone.utc),
-                created_at=datetime.now(timezone.utc),
+                duplicate_count=0,
+                last_seen_at=now,
+                received_at=now,
+                created_at=now,
             )
             session.add(row)
             prune_raw_events(
@@ -477,7 +524,7 @@ class AccountStateStore:
                 config=self.config,
                 retention_minutes=self.config.raw_retention_minutes,
                 retention_limit=self.config.raw_retention_limit,
-                now=row.received_at,
+                now=now,
                 stream_kind=stream_kind,
             )
             session.commit()
@@ -1275,10 +1322,12 @@ def prune_raw_events(
     if retention_minutes > 0:
         cutoff = now - timedelta(minutes=retention_minutes)
         session.execute(
-            delete(RawExchangeEvent).where(
+            delete(RawExchangeEvent)
+            .where(
                 *base_filters,
                 RawExchangeEvent.received_at < cutoff,
             )
+            .execution_options(synchronize_session=False)
         )
     if retention_limit > 0:
         keep_ids = (
@@ -1288,10 +1337,12 @@ def prune_raw_events(
             .limit(retention_limit)
         )
         session.execute(
-            delete(RawExchangeEvent).where(
+            delete(RawExchangeEvent)
+            .where(
                 *base_filters,
                 RawExchangeEvent.id.notin_(keep_ids),
             )
+            .execution_options(synchronize_session=False)
         )
 
 

@@ -16,6 +16,7 @@ from .models import (
     OrderEvent,
     OrderRun,
     RawExchangeEvent,
+    TailTelemetry,
 )
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "OrderEvent",
     "OrderRun",
     "RawExchangeEvent",
+    "TailTelemetry",
     "get_sessionmaker",
     "init_engine",
 ]

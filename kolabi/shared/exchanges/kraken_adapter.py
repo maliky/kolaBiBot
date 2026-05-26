@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, Iterable, Optional, Sequence, cast
+from typing import Any, Dict, Iterable, Optional, Sequence, TypeAlias, cast
 from urllib.parse import urlencode
 
 import requests
@@ -27,6 +28,11 @@ from kolabi.shared.persistence import (
 )
 from kolabi.tree.account import sign_rest_auth
 from uuid import uuid4
+
+_LOGGER = logging.getLogger("kola")
+
+JsonScalar: TypeAlias = None | bool | int | float | str
+JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 
 
 @dataclass(frozen=True)
@@ -232,7 +238,14 @@ class KrakenFuturesAdapter(ExchangeABC):
     ) -> None:
         if not _should_persist_rest_call(method=method, path=path):
             return
-        payload = response_payload if isinstance(response_payload, dict) else {"payload": response_payload}
+        payload = (
+            response_payload
+            if isinstance(response_payload, dict)
+            else {"payload": response_payload}
+        )
+        request_payload = request_params_dict(request_params)
+        payload = cast(Dict[str, Any], _json_safe_value(payload))
+        request_payload = cast(Dict[str, Any], _json_safe_value(request_payload))
         order_like = _extract_order_like(payload) if payload else {}
         endpoint_order_id = optional_str(
             order_like.get("order_id") or order_like.get("orderId")
@@ -240,39 +253,51 @@ class KrakenFuturesAdapter(ExchangeABC):
         client_order_id = optional_str(
             order_like.get("cli_ord_id")
             or order_like.get("cliOrdId")
-            or request_params_dict(request_params).get("cliOrdId")
+            or request_payload.get("cliOrdId")
         )
         exchange_order_id = endpoint_order_id
         ack_status = _map_order_status_from_payload(order_like) if order_like else None
         ack_order_id = endpoint_order_id
         ack_client_order_id = client_order_id
         with self._sessionmaker() as session:
-            session.add(
-                ExchangeRestCall(
-                    local_uuid=str(uuid4()),
-                    exchange="kraken",
-                    environment=self.environment,
-                    market_type="futures",
-                    account_scope="default",
-                    symbol=self.symbol,
-                    method=method.upper(),
-                    path=path,
-                    request_params=request_params_dict(request_params),
-                    attempt_count=attempt_count,
-                    http_status=http_status,
-                    result_kind=result_kind,
-                    response_payload=payload,
-                    error_text=error_text,
-                    client_order_id=client_order_id,
-                    exchange_order_id=exchange_order_id,
-                    endpoint_order_id=endpoint_order_id,
-                    correlation_id=client_order_id or endpoint_order_id,
-                    ack_status=ack_status,
-                    ack_order_id=ack_order_id,
-                    ack_client_order_id=ack_client_order_id,
+            try:
+                session.add(
+                    ExchangeRestCall(
+                        local_uuid=str(uuid4()),
+                        exchange="kraken",
+                        environment=self.environment,
+                        market_type="futures",
+                        account_scope="default",
+                        symbol=self.symbol,
+                        method=method.upper(),
+                        path=path,
+                        request_params=request_payload,
+                        attempt_count=attempt_count,
+                        http_status=http_status,
+                        result_kind=result_kind,
+                        response_payload=payload,
+                        error_text=error_text,
+                        client_order_id=client_order_id,
+                        exchange_order_id=exchange_order_id,
+                        endpoint_order_id=endpoint_order_id,
+                        correlation_id=client_order_id or endpoint_order_id,
+                        ack_status=ack_status,
+                        ack_order_id=ack_order_id,
+                        ack_client_order_id=ack_client_order_id,
+                    )
                 )
-            )
-            session.commit()
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                _LOGGER.warning(
+                    "rest call audit persistence failed method=%s path=%s clOrdID=%s orderID=%s error=%s",
+                    method.upper(),
+                    path,
+                    client_order_id or "-",
+                    endpoint_order_id or "-",
+                    exc,
+                )
+                return
 
     def _ticker(self) -> _Ticker:
         payload = self._request("GET", f"/tickers/{self.symbol}")
@@ -1058,7 +1083,21 @@ def _first_present_value(payload: Dict[str, Any], *keys: str) -> object | None:
 
 def request_params_dict(params: Sequence[tuple[str, Any]]) -> Dict[str, Any]:
     """Convert ordered request params to a JSON-safe dict without auth headers."""
-    return {str(key): value for key, value in params}
+    return cast(Dict[str, Any], _json_safe_value({str(key): value for key, value in params}))
+
+
+def _json_safe_value(value: object) -> JsonValue:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(item) for item in value]
+    return str(value)
 
 
 def _should_persist_rest_call(*, method: str, path: str) -> bool:
@@ -1124,6 +1163,14 @@ def _extract_available_margin(payload: Dict[str, Any]) -> float:
 def _map_order_status_from_payload(payload: Dict[str, Any]) -> str:
     status = str(payload.get("status", "") or "").strip()
     normalized_status = status.replace(" ", "").replace("_", "").replace("-", "").lower()
+    if normalized_status in {
+        "clientorderidalreadyexist",
+        "clientordidalreadyexist",
+        "alreadyexists",
+    }:
+        # Kraken duplicate client-id responses are idempotency signals:
+        # the original order may already be live.
+        return "New"
     if normalized_status in {"placed", "new", "open", "edited", "untouched"}:
         return "New"
     if normalized_status in {"partiallyfilled", "partialfill"}:

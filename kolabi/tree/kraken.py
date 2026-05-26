@@ -1347,10 +1347,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_status(tree, args.pair)
         return 0
     if args.command == "probe":
-        asyncio.run(run_service(tree, stop_after_seconds=args.seconds))
+        try:
+            asyncio.run(run_service(tree, stop_after_seconds=args.seconds))
+        except KeyboardInterrupt:
+            tree.stop()
         print_status(tree, args.pair)
         return 0
-    asyncio.run(run_service(tree))
+    try:
+        asyncio.run(run_service(tree))
+    except KeyboardInterrupt:
+        tree.stop()
+        print("public market stream stopped by operator")
+        return 0
     return 0
 
 

@@ -833,6 +833,59 @@ def test_raw_event_time_retention_deletes_old_events(tmp_path):
         assert [row.exchange_sequence for row in rows] == ["new"]
 
 
+def test_raw_event_consecutive_duplicate_is_collapsed_with_counter(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    message = {"feed": "notifications_auth", "notifications": []}
+
+    first = store.record_raw_event(message)
+    second = store.record_raw_event(message)
+
+    assert first.id == second.id
+    with Session(store.engine) as session:
+        rows = (
+            session.execute(
+                select(RawExchangeEvent).order_by(RawExchangeEvent.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].duplicate_count == 1
+        assert rows[0].last_seen_at is not None
+        assert rows[0].last_seen_at >= rows[0].received_at
+
+
+def test_raw_event_dedup_is_scoped_by_event_and_stream(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    payload: dict[str, list[object]] = {"notifications": []}
+
+    store.record_raw_event({"feed": "notifications_auth", **payload}, stream_kind="private_ws")
+    store.record_raw_event({"feed": "account_log", **payload}, stream_kind="private_ws")
+    store.record_raw_event({"feed": "notifications_auth", **payload}, stream_kind="rest_reconciler")
+
+    with Session(store.engine) as session:
+        rows = (
+            session.execute(
+                select(RawExchangeEvent).order_by(RawExchangeEvent.id.asc())
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 3
+        assert [row.event_type for row in rows] == [
+            "notifications_auth",
+            "account_log",
+            "notifications_auth",
+        ]
+        assert [row.stream_kind for row in rows] == [
+            "private_ws",
+            "private_ws",
+            "rest_reconciler",
+        ]
+
+
 def test_schema_upgrade_skips_non_sqlite_engines(monkeypatch):
     class Dialect:
         name = "postgresql"

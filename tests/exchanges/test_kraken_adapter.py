@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, cast
 
 import pytest
@@ -8,6 +9,7 @@ from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.exchanges.kraken_adapter import (
     KrakenFuturesAdapter,
     _extract_available_margin,
+    _map_order_status_from_payload,
     build_exec_orders,
 )
 from kolabi.shared.persistence import (
@@ -117,6 +119,12 @@ def test_place_maps_limit_order_to_sendorder(tmp_path):
     assert rows[0].endpoint_order_id == "OID-1"
 
 
+def test_duplicate_client_id_status_maps_to_new() -> None:
+    status = _map_order_status_from_payload({"status": "clientOrderIdAlreadyExist"})
+
+    assert status == "New"
+
+
 def test_sendorder_http_error_is_persisted_for_forensics(tmp_path):
     session = DummySession(
         [
@@ -173,6 +181,115 @@ def test_openorders_get_is_not_persisted_in_rest_call_audit(tmp_path):
     with Session(adapter._engine) as db_session:
         rows = db_session.execute(select(ExchangeRestCall)).scalars().all()
     assert rows == []
+
+
+def test_record_rest_call_serializes_decimal_request_params(tmp_path) -> None:
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, DummySession([])),
+    )
+
+    adapter._record_rest_call(
+        method="POST",
+        path="/editorder",
+        request_params=[("order_id", "OID-1"), ("stopPx", Decimal("77245.0"))],
+        attempt_count=1,
+        http_status=200,
+        response_payload={"result": "success"},
+        result_kind="ok",
+        error_text=None,
+    )
+
+    with Session(adapter._engine) as db_session:
+        row = db_session.execute(select(ExchangeRestCall)).scalars().one()
+    assert row.request_params["stopPx"] == "77245.0"
+
+
+def test_record_rest_call_serializes_nested_decimal_payload(tmp_path) -> None:
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, DummySession([])),
+    )
+
+    adapter._record_rest_call(
+        method="POST",
+        path="/sendorder",
+        request_params=[("cliOrdId", "t-fox-260526010101")],
+        attempt_count=1,
+        http_status=200,
+        response_payload={
+            "sendStatus": {
+                "order_id": "OID-X",
+                "nested": {"stopPx": Decimal("77166.5")},
+                "history": [Decimal("1.2"), "ok"],
+            }
+        },
+        result_kind="ok",
+        error_text=None,
+    )
+
+    with Session(adapter._engine) as db_session:
+        row = db_session.execute(select(ExchangeRestCall)).scalars().one()
+    nested = row.response_payload["sendStatus"]["nested"]
+    history = row.response_payload["sendStatus"]["history"]
+    assert nested["stopPx"] == "77166.5"
+    assert history[0] == "1.2"
+
+
+def test_record_rest_call_persistence_failure_is_fail_open(tmp_path, caplog) -> None:
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, DummySession([])),
+    )
+
+    class _FailSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def add(self, _obj: object) -> None:
+            return
+
+        def commit(self) -> None:
+            raise RuntimeError("forced commit failure")
+
+        def rollback(self) -> None:
+            return
+
+    def _fail_sessionmaker():
+        return _FailSession()
+
+    adapter._sessionmaker = _fail_sessionmaker  # type: ignore[assignment]
+
+    with caplog.at_level("WARNING"):
+        adapter._record_rest_call(
+            method="POST",
+            path="/editorder",
+            request_params=[("cliOrdId", "t-fail-260526010102")],
+            attempt_count=1,
+            http_status=200,
+            response_payload={"result": "success"},
+            result_kind="ok",
+            error_text=None,
+        )
+    assert "rest call audit persistence failed" in caplog.text
 
 
 def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):

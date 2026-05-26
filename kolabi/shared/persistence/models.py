@@ -378,6 +378,8 @@ class RawExchangeEvent(Base):
     exchange_sequence: Mapped[str | None] = mapped_column(String(128))
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duplicate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -431,5 +433,35 @@ class ExchangeRestCall(Base):
     ack_order_id: Mapped[str | None] = mapped_column(String(128))
     ack_client_order_id: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class TailTelemetry(Base):
+    """Private runtime telemetry for active tail-tracking distance monitoring."""
+
+    __tablename__ = "tail_telemetry"
+    __table_args__ = (
+        Index("ix_tail_telemetry_pair_time", "pair_name", "recorded_at"),
+        Index("ix_tail_telemetry_symbol_time", "symbol", "recorded_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    environment: Mapped[str] = mapped_column(String(32), nullable=False)
+    market_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_scope: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_id: Mapped[str | None] = mapped_column(String(128))
+    pair_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    head_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    tail_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    tail_mode: Mapped[str | None] = mapped_column(String(32))
+    reference_price: Mapped[float] = mapped_column(Float, nullable=False)
+    stop_price: Mapped[float] = mapped_column(Float, nullable=False)
+    initial_distance: Mapped[float] = mapped_column(Float, nullable=False)
+    current_distance: Mapped[float] = mapped_column(Float, nullable=False)
+    last_tail_update_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
