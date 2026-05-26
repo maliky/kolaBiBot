@@ -1,6 +1,63 @@
 #+TITLE: kolaBiBot
 #+OPTIONS: toc:2 num:nil
 
+* <2026-05-26 Tue 18:08>
+
+** skewed f F pareto/lomax
+
+ #+BEGIN_SRC python
+   import numpy as np
+   import matplotlib.pyplot as plt
+   from scipy.integrate import cumulative_trapezoid
+  
+  
+   # base function
+   def skew_lomax_like(z, alpL, alpR, lamL, lamR):
+       y = np.zeros_like(z)
+  
+       left = z < 0
+       right = z >= 0
+  
+       y[left] = (1 + (-z[left]) / lamL) ** (-(alpL + 1))
+       y[right] = (1 + z[right] / lamR) ** (-(alpR + 1))
+  
+       return y
+ #+END_SRC
+
+ #+BEGIN_SRC python :results silent :var filename="shifted_skew_lomax.png"
+   
+      # support after shifting right by 1
+      x = np.linspace(0, 2, 2000)
+   
+      # internal centered variable
+      z = x - 1   # z lives on [-1, 1]
+   
+      # parameters
+      alpL = 3  # steep on the left
+      alpR = 1
+   
+      lamL = 1
+      lamR = .5  # thickness of the R tail at the border of support
+   
+      ## to skew right  : lamR > lamL and alpR < alpL  
+   
+      base = skew_lomax_like(z, alpL, alpR, lamL, lamR)
+   
+      # normalize so integral over [0, 2] is 1
+      area = np.trapezoid(base, x)
+      pdf = base / area
+   
+      # cumulative distribution
+      cdf = cumulative_trapezoid(pdf, x, initial=0)
+      cdf = cdf / cdf[-1]
+   
+   #   with delta_n is distance of tail stop trigger price to the ref price (mark, last, index...) use the mark price preferably at time n
+   #   our function to move the tail should be something like :
+   #   delta_{n+1} = delta_n - 9* cdf(delta_{n}) - spread
+   # 
+ #+END_SRC  
+  
+
 * <2026-05-24 dim. 20:10> Percent tail live failure notes
 stop sell at 75869
 stop buy at 76525.5
