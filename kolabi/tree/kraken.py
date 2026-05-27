@@ -8,6 +8,7 @@ import signal
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Sequence
 from uuid import uuid4
 
@@ -35,6 +36,7 @@ from kolabi.shared.kraken_futures import kraken_futures_environment
 from kolabi.shared.logging import setup_logging
 from kolabi.shared.persistence import (
     Base,
+    ExchangeInstrument,
     MarketIndicator,
     MarketLevel,
     MarketSnapshot,
@@ -488,6 +490,7 @@ class KrakenTree:
         self._last_log_at = now
         if self._latest_book is None:
             return
+        tick_size = self._status_tick_size(self.config.pair)
         status_line = format_market_status(
             config=self.config,
             metrics=self._latest_book.metrics,
@@ -495,6 +498,7 @@ class KrakenTree:
             persisted=snapshot is not None,
             raw_message_count=self._raw_message_count,
             book_message_count=self._book_message_count,
+            tick_size=tick_size,
         )
         if status_line == self._last_status_log_line:
             return
@@ -522,6 +526,7 @@ class KrakenTree:
     def latest_status(self, pair: str | None = None) -> dict[str, object]:
         """Retourne l'etat compact le plus recent pour un produit."""
         target_pair = pair or self.config.pair
+        tick_size = self._status_tick_size(target_pair)
         with self.sessionmaker() as session:
             snapshot = latest_snapshot(
                 session,
@@ -561,13 +566,34 @@ class KrakenTree:
                     "pair": target_pair,
                     "snapshot_count": snapshot_count,
                     "status": "empty",
+                    "tick_size": tick_size,
                 }
-            return snapshot_to_status(
+            status = snapshot_to_status(
                 snapshot=snapshot,
                 snapshot_count=snapshot_count,
                 level_count=level_count,
                 indicator_count=indicator_count,
             )
+            status["tick_size"] = tick_size
+            return round_status_prices_for_display(status, tick_size)
+
+    def _status_tick_size(self, symbol: str) -> float | None:
+        with self.sessionmaker() as session:
+            tick = (
+                session.execute(
+                    select(ExchangeInstrument.tick_size).where(
+                        ExchangeInstrument.exchange == self.config.exchange,
+                        ExchangeInstrument.environment == self.config.environment,
+                        ExchangeInstrument.market_type == self.config.market_type,
+                        ExchangeInstrument.symbol == symbol,
+                    )
+                )
+                .scalars()
+                .first()
+            )
+        if tick is None:
+            return None
+        return float(tick)
 
 
 class OrderBookSnapshot(Base):
@@ -1243,6 +1269,26 @@ def snapshot_to_status(
     }
 
 
+def round_status_prices_for_display(
+    status: dict[str, object], tick_size: float | None
+) -> dict[str, object]:
+    rounded = dict(status)
+    for key in ("avg_ask", "avg_bid", "best_ask", "best_bid", "mid_price", "spread"):
+        value = rounded.get(key)
+        if isinstance(value, (int, float)):
+            rounded[key] = round_price_for_display(float(value), tick_size)
+    return rounded
+
+
+def round_price_for_display(value: float, tick_size: float | None) -> float:
+    if tick_size is None or tick_size <= 0:
+        return value
+    price = Decimal(str(value))
+    tick = Decimal(str(tick_size))
+    rounded = (price / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
+    return float(rounded)
+
+
 def format_market_status(
     config: KrakenConfig,
     metrics: BookMetrics,
@@ -1250,13 +1296,18 @@ def format_market_status(
     persisted: bool,
     raw_message_count: int,
     book_message_count: int,
+    tick_size: float | None = None,
 ) -> str:
     """Retourne une ligne courte lisible dans screen ou un log."""
+    best_bid = round_price_for_display(metrics.best_bid, tick_size)
+    best_ask = round_price_for_display(metrics.best_ask, tick_size)
+    spread = round_price_for_display(metrics.spread, tick_size)
+    mid_price = round_price_for_display(metrics.mid_price, tick_size)
     return (
         f"kraken_tree env={config.environment} count={stored_count} pair={config.pair} "
         f"persisted={persisted} raw={raw_message_count} book={book_message_count} "
-        f"best_bid={metrics.best_bid:.2f} best_ask={metrics.best_ask:.2f} "
-        f"spread={metrics.spread:.2f} mid={metrics.mid_price:.2f} "
+        f"best_bid={best_bid:.2f} best_ask={best_ask:.2f} "
+        f"spread={spread:.2f} mid={mid_price:.2f} "
         f"imbalance={metrics.imbalance:.4f}"
     )
 

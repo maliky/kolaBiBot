@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from kolabi.bot.indicators import KrakenDbIndicatorClient
 from kolabi.shared.persistence import (
+    ExchangeInstrument,
     MarketIndicator,
     MarketLevel,
     MarketSnapshot,
@@ -323,6 +324,46 @@ def test_snapshot_status_reports_environment(tmp_path):
 
     assert status["environment"] == "demo"
     assert status["market_type"] == "futures"
+
+
+def test_snapshot_status_rounds_prices_to_cached_tick_size(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+    tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
+    tree.process_book([{"price": 101.24, "qty": 1}], [{"price": 99.26, "qty": 1}])
+
+    with Session(tree.engine) as session:
+        session.add(
+            ExchangeInstrument(
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                symbol="PI_XBTUSD",
+                tick_size=0.5,
+                min_quantity=1.0,
+                tradeable=True,
+                raw_payload={},
+            )
+        )
+        session.commit()
+
+    status = tree.latest_status("PI_XBTUSD")
+
+    assert status["tick_size"] == 0.5
+    assert status["best_ask"] == 101.0
+    assert status["best_bid"] == 99.5
+    assert status["mid_price"] == 100.5
+
+
+def test_snapshot_status_keeps_raw_precision_when_tick_size_missing(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+    tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
+    tree.process_book([{"price": 101.24, "qty": 1}], [{"price": 99.26, "qty": 1}])
+
+    status = tree.latest_status("PI_XBTUSD")
+
+    assert status["tick_size"] is None
+    assert status["best_ask"] == 101.24
+    assert status["best_bid"] == 99.26
 
 
 def test_delta_before_snapshot_raises():
