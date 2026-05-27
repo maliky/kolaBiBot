@@ -395,6 +395,9 @@ class StrategyRuntime:
         self.commands: list[DragonSong] = []
         self.running = False
         self._tasks: list[asyncio.Task[None]] = []
+        self._legend_logged = False
+        self._last_pair_updates: dict[str, tuple[str, ...]] = {}
+        self._last_tail_metrics: dict[str, tuple[str, ...]] = {}
 
     def _pair_state(self, pair):
         from kolabi.bot.domain import PairCycleState
@@ -412,6 +415,7 @@ class StrategyRuntime:
         if self.running:
             return
         self.running = True
+        self._log_runtime_legend_once()
         sources = [
             self.public_source or (StaticHookSource() if self.simulate else None),
             None if self.simulate else self.private_source,
@@ -481,24 +485,36 @@ class StrategyRuntime:
                 source = "unknown"
                 if market is not None:
                     source, _ = tail_reference_price(self.state.pairs[row.pair_name].pair, market)
-                _LOGGER.info(
-                    "tail_metrics pair=%s head_state=%s tail_state=%s ref=%s stop=%s initial_dist=%s current_dist=%s last_update_at=%s src=%s px=L:%s M:%s I:%s",
-                    row.pair_name,
+                signature = (
                     row.head_state,
                     row.tail_state,
                     _fmt_compact_price(row.reference_price),
                     _fmt_compact_price(row.stop_price),
                     _fmt_compact_price(row.initial_distance),
                     _fmt_compact_price(row.current_distance),
-                    (
-                        row.last_tail_update_at.isoformat()
-                        if row.last_tail_update_at is not None
-                        else "-"
-                    ),
+                    row.last_tail_update_at.isoformat() if row.last_tail_update_at is not None else "-",
                     source,
                     _fmt_compact_price(None if market is None else getattr(market, "last_price", None)),
                     _fmt_compact_price(None if market is None else getattr(market, "mark_price", None)),
                     _fmt_compact_price(None if market is None else getattr(market, "index_price", None)),
+                )
+                if self._last_tail_metrics.get(row.pair_name) == signature:
+                    continue
+                self._last_tail_metrics[row.pair_name] = signature
+                _LOGGER.info(
+                    "METRICS (%s): (%s--%s) ref=%s stop=%s ID=%s CD=%s LU=%s src=%s px=L:%s M:%s I:%s",
+                    row.pair_name,
+                    row.head_state,
+                    row.tail_state,
+                    signature[2],
+                    signature[3],
+                    signature[4],
+                    signature[5],
+                    signature[6],
+                    signature[7],
+                    signature[8],
+                    signature[9],
+                    signature[10],
                 )
             await asyncio.sleep(interval)
 
@@ -566,15 +582,36 @@ class StrategyRuntime:
             )
             if not (quantity_changed or stop_changed or state_changed):
                 continue
-            _LOGGER.info(
-                "pair_update pair=%s head_state=%s tail_state=%s played_qty=%s tail_stop=%s desired_stop=%s",
-                pair_name,
+            head_side = current.pair.head.side.value
+            update_signature = (
                 current.head_state.value,
                 current.tail_state.value if current.tail_state is not None else "-",
                 str(current.played_quantity) if current.played_quantity is not None else "-",
                 str(stop_current) if stop_current is not None else "-",
                 str(desired_stop) if desired_stop is not None else "-",
+                head_side,
             )
+            if self._last_pair_updates.get(pair_name) == update_signature:
+                continue
+            self._last_pair_updates[pair_name] = update_signature
+            _LOGGER.info(
+                "UPDATE (%s): (%s--%s) PQ=%s CS=%s DS=%s HFS=%s HFQ=- HFP=- HFT=-",
+                pair_name,
+                update_signature[0],
+                update_signature[1],
+                update_signature[2],
+                update_signature[3],
+                update_signature[4],
+                update_signature[5],
+            )
+
+    def _log_runtime_legend_once(self) -> None:
+        if self._legend_logged:
+            return
+        self._legend_logged = True
+        _LOGGER.info(
+            "RAPPEL: PU=pair_update HS=head_state TS=tail_state PQ=played_qty CS=current_stop DS=desired_stop ID=initial_dist CD=current_dist LU=last_update HFS=head_fill_side HFQ=head_fill_qty HFP=head_fill_price HFT=head_fill_time"
+        )
 
     def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
         for pair_state in self.state.pairs.values():
