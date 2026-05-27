@@ -50,14 +50,34 @@
       # cumulative distribution
       cdf = cumulative_trapezoid(pdf, x, initial=0)
       cdf = cdf / cdf[-1]
-   
-   #   with delta_n is distance of tail stop trigger price to the ref price (mark, last, index...) use the mark price preferably at time n
-   #   our function to move the tail should be something like :
-   #   delta_{n+1} = delta_n - 9* cdf(delta_{n}) - spread
-   # 
- #+END_SRC  
-  
 
+ #+END_SRC  
+m_n : mark price at step n
+m_{n+1} : mark price at step n + 1
+t_n : stop tail trigger price at step n
+t_{n+1} : stop tail trigger price at step n +1
+
+d_0 = abs(m_0 - t_0)  :  The initial distance when the stop tail enter the book for the first time.
+
+u : the step at which the tail is update the first time
+d_u : unblocking delta, the initial delta required to first update the tail stop price.
+d_u = 2*d_0
+
+d_n = abs(m_n - t_n)
+d'_{n+1} = abs(m_{n+1} - t_n)
+d_{n+1} = abs(m_{n+1} - t_{n+1})
+
+We suppose that we already crossed the starting ref price, ie, that the tail stop price was updated once already.  n > u
+
+We only update when d'_{n+1} > d_n and then
+f = (the interpolation of cdf) * 0.9
+
+let r = min(d'_{n+1}/(1.9*d_0), 2)
+for a stop buy:
+  t_{n+1} = t_n - f(r) * d'_{n+1}
+for a stop sell:
+  t_{n+1} = t_n + f(r) * d'_{n+1}
+  
 * <2026-05-24 dim. 20:10> Percent tail live failure notes
 stop sell at 75869
 stop buy at 76525.5
