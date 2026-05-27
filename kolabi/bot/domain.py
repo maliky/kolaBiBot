@@ -127,6 +127,8 @@ class EggMoveKind(StrEnum):
     HEAD_HOOKED = "head_hooked"
     HEAD_SUBMITTED = "head_submitted"
     TAIL_SUBMITTED = "tail_submitted"
+    TAIL_AMENDED = "tail_amended"
+    TAIL_AMEND_REJECTED = "tail_amend_rejected"
     MARKET_TICK = "market_tick"
     HEAD_UNADMITTED = "head_unadmitted"
     HEAD_ADMITTED = "head_admitted"

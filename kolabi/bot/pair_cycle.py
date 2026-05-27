@@ -56,6 +56,31 @@ def step_pair(
         )
         return next_state, ()
 
+    if move.kind == EggMoveKind.TAIL_AMENDED:
+        if state.tail_trail is None or state.tail_state in {None, TailState.CLOSED, TailState.FAILED}:
+            return state, ()
+        next_state = replace(
+            state,
+            tail_identity=tail_identity_from_move(state, move),
+            tail_trail=tail_trail_confirmed_from_move(state, move),
+        )
+        return next_state, ()
+
+    if move.kind == EggMoveKind.TAIL_AMEND_REJECTED:
+        if state.tail_trail is None:
+            return state, ()
+        confirmed_stop = state.tail_trail.confirmed_stop_price
+        if confirmed_stop is None:
+            return state, ()
+        return replace(
+            state,
+            tail_trail=replace(
+                state.tail_trail,
+                current_stop_price=confirmed_stop,
+                previous_stop_price=confirmed_stop,
+            ),
+        ), ()
+
     if (
         state.head_state in {HeadState.FAILED, HeadState.CLOSED}
         and move.kind != EggMoveKind.MARKET_TICK
@@ -312,6 +337,8 @@ def tail_trail_confirmed_from_move(state: PairCycleState, move: EggMove):
         return trail
     return replace(
         trail,
+        current_stop_price=stop_price,
+        previous_stop_price=trail.current_stop_price,
         confirmed_stop_price=stop_price,
         last_confirmed_at=move.occurred_at,
     )

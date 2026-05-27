@@ -1343,3 +1343,11 @@ python -m pytest -q \
 I changed live runtime flow so a head REST ack only emits HEAD_SUBMITTED; HEAD_PLAYED now comes from private order polling, which gates tail placement on confirmed fill. I added raw exchange interaction logging at the adapter port boundary to `logs/kraken-exchange-raw.ndjson` with request, ack, and raw payload fields for deterministic troubleshooting. I also kept trigger-order verification and updated runtime tests to require private fill confirmation before tail submission.
 
 Limitations: if private feed is stale or unavailable, tail placement is delayed or can time out by design; this fails loudly rather than placing a potentially invalid reduce-only trigger too early.
+
+* Tail Amend Ground-Truth Fix 2026-05-27
+
+The observed non-updating tail was not only a pure reducer problem: REST audit showed repeated =/editorder= replies with =editStatus.status=invalidPrice= for unrounded stop amendments such as =74757.668749999999998470=, while placement was rounded correctly. I fixed this at the Kraken adapter boundary by rounding amend =price= and =stopPx= to the instrument tick before sending =/editorder=.
+
+There was also a semantic split: local telemetry treated =-y S= as =src=book= while Kraken placement defaulted the stop trigger to last price. I made =S= and =S-= resolve to LastPrice, with =Sf/Sf-= for MarkPrice and =Si/Si-= for IndexPrice, so telemetry, order building, and exchange trigger mapping use the same source.
+
+State is now grounded more strictly in exchange acknowledgement: tail amend accepts update the confirmed stop from the adapter ack, rejected amend acks revert the desired stop back to the last confirmed stop. Telemetry can still show market/reference movement, but =tail_stop= should only move when the platform has accepted or confirmed the new stop.

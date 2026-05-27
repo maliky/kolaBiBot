@@ -193,6 +193,9 @@ def test_public_polling_emits_market_ticks_for_living_tails() -> None:
         best_bid = 102.0
         best_ask = 102.5
         mid_price = 102.25
+        last_price = 102.0
+        mark_price = None
+        index_price = None
         recorded_at = "tick-1"
 
     class Client:
@@ -251,6 +254,74 @@ def test_public_polling_emits_market_ticks_for_living_tails() -> None:
     assert runtime.events[0].reply["reference_price"] == 102.0
 
 
+def test_public_polling_does_not_deduplicate_changed_tail_reference() -> None:
+    class Market:
+        best_bid = 102.0
+        best_ask = 102.5
+        mid_price = 102.25
+        mark_price = None
+        index_price = None
+        recorded_at = "same-book-row"
+
+        def __init__(self, last_price: float) -> None:
+            self.last_price = last_price
+
+    class Client:
+        def __init__(self) -> None:
+            self.prices = [102.0, 103.0]
+
+        def fetch_market_state(self, symbol=None):
+            return Market(self.prices.pop(0) if self.prices else 103.0)
+
+    class Runtime:
+        symbol = "PI_XBTUSD"
+        running = True
+
+        def __init__(self) -> None:
+            pair = sample_strategy()[0]
+            self.state = replace(
+                plan_strategy_once(
+                    strategy=StrategySpec(name="demo", pairs=(pair,)),
+                    symbol="PI_XBTUSD",
+                ).state,
+                pairs={
+                    "pair-a": PairCycleState(
+                        pair=pair,
+                        head_state=HeadState.LIVING,
+                        tail_state=TailState.LIVING,
+                        tail_trail=initial_tail_trail(
+                            pair,
+                            Decimal("100"),
+                            datetime.now(timezone.utc),
+                        ),
+                    )
+                },
+            )
+            self.events: list[EggMove] = []
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return len(self.events) >= 2
+
+        async def enqueue(self, event: EggMove) -> None:
+            self.events.append(event)
+
+        def pair_state_for_record(
+            self, record: object
+        ) -> tuple[PairCycleState, OrderRole] | None:
+            return None
+
+    runtime = Runtime()
+    source = KrakenPublicTriggerSource(Client(), poll_seconds=0.0)
+
+    asyncio.run(source.pump(runtime))
+
+    assert [event.reply["reference_price"] for event in runtime.events if event.reply] == [
+        102.0,
+        103.0,
+    ]
+
+
 def test_market_tick_reaches_horus_as_tail_amend_command() -> None:
     pair = sample_strategy()[0]
     confirmed_at = datetime.now(timezone.utc)
@@ -297,6 +368,9 @@ def test_tail_telemetry_rows_include_distance_and_last_update() -> None:
         best_bid = 102.0
         best_ask = 102.5
         mid_price = 102.25
+        last_price = 102.0
+        mark_price = None
+        index_price = None
         recorded_at = "tick-1"
 
     class Reader:

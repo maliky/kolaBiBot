@@ -605,6 +605,22 @@ class KrakenFuturesAdapter(ExchangeABC):
         ]
         response = self._request("POST", "/editorder", params=payload, auth=True)
         order_payload = _extract_order_like(response)
+        if params.get("price") is not None and not any(
+            key in order_payload for key in ("limit_price", "limitPrice", "price")
+        ):
+            order_payload["limit_price"] = params.get("price")
+        if params.get("stopPx") is not None and not any(
+            key in order_payload for key in ("stop_price", "stopPrice")
+        ):
+            order_payload["stop_price"] = params.get("stopPx")
+        if params.get("orderQty") is not None and not any(
+            key in order_payload for key in ("qty", "size", "quantity", "orderQty")
+        ):
+            order_payload["qty"] = params.get("orderQty")
+        if params.get("clOrdID") is not None and not any(
+            key in order_payload for key in ("cli_ord_id", "cliOrdId")
+        ):
+            order_payload["cli_ord_id"] = params.get("clOrdID")
         return self._legacy_ack_from_order(order_payload, exec_type="Replaced")
 
     def cancel(self, order: str | Sequence[str]) -> Dict[str, Any] | list[Dict[str, Any]]:
@@ -773,7 +789,13 @@ class KrakenFuturesAdapter(ExchangeABC):
         return _ack_from_legacy(response)
 
     def amend_order(self, order_id: str, **params: float) -> OrderAck:
-        response = self.amend({"orderID": order_id}, **params)
+        tick_size = self._cached_tick_size()
+        rounded_params: Dict[str, Any] = dict(params)
+        if "price" in rounded_params:
+            rounded_params["price"] = _round_price_to_tick(rounded_params.get("price"), tick_size)
+        if "stopPx" in rounded_params:
+            rounded_params["stopPx"] = _round_price_to_tick(rounded_params.get("stopPx"), tick_size)
+        response = self.amend({"orderID": order_id}, **rounded_params)
         return _ack_from_legacy(response)
 
     def cancel_order(self, order_id: str) -> OrderAck:

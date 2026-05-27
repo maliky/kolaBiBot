@@ -23,6 +23,7 @@ from typing import Protocol, cast
 from kolabi.bot.chronos import Chronos, ChronosNotice
 from kolabi.bot.domain import (
     EggMove,
+    EggMoveKind,
     HeadState,
     OrderRole,
     OrderIdentity,
@@ -49,6 +50,7 @@ from kolabi.bot.pricing import reference_price, tail_reference_price
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     DragonSong,
+    AmendTailCommand,
     OrderDict,
     OrderQty,
     PlaceOrderCommandRequest,
@@ -230,7 +232,13 @@ class KrakenPublicTriggerSource:
                     event_prefix = "public-market"
                 if move is None:
                     continue
-                event_id = f"{event_prefix}:{pair_name}:{market.recorded_at or snapshot.occurred_at.isoformat()}"
+                reference_key = ""
+                if event_prefix == "public-market" and move.reply is not None:
+                    reference_key = f":{move.reply.get('reference_source', '')}:{move.reply.get('reference_price', '')}"
+                event_id = (
+                    f"{event_prefix}:{pair_name}:"
+                    f"{market.recorded_at or snapshot.occurred_at.isoformat()}{reference_key}"
+                )
                 if event_id in self._seen_event_ids:
                     continue
                 self._seen_event_ids.add(event_id)
@@ -622,6 +630,41 @@ class StrategyRuntime:
                 occurred_at=datetime.now(timezone.utc),
             )
             return (submitted_tail,)
+        if isinstance(command, AmendTailCommand):
+            now = datetime.now(timezone.utc)
+            status = str(ack.status or "")
+            kind = (
+                EggMoveKind.TAIL_AMEND_REJECTED
+                if status.replace(" ", "").replace("_", "").replace("-", "").lower()
+                in {"rejected", "reject", "failed", "invalidprice"}
+                else EggMoveKind.TAIL_AMENDED
+            )
+            reply: dict[str, object] = {
+                "orderID": str(ack.order_id),
+                "ordStatus": status,
+            }
+            if command.request.clOrdID is not None:
+                reply["clOrdID"] = command.request.clOrdID
+            confirmed_price = ack.price if ack.price is not None else command.request.newPrice
+            if confirmed_price is not None:
+                reply["stopPx"] = float(to_decimal(confirmed_price))
+            if ack.orig_qty is not None:
+                reply["orderQty"] = float(to_decimal(ack.orig_qty))
+            if ack.executed_qty is not None:
+                reply["cumQty"] = float(to_decimal(ack.executed_qty))
+            if ack.side is not None:
+                reply["side"] = ack.side
+            return (
+                EggMove(
+                    kind=kind,
+                    occurred_at=now,
+                    symbol=self.symbol,
+                    pair_name=command.pair_name,
+                    role=OrderRole.TAIL,
+                    reply=reply,
+                    is_private=False,
+                ),
+            )
         if not isinstance(command, PlaceHeadCommand):
             return ()
         submitted = head_submitted_from_ack(

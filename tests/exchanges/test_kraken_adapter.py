@@ -772,6 +772,81 @@ def test_amend_maps_to_editorder(tmp_path):
     assert sent_payload["size"] == 3
 
 
+def test_amend_rounds_tail_stop_to_contract_tick(tmp_path):
+    public_db_url = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+    session = DummySession(
+        [
+            {
+                "result": "success",
+                "editStatus": {
+                    "order_id": "OID-1",
+                    "cli_ord_id": "CID-1",
+                    "qty": 3,
+                    "filled": 0,
+                    "direction": 1,
+                    "status": "edited",
+                },
+            }
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        public_db_url=public_db_url,
+        session=cast(Any, session),
+    )
+    with Session(adapter._public_engine) as db_session:
+        db_session.add(
+            ExchangeInstrument(
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                symbol="PI_XBTUSD",
+                tick_size=0.5,
+            )
+        )
+        db_session.commit()
+
+    ack = adapter.amend_order("OID-1", stopPx=74757.668749999999, orderQty=3)
+
+    sent_payload = dict(session.calls[0]["data"])
+    assert sent_payload["stopPrice"] == 74757.5
+    assert ack.status == "New"
+    assert ack.price == 74757.5
+
+
+def test_amend_invalid_price_maps_to_rejected_ack(tmp_path):
+    session = DummySession(
+        [
+            {
+                "result": "success",
+                "editStatus": {
+                    "order_id": "OID-1",
+                    "status": "invalidPrice",
+                    "reason": "INVALID_PRICE",
+                },
+            }
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    ack = adapter.amend_order("OID-1", stopPx=74757.668749999999, orderQty=3)
+
+    assert ack.status == "Rejected"
+
+
 def test_cancel_sparse_response_maps_to_canceled_status(tmp_path):
     session = DummySession([{"result": "success", "cancelStatus": {"order_id": "OID-1"}}])
     adapter = KrakenFuturesAdapter(

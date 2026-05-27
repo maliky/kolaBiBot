@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import cast
 
 from kolabi.bot.domain import OrderPairSpec, PairCycleState, Side, opposite_side
+from kolabi.bot.pricing import tail_trigger_source
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
     AmendOrderCommandRequest,
@@ -51,12 +52,12 @@ def _tail_exec_inst(raw: str) -> str | None:
     flags: list[str] = []
     if cleaned.endswith("-"):
         flags.append("ReduceOnly")
-    base = cleaned[:-1] if cleaned.endswith("-") else cleaned
-    if base.endswith("f"):
+    source = tail_trigger_source(cleaned)
+    if source == "mark":
         flags.append("MarkPrice")
-    elif base.endswith("i"):
+    elif source == "index":
         flags.append("IndexPrice")
-    elif cleaned.endswith("-"):
+    elif source == "last":
         flags.append("LastPrice")
     return ",".join(flags) if flags else None
 

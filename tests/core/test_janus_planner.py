@@ -165,6 +165,7 @@ def test_place_tail_translates_to_one_tail_place_command() -> None:
         ordType="Stop",
         orderQty=Decimal("2"),
         stopPx=Decimal("99.0"),
+        execInst="LastPrice",
         oDelta=Decimal("0.5"),
     )
 
@@ -190,6 +191,28 @@ def test_place_tail_translates_legacy_reduce_only_trigger_suffixes() -> None:
     assert command.legacy_order is not None
     assert command.legacy_order["ordType"] == "S"
     assert command.legacy_order["execInst"] == "ReduceOnly,LastPrice"
+
+
+def test_place_tail_translates_standard_stop_to_last_price_trigger() -> None:
+    state = sample_state()
+    state = PairCycleState(
+        pair=sample_pair("pair-a", tail_order_type="S"),
+        head_state=state.head_state,
+        tail_state=state.tail_state,
+        played_quantity=state.played_quantity,
+    )
+
+    command = plan_runtime_commands(
+        state,
+        (PairIntent(PairIntentKind.PLACE_TAIL),),
+        symbol=Symbol("PI_XBTUSD"),
+    )[0]
+
+    assert isinstance(command, PlaceTailCommand)
+    assert command.request.ordType == "S"
+    assert command.request.execInst == "LastPrice"
+    assert command.legacy_order is not None
+    assert command.legacy_order["execInst"] == "LastPrice"
 
 
 def test_place_tail_translates_legacy_fair_price_trigger_suffix() -> None:

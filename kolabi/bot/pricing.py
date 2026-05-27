@@ -72,12 +72,13 @@ def reference_price(side: Side, market: MarketLike) -> float:
 
 def tail_trigger_source(order_type: str) -> str:
     """Resolve abstract trigger source from legacy tail order suffixes."""
-    normalized = (order_type or "").strip()
-    if normalized.endswith("f") or normalized.endswith("f-"):
+    normalized = (order_type or "").strip().lower()
+    reducible = normalized[:-1] if normalized.endswith("-") else normalized
+    if reducible.endswith("f"):
         return "mark"
-    if normalized.endswith("i") or normalized.endswith("i-"):
+    if reducible.endswith("i"):
         return "index"
-    if normalized.endswith("-"):
+    if reducible:
         return "last"
     return "book"
 
