@@ -40,6 +40,9 @@ class PublicMarketState:
     best_bid: float | None
     best_ask: float | None
     mid_price: float | None
+    last_price: float | None
+    mark_price: float | None
+    index_price: float | None
     spread: float | None
     imbalance: float | None
     avg_bid: float | None
@@ -155,6 +158,9 @@ class KrakenRuntimeStateClient:
                     best_bid=None,
                     best_ask=None,
                     mid_price=None,
+                    last_price=None,
+                    mark_price=None,
+                    index_price=None,
                     spread=None,
                     imbalance=None,
                     avg_bid=None,
@@ -189,6 +195,9 @@ class KrakenRuntimeStateClient:
                 best_bid=public_book.best_bid,
                 best_ask=public_book.best_ask,
                 mid_price=public_book.mid_price,
+                last_price=_indicator_value(indicators, "last_price"),
+                mark_price=_indicator_value(indicators, "mark_price"),
+                index_price=_indicator_value(indicators, "index_price"),
                 spread=public_book.spread,
                 imbalance=public_book.imbalance,
                 avg_bid=public_book.avg_bid,
@@ -285,6 +294,52 @@ class KrakenRuntimeStateClient:
                 ):
                     continue
             records.append(_private_order_record(row))
+        return tuple(records)
+
+    def fetch_private_fills_since(
+        self,
+        *,
+        after_local_timestamp: datetime | None = None,
+        after_local_id: int | None = None,
+        symbol: str | None = None,
+        limit: int = 200,
+    ) -> tuple[PrivateOrderRecord, ...]:
+        """Return fill-derived private order records newer than the supplied cursor."""
+        target_symbol = symbol or self.symbol
+        with self._account_sessionmaker() as session:
+            statement = (
+                select(ExchangeFill, ExchangeOrder)
+                .join(ExchangeOrder, ExchangeFill.order_id == ExchangeOrder.id)
+                .where(
+                    ExchangeOrder.exchange == self.exchange,
+                    ExchangeOrder.environment == self.environment,
+                    ExchangeOrder.market_type == self.market_type,
+                    ExchangeOrder.symbol == target_symbol,
+                )
+                .order_by(ExchangeFill.local_timestamp.asc(), ExchangeFill.id.asc())
+                .limit(limit)
+            )
+            rows = session.execute(statement).all()
+        records: list[PrivateOrderRecord] = []
+        for fill_row, order_row in rows:
+            if after_local_timestamp is not None:
+                row_timestamp = _normalise_cursor_timestamp(
+                    fill_row.local_timestamp,
+                    after_local_timestamp,
+                )
+                cursor_timestamp = _normalise_cursor_timestamp(
+                    after_local_timestamp,
+                    fill_row.local_timestamp,
+                )
+                if row_timestamp < cursor_timestamp:
+                    continue
+                if (
+                    row_timestamp == cursor_timestamp
+                    and after_local_id is not None
+                    and fill_row.id <= after_local_id
+                ):
+                    continue
+            records.append(_private_order_record_from_fill(fill_row, order_row))
         return tuple(records)
 
     def wait_until_ready(
@@ -507,6 +562,16 @@ def _public_indicator_records(
     return tuple(records)
 
 
+def _indicator_value(indicators: dict[str, Any], name: str) -> float | None:
+    indicator = indicators.get(name)
+    if indicator is None:
+        return None
+    value = getattr(indicator, "value", None)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
 def _normalise_cursor_timestamp(value: datetime, peer: datetime) -> datetime:
     """Compare SQLite naive timestamps with aware runtime cursors safely."""
     if value.tzinfo is None or peer.tzinfo is None:
@@ -516,6 +581,7 @@ def _normalise_cursor_timestamp(value: datetime, peer: datetime) -> datetime:
 
 def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
     reason, is_cancel = _order_reason_flags_from_payload(row.raw_payload)
+    stop_price = _stop_price_from_payload(row.raw_payload)
     return PrivateOrderRecord(
         symbol=row.symbol,
         status=row.status,
@@ -526,6 +592,7 @@ def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
         side=row.side,
         order_type=row.order_type,
         price=row.price,
+        stop_price=stop_price if stop_price is not None else _stop_price_from_order_row(row),
         quantity=row.quantity,
         filled_quantity=row.filled_quantity,
         source_timestamp=(
@@ -548,8 +615,65 @@ def _order_reason_flags_from_payload(
     return reason, is_cancel
 
 
+def _stop_price_from_payload(payload: object) -> float | None:
+    """Extract a platform stop/trigger price from raw private payloads."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ("stop_price", "stopPrice", "stopPx", "triggerPrice"):
+        value = payload.get(key)
+        if isinstance(value, (int, float, str)):
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    trigger = payload.get("orderTrigger")
+    if isinstance(trigger, dict):
+        return _stop_price_from_payload(trigger)
+    return None
+
+
+def _stop_price_from_order_row(row: ExchangeOrder) -> float | None:
+    order_type = (row.order_type or "").lower()
+    if "stop" not in order_type:
+        return None
+    return row.price
+
+
 def _private_fill_record(symbol: str) -> PrivateFillRecord:
     return PrivateFillRecord(symbol=symbol)
+
+
+def _private_order_record_from_fill(
+    fill_row: ExchangeFill,
+    order_row: ExchangeOrder,
+) -> PrivateOrderRecord:
+    reason, is_cancel = _order_reason_flags_from_payload(fill_row.raw_payload)
+    # Fill rows are authoritative evidence of execution. Do not inherit a stale
+    # open/new order status here, otherwise head->tail progression can lag.
+    effective_status = "filled"
+    effective_reason = reason or "full_fill"
+    stop_price = _stop_price_from_payload(order_row.raw_payload)
+    return PrivateOrderRecord(
+        symbol=order_row.symbol,
+        status=effective_status,
+        exchange_order_id=order_row.exchange_order_id,
+        client_order_id=order_row.client_order_id,
+        reason=effective_reason,
+        is_cancel=is_cancel,
+        side=order_row.side,
+        order_type=order_row.order_type,
+        price=fill_row.price,
+        stop_price=stop_price if stop_price is not None else _stop_price_from_order_row(order_row),
+        quantity=order_row.quantity,
+        filled_quantity=max(order_row.filled_quantity, fill_row.quantity),
+        source_timestamp=(
+            fill_row.source_timestamp.isoformat()
+            if fill_row.source_timestamp is not None
+            else None
+        ),
+        local_timestamp=fill_row.local_timestamp.isoformat(),
+        local_id=fill_row.id,
+    )
 
 
 def _private_position_record(row: AccountPosition) -> PrivatePositionRecord:

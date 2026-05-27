@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 from uuid import uuid4
 
+import requests
 import websockets
 from sqlalchemy import (
     DateTime,
@@ -54,6 +55,7 @@ class KrakenConfig:
     ws_url: str = "wss://demo-futures.kraken.com/ws/v1"
     db_url: str = "sqlite:///pub-futures-demo.sqlite"
     private_db_url: str = "sqlite:///prv-futures-demo.sqlite"
+    rest_url: str = "https://demo-futures.kraken.com/derivatives/api/v3"
     exchange: str = "kraken"
     environment: str = "demo"
     market_type: str = "futures"
@@ -68,6 +70,7 @@ class KrakenConfig:
     trace_ws: bool = False
     trace_ws_format: str = "compact"
     trace_ws_max_lines: int = 0
+    ticker_interval_seconds: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -102,6 +105,13 @@ class FlushResult:
 
     snapshot: MarketSnapshot | None
     indicators_written: int
+
+
+@dataclass(frozen=True)
+class TickerPrices:
+    last_price: float | None
+    mark_price: float | None
+    index_price: float | None
 
 
 @dataclass(frozen=True)
@@ -158,6 +168,10 @@ class KrakenTree:
         self._trace_count = 0
         self._last_trace_cap_logged = False
         self._last_status_log_line: str | None = None
+        self._stop_event = asyncio.Event()
+        self._rest_session = requests.Session()
+        self._last_ticker_fetch_at: datetime | None = None
+        self._latest_ticker_prices: TickerPrices | None = None
 
     async def run(self) -> None:
         """Tourne en continu et relance la session websocket apres erreur."""
@@ -172,7 +186,7 @@ class KrakenTree:
                     self.config.reconnect_seconds,
                     exc,
                 )
-                await asyncio.sleep(self.config.reconnect_seconds)
+                await self._wait_or_stop(float(self.config.reconnect_seconds))
 
     async def run_once(self) -> None:
         """Ouvre une session websocket et laisse le scheduler cadencer la DB."""
@@ -197,6 +211,14 @@ class KrakenTree:
     def stop(self) -> None:
         """Demande l'arret apres la reception websocket courante."""
         self._running = False
+        self._stop_event.set()
+
+    async def _wait_or_stop(self, seconds: float) -> None:
+        """Wait for delay unless stop is requested earlier."""
+        if seconds <= 0:
+            return
+        with suppress(TimeoutError):
+            await asyncio.wait_for(self._stop_event.wait(), timeout=seconds)
 
     def handle_message(self, raw_message: str | bytes) -> PendingBook | None:
         """Parse un message Kraken Futures et met le dernier carnet en memoire."""
@@ -401,18 +423,63 @@ class KrakenTree:
         """Persiste les indicateurs compacts normalises."""
         source_anchor = pending.source_timestamp or pending.received_at
         source_age = max((now - source_anchor).total_seconds(), 0.0)
+        ticker_prices = self._ticker_prices_due(now)
         indicators = build_indicator_rows(
             config=self.config,
             pending=pending,
             snapshot_id=self._latest_snapshot_id,
             source_age_seconds=source_age,
             computed_at=now,
+            ticker_prices=ticker_prices,
         )
         with self.sessionmaker() as session:
             session.add_all(indicators)
             prune_old_indicators(session, self.config.retention_minutes, now)
             session.commit()
         return len(indicators)
+
+    def _ticker_prices_due(self, now: datetime) -> TickerPrices | None:
+        if self._latest_ticker_prices is not None and not is_due(
+            self._last_ticker_fetch_at, now, self.config.ticker_interval_seconds
+        ):
+            return self._latest_ticker_prices
+        try:
+            ticker = self._fetch_ticker_prices()
+        except Exception as exc:
+            self.logger.debug("kraken_tree ticker fetch failed: %s", exc)
+            return self._latest_ticker_prices
+        self._latest_ticker_prices = ticker
+        self._last_ticker_fetch_at = now
+        return ticker
+
+    def _fetch_ticker_prices(self) -> TickerPrices:
+        response = self._rest_session.get(
+            f"{self.config.rest_url.rstrip('/')}/tickers/{self.config.pair}",
+            timeout=5.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        ticker = (
+            payload.get("ticker")
+            if isinstance(payload, dict)
+            else None
+        )
+        ticker_map = ticker if isinstance(ticker, dict) else (
+            ticker[0] if isinstance(ticker, list) and ticker and isinstance(ticker[0], dict) else payload
+        )
+        if not isinstance(ticker_map, dict):
+            ticker_map = {}
+        return TickerPrices(
+            last_price=optional_float(
+                first_present(ticker_map, "last", "lastPrice")
+            ),
+            mark_price=optional_float(
+                first_present(ticker_map, "markPrice", "mark_price")
+            ),
+            index_price=optional_float(
+                first_present(ticker_map, "indexPrice", "index_price", "indicativeSettlePrice")
+            ),
+        )
 
     def log_due(self, now: datetime, snapshot: MarketSnapshot | None) -> None:
         """Imprime un statut compact lisible dans screen ou un log."""
@@ -785,12 +852,16 @@ def optional_float(value: object) -> float | None:
     """Convertit defensivement une valeur optionnelle en float."""
     if value in (None, ""):
         return None
+    if not isinstance(value, (int, float, str)):
+        return None
     return float(value)
 
 
 def parse_optional_int(value: object) -> int | None:
     """Parse un entier optionnel depuis le payload websocket."""
     if value in (None, ""):
+        return None
+    if not isinstance(value, (int, float, str)):
         return None
     return int(value)
 
@@ -921,6 +992,7 @@ def build_indicator_rows(
     snapshot_id: int | None,
     source_age_seconds: float,
     computed_at: datetime,
+    ticker_prices: TickerPrices | None = None,
 ) -> list[MarketIndicator]:
     """Construit les indicateurs compactes, incluant une MGF simple."""
     metrics = pending.metrics
@@ -933,6 +1005,13 @@ def build_indicator_rows(
         "imbalance": metrics.imbalance,
         "price_mgf_t0_0001": normal_mgf(0.0001, metrics.mid_price, variance),
     }
+    if ticker_prices is not None:
+        if ticker_prices.last_price is not None:
+            values["last_price"] = ticker_prices.last_price
+        if ticker_prices.mark_price is not None:
+            values["mark_price"] = ticker_prices.mark_price
+        if ticker_prices.index_price is not None:
+            values["index_price"] = ticker_prices.index_price
     return [
         MarketIndicator(
             snapshot_id=snapshot_id,
@@ -1229,6 +1308,7 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("--depth", type=int, default=KrakenConfig.depth, help="Orderbook depth to keep.")
         command_parser.add_argument("--environment", choices=("demo", "live"), default=KrakenConfig.environment, help="Endpoint family.")
         command_parser.add_argument("--ws-url", help="Override public websocket URL.")
+        command_parser.add_argument("--rest-url", help="Override public REST URL for ticker polling.")
         command_parser.add_argument("--db-url", help="Override public SQLite DB URL.")
         command_parser.add_argument("--private-db-url", help="Override private SQLite DB URL used for correlation.")
         command_parser.add_argument("--exchange", default=KrakenConfig.exchange, help="Exchange label stored with rows.")
@@ -1245,6 +1325,12 @@ def build_parser() -> argparse.ArgumentParser:
             type=float,
             default=KrakenConfig.indicator_interval_seconds,
             help="Indicator update cadence.",
+        )
+        command_parser.add_argument(
+            "--ticker-interval-seconds",
+            type=float,
+            default=KrakenConfig.ticker_interval_seconds,
+            help="Ticker REST polling cadence used for last/mark/index prices.",
         )
         command_parser.add_argument(
             "--log-interval-seconds",
@@ -1289,6 +1375,7 @@ def config_from_args(args: argparse.Namespace) -> KrakenConfig:
         pair=args.pair,
         depth=args.depth,
         ws_url=args.ws_url or env_cfg.public_ws_url,
+        rest_url=args.rest_url or env_cfg.rest_url,
         db_url=args.db_url or env_cfg.public_db_url,
         private_db_url=args.private_db_url or env_cfg.private_db_url,
         exchange=args.exchange,
@@ -1297,6 +1384,7 @@ def config_from_args(args: argparse.Namespace) -> KrakenConfig:
         log_level=args.log_level,
         snapshot_interval_seconds=args.snapshot_interval_seconds,
         indicator_interval_seconds=args.indicator_interval_seconds,
+        ticker_interval_seconds=args.ticker_interval_seconds,
         log_interval_seconds=args.log_interval_seconds,
         retention_minutes=args.retention_minutes,
         reconnect_seconds=args.reconnect_seconds,
@@ -1314,9 +1402,16 @@ def print_status(tree: KrakenTree, pair: str) -> None:
 async def run_service(tree: KrakenTree, stop_after_seconds: float | None = None) -> None:
     """Lance le service avec gestion simple de SIGINT/SIGTERM."""
     loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+
+    def _request_stop() -> None:
+        tree.stop()
+        if task is not None:
+            task.cancel()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, tree.stop)
+            loop.add_signal_handler(sig, _request_stop)
         except NotImplementedError:
             pass
 
@@ -1325,6 +1420,9 @@ async def run_service(tree: KrakenTree, stop_after_seconds: float | None = None)
         stopper = asyncio.create_task(stop_tree_after(tree, stop_after_seconds))
     try:
         await tree.run()
+    except asyncio.CancelledError:
+        if tree._running:
+            raise
     finally:
         if stopper is not None:
             stopper.cancel()
