@@ -205,3 +205,35 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
     assert service.calls[1][1] is False
     assert service.calls[0][2] is False
     assert service.calls[1][2] is False
+
+
+def test_run_once_returns_130_on_keyboard_interrupt(monkeypatch, capsys) -> None:
+    class InterruptingService:
+        def run_strategy(self, strategy: StrategySpec, *, dry_run: bool, simulate: bool):
+            del strategy, dry_run, simulate
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("kolabi.bot.__main__.build_service", lambda _args: InterruptingService())
+    args = argparse.Namespace(
+        name="XSellTail",
+        tps_run=[0.0, 1440.0],
+        nbEssais=1,
+        drPause=None,
+        tOut=60,
+        side="sell",
+        prix=[1.0, 2.0],
+        quantity=1,
+        tailPrice=0.5,
+        aType="qAt%pD",
+        oType="L",
+        oDelta=None,
+        tDelta=None,
+        tType="S-",
+        Hook="",
+        dry_run=False,
+        sync=True,
+        simulate=False,
+    )
+    exit_code = run_once_command(args)
+    assert exit_code == 130
+    assert "Interrupted by operator." in capsys.readouterr().out

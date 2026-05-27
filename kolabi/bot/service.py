@@ -34,10 +34,13 @@ from kolabi.shared.core.runtime_types import (
     AmendOrderCommandRequest,
     AmendTailCommand,
     CancelCommand,
+    CancelOrderCommandRequest,
     ExchangePort,
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
     PlaceTailCommand,
+    RuntimeCommandKind,
+    Symbol,
 )
 from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.kraken_futures import kraken_futures_environment
@@ -64,10 +67,18 @@ class ExchangeAdapterLike(Protocol):
     ) -> OrderAck: ...
     def amend_order(self, order_id: str, **params: object) -> OrderAck: ...
     def cancel_order(self, order_id: str) -> OrderAck: ...
+    def get_position(self) -> Any: ...
 
 
 class TriggerOrderReader(Protocol):
     def live_trigger_orders(self) -> list[dict[str, Any]]: ...
+    def live_trigger_orders_db(self) -> list[dict[str, Any]]: ...
+
+
+class OpenOrderReader(Protocol):
+    def live_open_orders(self) -> list[dict[str, Any]]: ...
+    def live_trigger_orders(self) -> list[dict[str, Any]]: ...
+    def open_orders(self) -> list[dict[str, Any]]: ...
     def live_trigger_orders_db(self) -> list[dict[str, Any]]: ...
 
 
@@ -252,7 +263,13 @@ class BotService:
         )
         if dry_run:
             return plan_strategy_once(strategy=strategy, symbol=self.config.symbol)
-        return asyncio.run(runtime.run())
+        try:
+            return asyncio.run(runtime.run())
+        except KeyboardInterrupt:
+            if not simulate:
+                cancelled = self.cancel_living_tails(runtime)
+                self.logger.info("interrupt tail_cancelled=%d", len(cancelled))
+            raise
 
     def run_orders(self, pairs: Iterable[OrderPairSpec], *, dry_run: bool = False, simulate: bool = False) -> StrategyRunResult:
         """Compatibilite: accepte directement une liste de paires canoniques."""
@@ -349,6 +366,105 @@ class BotService:
             self.exchange_config.adapter_kwargs.setdefault("public_db_url", self._market_db_url)
         if self._account_db_url is not None:
             self.exchange_config.adapter_kwargs.setdefault("account_db_url", self._account_db_url)
+
+    def _build_admin_port(self) -> AdapterExchangePort:
+        self._ensure_exchange_config()
+        if self.exchange_config is None:
+            raise RuntimeError("Exchange configuration is required for admin execution")
+        return AdapterExchangePort(
+            exchange=self.config.exchange.lower(),
+            exchange_config=self.exchange_config,
+            verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
+            verify_poll_seconds=self.config.tail_verify_poll_seconds,
+        )
+
+    def cancel_all_orders(self) -> list[OrderAck]:
+        """Cancel all currently visible open/trigger orders via bot execution path."""
+        port = self._build_admin_port()
+        executor = OgunExecutor(port)
+        cancelled: list[OrderAck] = []
+        seen: set[str] = set()
+        for order in _safe_cancel_order_candidates(port.adapter):
+            identity = _extract_cancelable_order_id(order)
+            if identity is None:
+                continue
+            key = str(identity)
+            if key in seen:
+                continue
+            seen.add(key)
+            command = CancelCommand(
+                kind=RuntimeCommandKind.CANCEL,
+                symbol=Symbol(self.config.symbol),
+                pair_name="__operator__",
+                request=CancelOrderCommandRequest(
+                    pair_name="__operator__",
+                    clOrdID=key,
+                ),
+            )
+            try:
+                cancelled.append(asyncio.run(executor.execute(command)))
+            except Exception:
+                continue
+        return cancelled
+
+    def close_all_orders(self) -> dict[str, object]:
+        """Cancel all orders then close residual position through the bot boundary."""
+        port = self._build_admin_port()
+        cancelled = self.cancel_all_orders()
+        position_before = port.adapter.get_position()
+        qty_before = float(position_before.qty)
+        close_ack: OrderAck | None = None
+        if qty_before != 0.0:
+            close_side = "sell" if qty_before > 0 else "buy"
+            close_ack = port.adapter.place_order(
+                side=close_side,
+                orderQty=abs(qty_before),
+                type_="MARKET",
+                reduceOnly=True,
+            )
+        position_after = port.adapter.get_position()
+        return {
+            "cancelled": cancelled,
+            "close_ack": close_ack,
+            "position_before": position_before,
+            "position_after": position_after,
+            "closed": float(position_after.qty) == 0.0,
+        }
+
+    def cancel_living_tails(self, runtime: StrategyRuntime) -> list[OrderAck]:
+        """Best-effort cancellation of living/submitted tails on operator interrupt."""
+        port = self._build_admin_port()
+        executor = OgunExecutor(port)
+        cancelled: list[OrderAck] = []
+        seen: set[str] = set()
+        for pair_name, pair_state in runtime.chronos.state.pairs.items():
+            if pair_state.tail_state is None:
+                continue
+            if pair_state.tail_state.value not in {"submitted", "living", "hooked"}:
+                continue
+            identity = pair_state.tail_identity
+            if identity is None:
+                continue
+            cancel_id = identity.client_order_id or identity.exchange_order_id
+            if cancel_id is None:
+                continue
+            if cancel_id in seen:
+                continue
+            seen.add(cancel_id)
+            command = CancelCommand(
+                kind=RuntimeCommandKind.CANCEL,
+                symbol=Symbol(self.config.symbol),
+                pair_name=pair_name,
+                request=CancelOrderCommandRequest(
+                    pair_name=pair_name,
+                    clOrdID=cancel_id,
+                ),
+            )
+            try:
+                cancelled.append(asyncio.run(executor.execute(command)))
+            except Exception:
+                continue
+        return cancelled
 
 
 async def _run_private_stack(
@@ -585,4 +701,42 @@ def _decimal_or_none(value: object) -> Decimal | None:
         return value
     if isinstance(value, (int, float, str)):
         return Decimal(str(value))
+    return None
+
+
+def _safe_cancel_order_candidates(adapter: OpenOrderReader) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for source_name in (
+        "live_open_orders",
+        "live_trigger_orders",
+        "open_orders",
+        "live_trigger_orders_db",
+    ):
+        source = getattr(adapter, source_name, None)
+        if not callable(source):
+            continue
+        try:
+            rows = source()
+        except Exception:
+            continue
+        if not isinstance(rows, list):
+            continue
+        candidates.extend([row for row in rows if isinstance(row, dict)])
+    return candidates
+
+
+def _extract_cancelable_order_id(order: dict[str, object]) -> str | None:
+    for key in (
+        "orderID",
+        "orderId",
+        "order_id",
+        "id",
+        "clOrdID",
+        "cliOrdId",
+        "cli_ord_id",
+        "client_order_id",
+    ):
+        value = order.get(key)
+        if value:
+            return str(value)
     return None

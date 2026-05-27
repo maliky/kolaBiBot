@@ -4,7 +4,7 @@ import argparse
 import json
 import time
 from dataclasses import asdict
-from typing import Any, Sequence
+from typing import Any, Sequence, cast
 
 from kolabi.shared.config import load_exchange_config
 from kolabi.shared.core.models import OrderAck, Position
@@ -194,6 +194,21 @@ def build_adapter(exchange: str, symbol: str, environment: str):
         base_url=config.base_url,
         symbol=config.symbol,
         **config.adapter_kwargs,
+    )
+
+
+def build_bot_service(exchange: str, symbol: str, environment: str):
+    """Build BotService for admin actions that must flow through the bot path."""
+    from kolabi.bot.service import BotConfig, BotService
+
+    return BotService(
+        BotConfig(
+            exchange=exchange,
+            symbol=symbol,
+            environment=environment,
+            require_ready=False,
+            log_level="INFO",
+        )
     )
 
 
@@ -483,21 +498,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command == "cancel-all":
+        service = build_bot_service(args.exchange, args.symbol, args.environment)
         print_json(
             {
                 "environment": args.environment,
                 "symbol": args.symbol,
-                "cancelled": _cancel_all_orders(adapter),
+                "cancelled": [ack_to_payload(ack) for ack in service.cancel_all_orders()],
             }
         )
         return 0
     if args.command == "close-all":
+        service = build_bot_service(args.exchange, args.symbol, args.environment)
+        result = service.close_all_orders()
         print_json(
             {
                 "environment": args.environment,
                 "symbol": args.symbol,
-                "cancelled": _cancel_all_orders(adapter),
-                "close_order": _close_position(adapter),
+                "cancelled": [ack_to_payload(ack) for ack in result["cancelled"]],
+                "close_order": (
+                    None
+                    if result["close_ack"] is None
+                    else ack_to_payload(cast(OrderAck, result["close_ack"]))
+                ),
+                "closed": bool(result["closed"]),
+                "position_before": position_to_payload(cast(Position, result["position_before"])),
+                "position_after": position_to_payload(cast(Position, result["position_after"])),
             }
         )
         return 0

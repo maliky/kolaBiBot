@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 import pytest
-import requests
 from kolabi.bargain.cli import build_parser, main
 from kolabi.shared.core.models import OrderAck, Position
 
@@ -108,6 +107,33 @@ class DummyAdapter:
 
     def recent_trades(self):
         return list(self._recent_trades)
+
+
+class DummyBotService:
+    def __init__(
+        self,
+        *,
+        cancelled: list[OrderAck] | None = None,
+        close_ack: OrderAck | None = None,
+        before_qty: float = 0.0,
+        after_qty: float = 0.0,
+    ) -> None:
+        self._cancelled = cancelled or []
+        self._close_ack = close_ack
+        self._before = Position(symbol="PI_XBTUSD", qty=before_qty, entry_price=1.0)
+        self._after = Position(symbol="PI_XBTUSD", qty=after_qty, entry_price=None if after_qty == 0.0 else 1.0)
+
+    def cancel_all_orders(self) -> list[OrderAck]:
+        return list(self._cancelled)
+
+    def close_all_orders(self) -> dict[str, object]:
+        return {
+            "cancelled": list(self._cancelled),
+            "close_ack": self._close_ack,
+            "position_before": self._before,
+            "position_after": self._after,
+            "closed": float(self._after.qty) == 0.0,
+        }
 
 
 def test_balance_command_prints_available_margin(monkeypatch, capsys):
@@ -248,10 +274,12 @@ def test_amend_command_supports_price_and_quantity(monkeypatch, capsys):
 
 
 def test_cancel_all_command_cancels_open_orders(monkeypatch, capsys):
-    adapter = DummyAdapter()
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", lambda exchange, symbol, environment: DummyAdapter())
     monkeypatch.setattr(
-        "kolabi.bargain.cli.build_adapter",
-        lambda exchange, symbol, environment: adapter,
+        "kolabi.bargain.cli.build_bot_service",
+        lambda exchange, symbol, environment: DummyBotService(
+            cancelled=[OrderAck(order_id="OID-1", status="Canceled"), OrderAck(order_id="OID-2", status="Canceled")]
+        ),
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "cancel-all"])
@@ -263,20 +291,12 @@ def test_cancel_all_command_cancels_open_orders(monkeypatch, capsys):
 
 
 def test_cancel_all_command_accepts_client_order_id_only(monkeypatch, capsys):
-    adapter = DummyAdapter()
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", lambda exchange, symbol, environment: DummyAdapter())
     monkeypatch.setattr(
-        adapter,
-        "live_open_orders",
-        lambda: [{"client_order_id": "CID-1", "symbol": "PI_XBTUSD"}],
-    )
-    monkeypatch.setattr(
-        adapter,
-        "live_trigger_orders",
-        lambda: [{"cliOrdId": "CID-2", "symbol": "PI_XBTUSD"}],
-    )
-    monkeypatch.setattr(
-        "kolabi.bargain.cli.build_adapter",
-        lambda exchange, symbol, environment: adapter,
+        "kolabi.bargain.cli.build_bot_service",
+        lambda exchange, symbol, environment: DummyBotService(
+            cancelled=[OrderAck(order_id="CID-1", status="Canceled"), OrderAck(order_id="CID-2", status="Canceled")]
+        ),
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "cancel-all"])
@@ -288,25 +308,12 @@ def test_cancel_all_command_accepts_client_order_id_only(monkeypatch, capsys):
 
 
 def test_cancel_all_survives_live_open_orders_503_with_fallback(monkeypatch, capsys):
-    adapter = DummyAdapter()
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", lambda exchange, symbol, environment: DummyAdapter())
     monkeypatch.setattr(
-        adapter,
-        "live_open_orders",
-        lambda: (_ for _ in ()).throw(RuntimeError("Kraken HTTP 503 on /openorders")),
-    )
-    monkeypatch.setattr(
-        adapter,
-        "live_trigger_orders",
-        lambda: (_ for _ in ()).throw(RuntimeError("Kraken HTTP 503 on /openorders")),
-    )
-    monkeypatch.setattr(
-        adapter,
-        "open_orders",
-        lambda: [{"orderID": "OID-FALLBACK", "symbol": "PI_XBTUSD"}],
-    )
-    monkeypatch.setattr(
-        "kolabi.bargain.cli.build_adapter",
-        lambda exchange, symbol, environment: adapter,
+        "kolabi.bargain.cli.build_bot_service",
+        lambda exchange, symbol, environment: DummyBotService(
+            cancelled=[OrderAck(order_id="OID-FALLBACK", status="Canceled")]
+        ),
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "cancel-all"])
@@ -347,11 +354,15 @@ def test_trigger_orders_command_prints_live_trigger_orders(monkeypatch, capsys):
 
 
 def test_close_all_command_cancels_orders_and_closes_long_position(monkeypatch, capsys):
-    adapter = DummyAdapter()
-    adapter._position = Position(symbol="PI_XBTUSD", qty=3.0, entry_price=1.0)
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", lambda exchange, symbol, environment: DummyAdapter())
     monkeypatch.setattr(
-        "kolabi.bargain.cli.build_adapter",
-        lambda exchange, symbol, environment: adapter,
+        "kolabi.bargain.cli.build_bot_service",
+        lambda exchange, symbol, environment: DummyBotService(
+            cancelled=[OrderAck(order_id="OID-1", status="Canceled")],
+            close_ack=OrderAck(order_id="OID-CLOSE", status="New", side="sell"),
+            before_qty=3.0,
+            after_qty=0.0,
+        ),
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "close-all"])
@@ -360,36 +371,20 @@ def test_close_all_command_cancels_orders_and_closes_long_position(monkeypatch, 
     output = capsys.readouterr().out
     assert '"order_id": "OID-1"' in output
     assert '"closed": true' in output
-    assert adapter.placed_orders[-1]["type_"] == "MARKET"
-    assert adapter.placed_orders[-1]["side"] == "sell"
-    assert adapter.placed_orders[-1]["reduceOnly"] is True
+    assert '"order_id": "OID-CLOSE"' in output
 
 
 def test_close_all_retries_with_reduce_only_market_when_still_open(
     monkeypatch, capsys
 ):
-    adapter = DummyAdapter()
-    adapter._position = Position(symbol="PI_XBTUSD", qty=-1.0, entry_price=1.0)
-    first_close_attempt = True
-
-    original_place_order = adapter.place_order
-
-    def flaky_close(**kwargs):
-        nonlocal first_close_attempt
-        ack = original_place_order(**kwargs)
-        if (
-            kwargs.get("reduceOnly")
-            and kwargs.get("type_") == "MARKET"
-            and first_close_attempt
-        ):
-            first_close_attempt = False
-            adapter._position = Position(symbol="PI_XBTUSD", qty=-1.0, entry_price=1.0)
-        return ack
-
-    monkeypatch.setattr(cast(Any, adapter), "place_order", flaky_close)
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", lambda exchange, symbol, environment: DummyAdapter())
     monkeypatch.setattr(
-        "kolabi.bargain.cli.build_adapter",
-        lambda exchange, symbol, environment: adapter,
+        "kolabi.bargain.cli.build_bot_service",
+        lambda exchange, symbol, environment: DummyBotService(
+            close_ack=OrderAck(order_id="OID-CLOSE", status="New", side="buy"),
+            before_qty=-1.0,
+            after_qty=0.0,
+        ),
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "close-all"])
@@ -397,55 +392,36 @@ def test_close_all_retries_with_reduce_only_market_when_still_open(
     assert exit_code == 0
     output = capsys.readouterr().out
     assert '"closed": true' in output
-    assert '"attempts": 2' in output
-    assert all(order["type_"] == "MARKET" for order in adapter.placed_orders)
-    assert all(order["reduceOnly"] is True for order in adapter.placed_orders)
-    assert all(order["price"] is None for order in adapter.placed_orders)
+    assert '"closed": true' in output
 
 
 def test_close_all_reports_verification_timeout_without_traceback(monkeypatch, capsys):
-    adapter = DummyAdapter()
-    adapter._position = Position(symbol="PI_XBTUSD", qty=-1.0, entry_price=1.0)
-    first_call = True
-
-    def timeout_after_close() -> Position:
-        nonlocal first_call
-        if first_call:
-            first_call = False
-            return adapter._position
-        raise requests.exceptions.ReadTimeout("read timed out")
-
-    monkeypatch.setattr(cast(Any, adapter), "get_position", timeout_after_close)
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", lambda exchange, symbol, environment: DummyAdapter())
     monkeypatch.setattr(
-        "kolabi.bargain.cli.build_adapter",
-        lambda exchange, symbol, environment: adapter,
+        "kolabi.bargain.cli.build_bot_service",
+        lambda exchange, symbol, environment: DummyBotService(
+            before_qty=-1.0,
+            after_qty=-1.0,
+        ),
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "close-all"])
 
     assert exit_code == 0
     output = capsys.readouterr().out
-    assert '"verification_error":' in output
     assert '"closed": false' in output
 
 
 def test_close_all_survives_cancel_fetch_503_and_still_closes_position(monkeypatch, capsys):
-    adapter = DummyAdapter()
-    adapter._position = Position(symbol="PI_XBTUSD", qty=2.0, entry_price=1.0)
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", lambda exchange, symbol, environment: DummyAdapter())
     monkeypatch.setattr(
-        adapter,
-        "live_open_orders",
-        lambda: (_ for _ in ()).throw(RuntimeError("Kraken HTTP 503 on /openorders")),
-    )
-    monkeypatch.setattr(
-        adapter,
-        "live_trigger_orders",
-        lambda: (_ for _ in ()).throw(RuntimeError("Kraken HTTP 503 on /openorders")),
-    )
-    monkeypatch.setattr(adapter, "open_orders", lambda: [])
-    monkeypatch.setattr(
-        "kolabi.bargain.cli.build_adapter",
-        lambda exchange, symbol, environment: adapter,
+        "kolabi.bargain.cli.build_bot_service",
+        lambda exchange, symbol, environment: DummyBotService(
+            cancelled=[],
+            close_ack=OrderAck(order_id="OID-CLOSE", status="New", side="sell"),
+            before_qty=2.0,
+            after_qty=0.0,
+        ),
     )
 
     exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "close-all"])

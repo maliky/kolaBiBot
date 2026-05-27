@@ -363,7 +363,11 @@ def run_command(args: argparse.Namespace) -> int:
         return 1
 
     service = build_service(args)
-    result = service.run_strategy(strategy, dry_run=args.dry_run, simulate=args.simulate)
+    try:
+        result = service.run_strategy(strategy, dry_run=args.dry_run, simulate=args.simulate)
+    except KeyboardInterrupt:
+        print("Interrupted by operator.")
+        return 130
     if args.dry_run:
         payload = {
             "strategy": strategy_to_pretty_dict(strategy),
@@ -384,7 +388,11 @@ def run_once_command(args: argparse.Namespace) -> int:
     strategy = build_single_strategy(args)
 
     service = build_service(args)
-    result = service.run_strategy(strategy, dry_run=args.dry_run, simulate=args.simulate)
+    try:
+        result = service.run_strategy(strategy, dry_run=args.dry_run, simulate=args.simulate)
+    except KeyboardInterrupt:
+        print("Interrupted by operator.")
+        return 130
     if args.dry_run:
         payload = {
             "strategy": strategy_to_pretty_dict(strategy),
