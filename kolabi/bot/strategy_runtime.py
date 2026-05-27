@@ -45,7 +45,7 @@ from kolabi.bot.dragon import (
     simulated_private_fill_from_submission,
     tail_submitted_from_ack,
 )
-from kolabi.bot.pricing import reference_price
+from kolabi.bot.pricing import reference_price, tail_reference_price
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     DragonSong,
@@ -90,6 +90,9 @@ class PublicMarketStateReader(Protocol):
     best_bid: float | None
     best_ask: float | None
     mid_price: float | None
+    last_price: float | None
+    mark_price: float | None
+    index_price: float | None
     recorded_at: str | None
 
 
@@ -105,6 +108,15 @@ class PrivateOrderStateReader(Protocol):
     """Reads strategy-facing private order records from any backing store."""
 
     def fetch_private_orders_since(
+        self,
+        *,
+        after_local_timestamp: datetime | None = None,
+        after_local_id: int | None = None,
+        symbol: str | None = None,
+        limit: int = 200,
+    ) -> tuple[PrivateOrderRecord, ...]: ...
+
+    def fetch_private_fills_since(
         self,
         *,
         after_local_timestamp: datetime | None = None,
@@ -192,6 +204,9 @@ class KrakenPublicTriggerSource:
                 best_ask=market.best_ask,
                 mid_price=market.mid_price,
                 occurred_at=datetime.now(timezone.utc),
+                last_price=getattr(market, "last_price", None),
+                mark_price=getattr(market, "mark_price", None),
+                index_price=getattr(market, "index_price", None),
             )
             for pair_name, pair_state in runtime.state.pairs.items():
                 if pair_state.head_state == HeadState.LATENT:
@@ -238,6 +253,8 @@ class KrakenPrivateOrderPollingSource:
         self.poll_seconds = poll_seconds
         self.after_local_timestamp: datetime | None = None
         self.after_local_id: int | None = None
+        self.after_fill_timestamp: datetime | None = None
+        self.after_fill_id: int | None = None
         self._pending_records: list[PrivateOrderRecord] = []
         self._cursor_initialised = False
 
@@ -246,21 +263,33 @@ class KrakenPrivateOrderPollingSource:
             if not self._cursor_initialised:
                 self.after_local_timestamp = runtime.state.launched_at - timedelta(seconds=5)
                 self.after_local_id = None
+                self.after_fill_timestamp = runtime.state.launched_at - timedelta(seconds=5)
+                self.after_fill_id = None
                 self._cursor_initialised = True
             records = self.client.fetch_private_orders_since(
                 after_local_timestamp=self.after_local_timestamp,
                 after_local_id=self.after_local_id,
                 symbol=runtime.symbol,
             )
-            candidates = tuple(self._pending_records) + records
+            fill_records = self.client.fetch_private_fills_since(
+                after_local_timestamp=self.after_fill_timestamp,
+                after_local_id=self.after_fill_id,
+                symbol=runtime.symbol,
+            )
+            candidates = tuple(self._pending_records) + records + fill_records
             self._pending_records = []
             for record in candidates:
                 occurred_at = _record_timestamp(record)
                 is_new_record = record in records
+                is_new_fill = record in fill_records
                 if is_new_record:
                     if occurred_at is not None:
                         self.after_local_timestamp = occurred_at
                     self.after_local_id = record.local_id
+                if is_new_fill:
+                    if occurred_at is not None:
+                        self.after_fill_timestamp = occurred_at
+                    self.after_fill_id = record.local_id
                 resolved = runtime.pair_state_for_record(record)
                 if resolved is None:
                     self._pending_records.append(record)
@@ -274,9 +303,15 @@ class KrakenPrivateOrderPollingSource:
                 move = self._with_reference_price(move, pair_state, runtime.symbol)
                 move = replace(move, role=role)
                 event_id = (
-                    f"private-order:{record.local_id}"
-                    if record.local_id is not None
-                    else None
+                    (
+                        f"private-fill:{record.local_id}"
+                        if is_new_fill and record.local_id is not None
+                        else (
+                            f"private-order:{record.local_id}"
+                            if record.local_id is not None
+                            else None
+                        )
+                    )
                 )
                 await runtime.enqueue(replace(move, event_id=event_id))
             if runtime.all_pairs_terminal:
@@ -290,6 +325,11 @@ class KrakenPrivateOrderPollingSource:
         symbol: str,
     ) -> EggMove:
         """Attach side-aware public reference price for relative tail initialisation."""
+        reply = dict(move.reply or {})
+        fill_price = reply.get("price")
+        if isinstance(fill_price, (int, float, Decimal, str)) and to_decimal(fill_price) > 0:
+            reply["reference_price"] = fill_price
+            return replace(move, reply=reply)
         public_client = self.public_client
         if public_client is None and hasattr(self.client, "fetch_market_state"):
             public_client = cast(PublicRuntimeStateReader, self.client)
@@ -299,7 +339,6 @@ class KrakenPrivateOrderPollingSource:
         reference = reference_price(pair_state.pair.head.side, market)
         if reference <= 0:
             return move
-        reply = dict(move.reply or {})
         reply["reference_price"] = reference
         return replace(move, reply=reply)
 
@@ -422,24 +461,36 @@ class StrategyRuntime:
         interval = max(self.tail_telemetry_interval_seconds, 1.0)
         while self.running:
             now = datetime.now(timezone.utc)
+            market = (
+                None
+                if self.public_state_reader is None
+                else self.public_state_reader.fetch_market_state(self.symbol)
+            )
             rows = self._collect_tail_telemetry_rows(now)
             if rows and self.tail_telemetry_writer is not None:
                 self.tail_telemetry_writer.record_rows(rows)
             for row in rows:
+                source = "unknown"
+                if market is not None:
+                    source, _ = tail_reference_price(self.state.pairs[row.pair_name].pair, market)
                 _LOGGER.info(
-                    "tail_metrics pair=%s head_state=%s tail_state=%s ref=%s stop=%s initial_dist=%s current_dist=%s last_update_at=%s",
+                    "tail_metrics pair=%s head_state=%s tail_state=%s ref=%s stop=%s initial_dist=%s current_dist=%s last_update_at=%s src=%s px=L:%s M:%s I:%s",
                     row.pair_name,
                     row.head_state,
                     row.tail_state,
-                    f"{row.reference_price:.6f}",
-                    f"{row.stop_price:.6f}",
-                    f"{row.initial_distance:.6f}",
-                    f"{row.current_distance:.6f}",
+                    _fmt_compact_price(row.reference_price),
+                    _fmt_compact_price(row.stop_price),
+                    _fmt_compact_price(row.initial_distance),
+                    _fmt_compact_price(row.current_distance),
                     (
                         row.last_tail_update_at.isoformat()
                         if row.last_tail_update_at is not None
                         else "-"
                     ),
+                    source,
+                    _fmt_compact_price(None if market is None else getattr(market, "last_price", None)),
+                    _fmt_compact_price(None if market is None else getattr(market, "mark_price", None)),
+                    _fmt_compact_price(None if market is None else getattr(market, "index_price", None)),
                 )
             await asyncio.sleep(interval)
 
@@ -455,10 +506,13 @@ class StrategyRuntime:
                 or pair_state.tail_state not in {TailState.HOOKED, TailState.SUBMITTED, TailState.LIVING}
             ):
                 continue
-            ref = reference_price(pair_state.pair.head.side, market)
+            _, ref = tail_reference_price(pair_state.pair, market)
             if ref <= 0:
                 continue
-            stop = pair_state.tail_trail.current_stop_price
+            stop = pair_state.tail_trail.confirmed_stop_price
+            if stop is None:
+                continue
+            current_distance = _tail_signed_distance(pair_state, to_decimal(ref), stop)
             rows.append(
                 TailTelemetryRow(
                     exchange=self.exchange,
@@ -474,8 +528,8 @@ class StrategyRuntime:
                     reference_price=float(ref),
                     stop_price=float(stop),
                     initial_distance=float(pair_state.tail_trail.baseline_width),
-                    current_distance=float(abs(to_decimal(ref) - stop)),
-                    last_tail_update_at=pair_state.tail_trail.last_stop_update_at,
+                    current_distance=float(current_distance),
+                    last_tail_update_at=pair_state.tail_trail.last_confirmed_at,
                     recorded_at=now,
                 )
             )
@@ -492,10 +546,9 @@ class StrategyRuntime:
             }:
                 continue
             quantity_changed = current.played_quantity != previous.played_quantity
-            stop_previous = (
-                None if previous.tail_trail is None else previous.tail_trail.current_stop_price
-            )
-            stop_current = (
+            stop_previous = _confirmed_tail_stop(previous)
+            stop_current = _confirmed_tail_stop(current)
+            desired_stop = (
                 None if current.tail_trail is None else current.tail_trail.current_stop_price
             )
             stop_changed = stop_current != stop_previous
@@ -506,12 +559,13 @@ class StrategyRuntime:
             if not (quantity_changed or stop_changed or state_changed):
                 continue
             _LOGGER.info(
-                "pair_update pair=%s head_state=%s tail_state=%s played_qty=%s tail_stop=%s",
+                "pair_update pair=%s head_state=%s tail_state=%s played_qty=%s tail_stop=%s desired_stop=%s",
                 pair_name,
                 current.head_state.value,
                 current.tail_state.value if current.tail_state is not None else "-",
                 str(current.played_quantity) if current.played_quantity is not None else "-",
                 str(stop_current) if stop_current is not None else "-",
+                str(desired_stop) if desired_stop is not None else "-",
             )
 
     def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
@@ -564,6 +618,7 @@ class StrategyRuntime:
                 symbol=self.symbol,
                 ack=ack,
                 client_order_id=command.request.clOrdID,
+                stop_price=command.request.stopPx,
                 occurred_at=datetime.now(timezone.utc),
             )
             return (submitted_tail,)
@@ -684,6 +739,31 @@ def _record_matches_identity(record, identity: OrderIdentity) -> bool:
     ):
         return True
     return False
+
+
+def _confirmed_tail_stop(pair_state: PairCycleState) -> Decimal | None:
+    if pair_state.tail_trail is None:
+        return None
+    return pair_state.tail_trail.confirmed_stop_price
+
+
+def _tail_signed_distance(
+    pair_state: PairCycleState,
+    reference: Decimal,
+    stop: Decimal,
+) -> Decimal:
+    """Return positive distance only while the platform stop is live-side safe."""
+    if pair_state.pair.tail.side.value.lower() == "sell":
+        return reference - stop
+    return stop - reference
+
+
+def _fmt_compact_price(value: float | Decimal | None) -> str:
+    if value is None:
+        return "-"
+    as_float = float(value)
+    decimals = 2 if abs(as_float) >= 1 else 4
+    return f"{as_float:.{decimals}f}"
 
 
 def _record_timestamp(record) -> datetime | None:

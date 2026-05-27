@@ -27,7 +27,7 @@ from kolabi.bot.domain import (
     OrderReason,
     classify_confirmed_move,
 )
-from kolabi.bot.pricing import reference_price
+from kolabi.bot.pricing import reference_price, tail_reference_price
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     BrokerReply,
@@ -43,6 +43,9 @@ class MarketSnapshotFact:
     best_ask: float | None
     mid_price: float | None
     occurred_at: datetime
+    last_price: float | None = None
+    mark_price: float | None = None
+    index_price: float | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,8 @@ class PrivateOrderFact:
     client_order_id: str | None
     status: str
     reason: str | None
+    price: Decimal | None
+    stop_price: Decimal | None
     filled_quantity: Decimal
     total_quantity: Decimal
     occurred_at: datetime
@@ -81,7 +86,7 @@ def market_tick_from_market_snapshot(
     snapshot: MarketSnapshotFact,
 ) -> EggMove | None:
     """Translate public market state into a targeted side-aware tick."""
-    reference = reference_price(pair.head.side, snapshot)
+    source, reference = tail_reference_price(pair, snapshot)
     if reference <= 0:
         return None
     return EggMove(
@@ -89,7 +94,7 @@ def market_tick_from_market_snapshot(
         occurred_at=snapshot.occurred_at,
         symbol=snapshot.symbol,
         pair_name=pair.name,
-        reply={"reference_price": reference},
+        reply={"reference_price": reference, "reference_source": source},
     )
 
 
@@ -145,6 +150,7 @@ def tail_submitted_from_ack(
     symbol: str,
     ack: OrderAck,
     client_order_id: str | None,
+    stop_price: Decimal | int | float | str | None = None,
     occurred_at: datetime | None = None,
 ) -> EggMove:
     reply: BrokerReply = {
@@ -153,6 +159,8 @@ def tail_submitted_from_ack(
     }
     if client_order_id is not None:
         reply["clOrdID"] = client_order_id
+    if stop_price is not None:
+        reply["stopPx"] = float(to_decimal(stop_price))
     return EggMove(
         kind=EggMoveKind.TAIL_SUBMITTED,
         occurred_at=occurred_at or datetime.now(timezone.utc),
@@ -177,6 +185,8 @@ def private_order_fact_from_mapping(
         client_order_id=_string_or_none(payload.get("clOrdID")),
         status=str(payload.get("ordStatus") or payload.get("status") or ""),
         reason=_string_or_none(payload.get("execType")) or _string_or_none(payload.get("reason")),
+        price=_decimal_or_none(payload.get("price")),
+        stop_price=_decimal_or_none(payload.get("stopPx") or payload.get("stop_price") or payload.get("stopPrice")),
         filled_quantity=_decimal_or_zero(
             payload.get("cumQty")
             or payload.get("executedQty")
@@ -203,6 +213,8 @@ def private_order_fact_from_record(
         client_order_id=record.client_order_id,
         status=record.status,
         reason=record.reason,
+        price=_decimal_or_none(record.price),
+        stop_price=_decimal_or_none(record.stop_price),
         filled_quantity=_decimal_or_zero(record.filled_quantity),
         total_quantity=_decimal_or_zero(record.quantity),
         occurred_at=occurred_at,
@@ -228,19 +240,24 @@ def confirmed_head_from_private_fact(fact: PrivateOrderFact) -> ConfirmedOrder:
 
 def head_move_from_private_fact(fact: PrivateOrderFact) -> EggMove:
     head = confirmed_head_from_private_fact(fact)
+    reply: BrokerReply = {
+        "orderID": head.identity.exchange_order_id or "",
+        "clOrdID": head.identity.client_order_id or "",
+        "ordStatus": head.state.value,
+        "execType": head.reason.value,
+        "cumQty": float(head.filled_quantity),
+        "orderQty": float(head.total_quantity),
+    }
+    if fact.price is not None:
+        reply["price"] = float(fact.price)
+    if fact.stop_price is not None:
+        reply["stopPx"] = float(fact.stop_price)
     return EggMove(
         kind=classify_confirmed_move(head),
         occurred_at=fact.occurred_at,
         symbol=fact.symbol,
         pair_name=fact.pair_name,
-        reply={
-            "orderID": head.identity.exchange_order_id or "",
-            "clOrdID": head.identity.client_order_id or "",
-            "ordStatus": head.state.value,
-            "execType": head.reason.value,
-            "cumQty": float(head.filled_quantity),
-            "orderQty": float(head.total_quantity),
-        },
+        reply=reply,
         is_private=True,
     )
 
@@ -336,6 +353,14 @@ def _decimal_or_zero(value: object) -> Decimal:
     if isinstance(value, (int, float, Decimal, str)):
         return max(to_decimal(value), Decimal("0"))
     return Decimal("0")
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float, Decimal, str)):
+        return to_decimal(value)
+    return None
 
 
 def _datetime_from_iso(value: str | None) -> datetime | None:
