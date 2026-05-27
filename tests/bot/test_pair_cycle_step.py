@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -361,7 +362,11 @@ def test_market_tick_with_tail_identity_emits_amend_only_on_improvement() -> Non
             client_order_id="CID-T",
             exchange_order_id="OID-T",
         ),
-        tail_trail=played.tail_trail,
+        tail_trail=(
+            None
+            if played.tail_trail is None
+            else replace(played.tail_trail, confirmed_stop_price=played.tail_trail.current_stop_price)
+        ),
         played_quantity=played.played_quantity,
     )
 
@@ -441,6 +446,7 @@ def test_closed_pair_ignores_later_market_tick() -> None:
 
 def test_closed_head_with_active_tail_still_trails_on_market_tick() -> None:
     trail = initial_tail_trail(sample_pair(), Decimal("100"), datetime.now(timezone.utc))
+    trail = replace(trail, confirmed_stop_price=trail.current_stop_price)
     closed = PairCycleState(
         pair=sample_pair(),
         head_state=HeadState.CLOSED,

@@ -138,6 +138,8 @@ def step_tail_trail(
     tick = _tick_size_or_none(tick_size)
     min_improvement = _min_improvement(d0, tick, config)
 
+    max_lag = config.unblock_multiplier * d0
+
     if pair.tail.side == Side.SELL:
         d_raw = reference - current_stop
         favorable = previous_ref is None or reference > previous_ref
@@ -148,6 +150,10 @@ def step_tail_trail(
         r = _clamp_r(d_raw / (config.response_denominator_multiplier * d0), config.max_r)
         factor = curve.factor(float(r), max_factor=config.max_factor)
         candidate = current_stop + factor * d_raw
+        # Hard invariant: do not let stop lag behind reference by more than 2*d0.
+        lag_cap_candidate = reference - max_lag
+        if candidate < lag_cap_candidate:
+            candidate = lag_cap_candidate
         if candidate < current_stop + min_improvement:
             return next_state
         rounded_current = _round_to_tick(current_stop, tick)
@@ -171,6 +177,10 @@ def step_tail_trail(
     r = _clamp_r(d_raw / (config.response_denominator_multiplier * d0), config.max_r)
     factor = curve.factor(float(r), max_factor=config.max_factor)
     candidate = current_stop - factor * d_raw
+    # Hard invariant: do not let stop lag behind reference by more than 2*d0.
+    lag_cap_candidate = reference + max_lag
+    if candidate > lag_cap_candidate:
+        candidate = lag_cap_candidate
     if candidate > current_stop - min_improvement:
         return next_state
     rounded_current = _round_to_tick(current_stop, tick)

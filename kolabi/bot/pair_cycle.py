@@ -52,6 +52,7 @@ def step_pair(
             state,
             tail_state=TailState.SUBMITTED,
             tail_identity=tail_identity_from_move(state, move),
+            tail_trail=tail_trail_confirmed_from_move(state, move),
         )
         return next_state, ()
 
@@ -98,6 +99,7 @@ def step_pair(
         if (
             next_trail.current_stop_price != state.tail_trail.current_stop_price
             and _has_full_tail_identity(next_state)
+            and _has_confirmed_tail_stop(next_state)
         ):
             return next_state, (PairIntent(PairIntentKind.AMEND_TAIL),)
         return next_state, ()
@@ -108,6 +110,7 @@ def step_pair(
                 state,
                 tail_state=TailState.SUBMITTED,
                 tail_identity=tail_identity_from_move(state, move),
+                tail_trail=tail_trail_confirmed_from_move(state, move),
             )
             return next_state, ()
         next_state = replace(
@@ -124,6 +127,7 @@ def step_pair(
                 state,
                 tail_state=TailState.FAILED,
                 tail_identity=tail_identity_from_move(state, move),
+                tail_trail=tail_trail_confirmed_from_move(state, move),
             )
             return next_state, ()
         next_state = replace(
@@ -142,6 +146,7 @@ def step_pair(
                 state,
                 tail_state=TailState.LIVING,
                 tail_identity=tail_identity_from_move(state, move),
+                tail_trail=tail_trail_confirmed_from_move(state, move),
             )
             return next_state, ()
         played_quantity = played_quantity_from_move(state, move)
@@ -169,6 +174,7 @@ def step_pair(
                 tail_state=TailState.CLOSED,
                 tail_mode=TailMode.FLYING,
                 tail_identity=tail_identity_from_move(state, move),
+                tail_trail=tail_trail_confirmed_from_move(state, move),
             )
             return next_state, ()
         played_quantity = played_quantity_from_move(state, move)
@@ -203,6 +209,13 @@ def _has_full_tail_identity(state: PairCycleState) -> bool:
         state.tail_identity is not None
         and bool(state.tail_identity.client_order_id)
         and bool(state.tail_identity.exchange_order_id)
+    )
+
+
+def _has_confirmed_tail_stop(state: PairCycleState) -> bool:
+    return (
+        state.tail_trail is not None
+        and state.tail_trail.confirmed_stop_price is not None
     )
 
 
@@ -288,6 +301,36 @@ def tail_trail_from_move(state: PairCycleState, move: EggMove):
     if reference_price is None:
         return None
     return initial_tail_trail(state.pair, reference_price, move.occurred_at)
+
+
+def tail_trail_confirmed_from_move(state: PairCycleState, move: EggMove):
+    trail = state.tail_trail
+    if trail is None:
+        return None
+    stop_price = _stop_price_from_move(move)
+    if stop_price is None:
+        return trail
+    return replace(
+        trail,
+        confirmed_stop_price=stop_price,
+        last_confirmed_at=move.occurred_at,
+    )
+
+
+def _stop_price_from_move(move: EggMove) -> Decimal | None:
+    for payload in (move.reply, move.order):
+        if payload is None:
+            continue
+        for key in ("stopPx", "stop_price", "stopPrice"):
+            value = payload.get(key)
+            if isinstance(value, (int, float, Decimal, str)):
+                return to_decimal(value)
+        order_type = str(payload.get("ordType") or payload.get("order_type") or "").lower()
+        if "stop" in order_type:
+            price = payload.get("price")
+            if isinstance(price, (int, float, Decimal, str)):
+                return to_decimal(price)
+    return None
 
 
 def egg_move_from_confirmed_head(

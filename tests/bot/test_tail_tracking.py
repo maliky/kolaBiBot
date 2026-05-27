@@ -194,3 +194,25 @@ def test_tail_tracking_survives_extreme_reference_without_overflow() -> None:
     moved = step_tail_trail(pair, trail, Decimal("999999"), now + timedelta(seconds=7))
 
     assert moved.current_stop_price >= trail.current_stop_price
+
+
+def test_sell_tail_lag_is_capped_to_twice_initial_distance() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(side=Side.BUY, tail=1.0, tail_type="tD")
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+
+    moved = step_tail_trail(pair, trail, Decimal("130"), now + timedelta(seconds=7))
+    lag = Decimal("130") - moved.current_stop_price
+
+    assert lag <= Decimal("2")
+
+
+def test_buy_tail_lag_is_capped_to_twice_initial_distance() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(side=Side.SELL, tail=1.0, tail_type="tD")
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+
+    moved = step_tail_trail(pair, trail, Decimal("70"), now + timedelta(seconds=7))
+    lag = moved.current_stop_price - Decimal("70")
+
+    assert lag <= Decimal("2")

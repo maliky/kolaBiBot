@@ -35,6 +35,8 @@ def test_private_partial_fill_maps_to_played_not_canceled() -> None:
         client_order_id="CID-1",
         status="PartiallyFilled",
         reason="partial_fill",
+        price=None,
+        stop_price=None,
         filled_quantity=Decimal("1"),
         total_quantity=Decimal("2"),
         occurred_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),

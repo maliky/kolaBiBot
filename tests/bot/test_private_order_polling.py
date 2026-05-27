@@ -181,6 +181,9 @@ def test_private_order_poller_injects_side_aware_reference_price() -> None:
             assert symbol == "PI_XBTUSD"
             return _Market()
 
+        def fetch_private_fills_since(self, **_kwargs):
+            return ()
+
     class _Runtime:
         def __init__(self) -> None:
             pair = sample_pair("pair-a")
@@ -238,6 +241,82 @@ def test_private_order_poller_injects_side_aware_reference_price() -> None:
     assert emitted[0].reply["reference_price"] == 101.0
 
 
+def test_private_order_poller_prefers_fill_price_for_reference_price() -> None:
+    now = datetime.now(timezone.utc)
+    record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="filled",
+        exchange_order_id="OID-H",
+        client_order_id="CID-H",
+        price=75966.5,
+        quantity=7.0,
+        filled_quantity=7.0,
+        local_id=3,
+        local_timestamp=now.isoformat(),
+    )
+
+    class _Market:
+        best_bid = 75829.0
+        best_ask = 75830.0
+        mid_price = 75829.5
+        recorded_at = now.isoformat()
+
+    class _Client:
+        def __init__(self) -> None:
+            self.sent = False
+
+        def fetch_private_orders_since(self, **_kwargs):
+            if self.sent:
+                return ()
+            self.sent = True
+            return (record,)
+
+        def fetch_private_fills_since(self, **_kwargs):
+            return ()
+
+        def fetch_market_state(self, symbol: str | None = None):
+            return _Market()
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.symbol = "PI_XBTUSD"
+            self.running = True
+            self.state = StrategyState(
+                launched_at=now,
+                strategy_id="demo",
+                pairs={
+                    "pair-a": PairCycleState(
+                        pair=sample_pair("pair-a"),
+                        head_identity=OrderIdentity(
+                            pair_name="pair-a",
+                            role="head",
+                            client_order_id="CID-H",
+                            exchange_order_id="OID-H",
+                        ),
+                    )
+                },
+            )
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return False
+
+        async def enqueue(self, event) -> None:
+            emitted.append(cast(EggMove, event))
+            self.running = False
+
+        def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
+            return self.state.pairs["pair-a"], OrderRole.HEAD
+
+    emitted: list[EggMove] = []
+    source = KrakenPrivateOrderPollingSource(_Client(), poll_seconds=0.0)
+
+    asyncio.run(source.pump(_Runtime()))
+
+    assert emitted[0].reply is not None
+    assert emitted[0].reply["reference_price"] == 75966.5
+
+
 def test_private_order_poller_retries_fresh_unmatched_head_fill() -> None:
     now = datetime.now(timezone.utc)
     record = PrivateOrderRecord(
@@ -259,6 +338,9 @@ def test_private_order_poller_retries_fresh_unmatched_head_fill() -> None:
             self.calls += 1
             if self.calls == 1:
                 return (record,)
+            return ()
+
+        def fetch_private_fills_since(self, **_kwargs):
             return ()
 
     class _Runtime:
@@ -325,6 +407,9 @@ def test_private_order_poller_matches_tail_identity_as_tail_role() -> None:
         def fetch_private_orders_since(self, **_kwargs):
             return (record,)
 
+        def fetch_private_fills_since(self, **_kwargs):
+            return ()
+
     class _Runtime:
         def __init__(self) -> None:
             self.symbol = "PI_XBTUSD"
@@ -371,3 +456,64 @@ def test_private_order_poller_matches_tail_identity_as_tail_role() -> None:
 
     assert len(emitted) == 1
     assert emitted[0].role == OrderRole.TAIL
+
+
+def test_private_order_poller_emits_from_fill_stream_when_order_stream_empty() -> None:
+    now = datetime.now(timezone.utc)
+    fill_record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="filled",
+        exchange_order_id="OID-H",
+        client_order_id="CID-H",
+        quantity=2.0,
+        filled_quantity=2.0,
+        local_id=11,
+        local_timestamp=now.isoformat(),
+    )
+
+    class _Client:
+        def fetch_private_orders_since(self, **_kwargs):
+            return ()
+
+        def fetch_private_fills_since(self, **_kwargs):
+            return (fill_record,)
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.symbol = "PI_XBTUSD"
+            self.running = True
+            self.state = StrategyState(
+                launched_at=now,
+                strategy_id="demo",
+                pairs={
+                    "pair-a": PairCycleState(
+                        pair=sample_pair("pair-a"),
+                        head_identity=OrderIdentity(
+                            pair_name="pair-a",
+                            role="head",
+                            client_order_id="CID-H",
+                            exchange_order_id="OID-H",
+                        ),
+                    )
+                },
+            )
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return False
+
+        async def enqueue(self, event) -> None:
+            emitted.append(cast(EggMove, event))
+            self.running = False
+
+        def pair_state_for_record(self, rec) -> tuple[PairCycleState, OrderRole] | None:
+            if rec.client_order_id == "CID-H":
+                return self.state.pairs["pair-a"], OrderRole.HEAD
+            return None
+
+    emitted: list[EggMove] = []
+    source = KrakenPrivateOrderPollingSource(_Client(), poll_seconds=0.0)
+    asyncio.run(source.pump(_Runtime()))
+
+    assert len(emitted) == 1
+    assert emitted[0].kind.value == "played_and_canceled"

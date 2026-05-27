@@ -253,7 +253,12 @@ def test_public_polling_emits_market_ticks_for_living_tails() -> None:
 
 def test_market_tick_reaches_horus_as_tail_amend_command() -> None:
     pair = sample_strategy()[0]
-    trail = initial_tail_trail(pair, Decimal("100"), datetime.now(timezone.utc))
+    confirmed_at = datetime.now(timezone.utc)
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), confirmed_at),
+        confirmed_stop_price=Decimal("99.0"),
+        last_confirmed_at=confirmed_at,
+    )
     state = PairCycleState(
         pair=pair,
         head_state=HeadState.LIVING,
@@ -299,7 +304,12 @@ def test_tail_telemetry_rows_include_distance_and_last_update() -> None:
             return Market()
 
     pair = sample_strategy()[0]
-    trail = initial_tail_trail(pair, Decimal("100"), datetime.now(timezone.utc))
+    confirmed_at = datetime.now(timezone.utc)
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), confirmed_at),
+        confirmed_stop_price=Decimal("99.0"),
+        last_confirmed_at=confirmed_at,
+    )
     runtime = StrategyRuntime(
         strategy=StrategySpec(name="demo", pairs=(pair,)),
         symbol="PI_XBTUSD",
@@ -325,8 +335,8 @@ def test_tail_telemetry_rows_include_distance_and_last_update() -> None:
     assert len(rows) == 1
     row = rows[0]
     assert row.initial_distance == float(trail.baseline_width)
-    assert row.current_distance == float(abs(Decimal("102.0") - trail.current_stop_price))
-    assert row.last_tail_update_at == trail.last_stop_update_at
+    assert row.current_distance == float(Decimal("102.0") - Decimal("99.0"))
+    assert row.last_tail_update_at == confirmed_at
 
 
 def test_runtime_matches_private_record_to_tail_identity() -> None:

@@ -333,6 +333,7 @@ class PrivateOrderRecord:
     side: str | None = None
     order_type: str | None = None
     price: float | None = None
+    stop_price: float | None = None
     quantity: float | None = None
     filled_quantity: float | None = None
     source_timestamp: str | None = None
