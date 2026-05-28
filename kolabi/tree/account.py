@@ -9,8 +9,9 @@ import json
 import os
 import time
 from dataclasses import dataclass
+from collections import deque
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, Iterable, cast
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -27,6 +28,7 @@ from kolabi.shared.persistence import (
     Base,
     ExchangeConnection,
     ExchangeFill,
+    PrivateIngestAudit,
     ExchangeOrder,
     RawExchangeEvent,
 )
@@ -57,9 +59,21 @@ class AccountStreamConfig:
         "account_log",
         "notifications_auth",
     )
+    critical_feeds: tuple[str, ...] = ("open_orders", "fills")
+    account_feeds: tuple[str, ...] = (
+        "balances",
+        "open_positions",
+        "account_log",
+        "notifications_auth",
+    )
+    ingest_profile: str = "split"
     reconnect_seconds: int = 5
     ping_seconds: int = 50
     heartbeat_log_seconds: int = 60
+    maintenance_seconds: int = 60
+    account_batch_max_rows: int = 64
+    account_batch_max_wait_seconds: float = 0.35
+    queue_maxsize: int = 5000
     raw_retention_minutes: int = 1440
     raw_retention_limit: int = 100000
     log_level: str = "INFO"
@@ -155,6 +169,25 @@ class FillEvent:
     source_timestamp: datetime | None = None
 
 
+@dataclass(frozen=True)
+class PrivateStreamProfile:
+    """Defines one private websocket ingestion lane."""
+
+    name: str
+    stream_kind: str
+    feeds: tuple[str, ...]
+    is_critical: bool
+    health_aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class IngestMessage:
+    """Queue payload carrying a decoded private websocket message."""
+
+    payload: JsonDictT
+    received_at: datetime
+
+
 def upgrade_private_schema(engine: Any) -> None:
     """Apply additive SQLite schema upgrades for existing private DBs."""
     if getattr(engine.dialect, "name", "") != "sqlite":
@@ -164,8 +197,28 @@ def upgrade_private_schema(engine: Any) -> None:
     with engine.begin() as connection:
         if "exchange_orders" in tables:
             ensure_columns(connection, "exchange_orders", {"raw_payload": "JSON"})
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_exchange_orders_symbol_cursor "
+                    "ON exchange_orders "
+                    "(exchange, environment, market_type, symbol, local_timestamp, id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_exchange_orders_env_client "
+                    "ON exchange_orders "
+                    "(exchange, environment, market_type, client_order_id)"
+                )
+            )
         if "exchange_fills" in tables:
             ensure_columns(connection, "exchange_fills", {"raw_payload": "JSON"})
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_exchange_fills_cursor "
+                    "ON exchange_fills (exchange, local_timestamp, id, order_id)"
+                )
+            )
         if "account_balances" in tables:
             ensure_columns(connection, "account_balances", {"raw_payload": "JSON"})
         if "account_positions" in tables:
@@ -239,6 +292,505 @@ class AccountStateStore:
             class_=Session,
         )
 
+    def ingest_message(
+        self,
+        message: JsonMapT,
+        *,
+        stream_kind: str,
+        is_critical: bool,
+        received_at: datetime | None = None,
+        prune_raw: bool = False,
+    ) -> dict[str, object]:
+        """Persist one private message with a single short transaction."""
+        payload = dict(message)
+        feed = str(payload.get("feed", ""))
+        now = received_at or datetime.now(timezone.utc)
+        with self.sessionmaker() as session:
+            raw_row = self._record_raw_event_in_session(
+                session,
+                payload,
+                stream_kind=stream_kind,
+                received_at=now,
+                prune_raw=prune_raw,
+            )
+            row_count = 0
+            order_rows: list[ExchangeOrder] = []
+            fill_rows: list[tuple[FillEvent, ExchangeFill]] = []
+            balance_rows: list[BalanceWrite] = []
+            position_rows: list[PositionWrite] = []
+            if feed.startswith("open_orders"):
+                for order_payload in iter_order_payloads(payload):
+                    mapped = map_order(order_payload)
+                    row = self._ensure_order_in_session(
+                        session,
+                        mapped,
+                        now=now,
+                    )
+                    order_rows.append(row)
+                    row_count += 1
+            elif feed.startswith("fills"):
+                for fill_payload in iter_fill_payloads(payload):
+                    mapped_fill = map_fill_event(fill_payload)
+                    fill_row = self._record_fill_event_in_session(
+                        session,
+                        mapped_fill,
+                        now=now,
+                    )
+                    fill_rows.append((mapped_fill, fill_row))
+                    row_count += 1
+            elif feed.startswith("balances"):
+                balances = map_balances(payload)
+                for balance in balances:
+                    self._record_balance_in_session(session, balance, now=now)
+                balance_rows = balances
+                row_count += len(balances)
+            elif feed.startswith("open_positions"):
+                positions = map_positions(payload)
+                for position in positions:
+                    self._record_position_in_session(session, position, now=now)
+                position_rows = positions
+                row_count += len(positions)
+            committed_at = datetime.now(timezone.utc)
+            self._record_ingest_audit_in_session(
+                session,
+                message=payload,
+                feed=feed or "unknown",
+                stream_kind=stream_kind,
+                is_critical=is_critical,
+                source_timestamp=raw_row.source_timestamp,
+                received_at=now,
+                raw_committed_at=committed_at,
+                normalized_committed_at=committed_at,
+                row_count=row_count,
+                error_text=None,
+            )
+            session.commit()
+        return {
+            "feed": feed,
+            "raw_event": raw_row,
+            "orders": tuple(order_rows),
+            "fills": tuple(fill_rows),
+            "balances": tuple(balance_rows),
+            "positions": tuple(position_rows),
+            "row_count": row_count,
+        }
+
+    def ingest_message_batch(
+        self,
+        messages: Iterable[IngestMessage],
+        *,
+        stream_kind: str,
+        is_critical: bool,
+        prune_raw: bool = False,
+    ) -> tuple[dict[str, object], ...]:
+        """Persist many messages in one transaction (used for non-critical feeds)."""
+        results: list[dict[str, object]] = []
+        with self.sessionmaker() as session:
+            for queued in messages:
+                payload = dict(queued.payload)
+                feed = str(payload.get("feed", ""))
+                raw_row = self._record_raw_event_in_session(
+                    session,
+                    payload,
+                    stream_kind=stream_kind,
+                    received_at=queued.received_at,
+                    prune_raw=False,
+                )
+                row_count = 0
+                order_rows: list[ExchangeOrder] = []
+                fill_rows: list[tuple[FillEvent, ExchangeFill]] = []
+                balance_rows: list[BalanceWrite] = []
+                position_rows: list[PositionWrite] = []
+                if feed.startswith("open_orders"):
+                    for order_payload in iter_order_payloads(payload):
+                        mapped = map_order(order_payload)
+                        order_rows.append(
+                            self._ensure_order_in_session(
+                                session,
+                                mapped,
+                                now=queued.received_at,
+                            )
+                        )
+                        row_count += 1
+                elif feed.startswith("fills"):
+                    for fill_payload in iter_fill_payloads(payload):
+                        mapped_fill = map_fill_event(fill_payload)
+                        fill_rows.append(
+                            (
+                                mapped_fill,
+                                self._record_fill_event_in_session(
+                                    session,
+                                    mapped_fill,
+                                    now=queued.received_at,
+                                ),
+                            )
+                        )
+                        row_count += 1
+                elif feed.startswith("balances"):
+                    balances = map_balances(payload)
+                    for balance in balances:
+                        self._record_balance_in_session(
+                            session,
+                            balance,
+                            now=queued.received_at,
+                        )
+                    balance_rows = balances
+                    row_count += len(balances)
+                elif feed.startswith("open_positions"):
+                    positions = map_positions(payload)
+                    for position in positions:
+                        self._record_position_in_session(
+                            session,
+                            position,
+                            now=queued.received_at,
+                        )
+                    position_rows = positions
+                    row_count += len(positions)
+                committed_at = datetime.now(timezone.utc)
+                self._record_ingest_audit_in_session(
+                    session,
+                    message=payload,
+                    feed=feed or "unknown",
+                    stream_kind=stream_kind,
+                    is_critical=is_critical,
+                    source_timestamp=raw_row.source_timestamp,
+                    received_at=queued.received_at,
+                    raw_committed_at=committed_at,
+                    normalized_committed_at=committed_at,
+                    row_count=row_count,
+                    error_text=None,
+                )
+                results.append(
+                    {
+                        "feed": feed,
+                        "raw_event": raw_row,
+                        "orders": tuple(order_rows),
+                        "fills": tuple(fill_rows),
+                        "balances": tuple(balance_rows),
+                        "positions": tuple(position_rows),
+                        "row_count": row_count,
+                    }
+                )
+            if prune_raw:
+                prune_raw_events(
+                    session,
+                    config=self.config,
+                    retention_minutes=self.config.raw_retention_minutes,
+                    retention_limit=self.config.raw_retention_limit,
+                    now=datetime.now(timezone.utc),
+                    stream_kind=stream_kind,
+                )
+            session.commit()
+        return tuple(results)
+
+    def prune_raw_events_now(self, *, stream_kind: str) -> None:
+        """Apply raw retention outside the critical ingest path."""
+        now = datetime.now(timezone.utc)
+        with self.sessionmaker() as session:
+            prune_raw_events(
+                session,
+                config=self.config,
+                retention_minutes=self.config.raw_retention_minutes,
+                retention_limit=self.config.raw_retention_limit,
+                now=now,
+                stream_kind=stream_kind,
+            )
+            session.commit()
+
+    def _find_order_by_client_id_in_session(
+        self,
+        session: Session,
+        client_order_id: str | None,
+    ) -> ExchangeOrder | None:
+        if not client_order_id:
+            return None
+        stmt = (
+            select(ExchangeOrder)
+            .where(
+                ExchangeOrder.exchange == self.config.exchange,
+                ExchangeOrder.environment == self.config.environment,
+                ExchangeOrder.market_type == self.config.market_type,
+                ExchangeOrder.client_order_id == client_order_id,
+            )
+            .order_by(ExchangeOrder.local_timestamp.desc(), ExchangeOrder.id.desc())
+        )
+        return session.execute(stmt).scalars().first()
+
+    def _ensure_order_in_session(
+        self,
+        session: Session,
+        order: OrderWrite,
+        *,
+        now: datetime,
+    ) -> ExchangeOrder:
+        row = find_order(session, self.config, order.exchange_order_id)
+        if row is None and order.client_order_id is not None:
+            row = self._find_order_by_client_id_in_session(session, order.client_order_id)
+        if row is None:
+            row = ExchangeOrder(
+                local_uuid=str(uuid4()),
+                exchange=self.config.exchange,
+                environment=self.config.environment,
+                market_type=self.config.market_type,
+                account_scope=self.config.account_scope,
+                symbol=order.symbol,
+                exchange_order_id=order.exchange_order_id,
+                client_order_id=order.client_order_id,
+                side=order.side,
+                order_type=order.order_type,
+                status=order.status,
+                price=order.price,
+                quantity=order.quantity,
+                filled_quantity=order.filled_quantity,
+                reduce_only=order.reduce_only,
+                raw_payload=order.raw_payload or {},
+                source_timestamp=order.source_timestamp,
+                local_timestamp=now,
+            )
+            session.add(row)
+            return row
+        row.status = _prefer_known(order.status, row.status)
+        row.side = _prefer_known(order.side, row.side)
+        row.order_type = _prefer_known(order.order_type, row.order_type)
+        row.symbol = _prefer_known(order.symbol, row.symbol)
+        row.client_order_id = order.client_order_id or row.client_order_id
+        row.exchange_order_id = order.exchange_order_id or row.exchange_order_id
+        row.filled_quantity = max(row.filled_quantity, order.filled_quantity)
+        row.quantity = max(row.quantity, order.quantity)
+        row.price = order.price if order.price is not None else row.price
+        row.source_timestamp = order.source_timestamp or row.source_timestamp
+        row.raw_payload = _merge_raw_payload(row.raw_payload, order.raw_payload)
+        row.local_timestamp = now
+        return row
+
+    def _record_fill_in_session(
+        self,
+        session: Session,
+        fill: FillWrite,
+        *,
+        now: datetime,
+    ) -> ExchangeFill:
+        existing = find_fill(session, self.config, fill.exchange_fill_id)
+        if existing is not None:
+            return existing
+        row = ExchangeFill(
+            local_uuid=str(uuid4()),
+            order_id=fill.order_id,
+            exchange=self.config.exchange,
+            exchange_fill_id=fill.exchange_fill_id,
+            price=fill.price,
+            quantity=fill.quantity,
+            fee=fill.fee,
+            fee_currency=fill.fee_currency,
+            liquidity_role=fill.liquidity_role,
+            raw_payload=fill.raw_payload or {},
+            source_timestamp=fill.source_timestamp,
+            local_timestamp=now,
+        )
+        session.add(row)
+        return row
+
+    def _record_fill_event_in_session(
+        self,
+        session: Session,
+        event: FillEvent,
+        *,
+        now: datetime,
+    ) -> ExchangeFill:
+        order = self._ensure_order_in_session(
+            session,
+            OrderWrite(
+                symbol=event.symbol,
+                side=event.side,
+                order_type=event.order_type,
+                status="filled",
+                quantity=event.quantity,
+                exchange_order_id=event.exchange_order_id,
+                client_order_id=event.client_order_id,
+                filled_quantity=event.quantity,
+                raw_payload=event.raw_payload,
+                source_timestamp=event.source_timestamp,
+            ),
+            now=now,
+        )
+        session.flush()
+        return self._record_fill_in_session(
+            session,
+            FillWrite(
+                order_id=order.id,
+                exchange_fill_id=event.exchange_fill_id,
+                price=event.price,
+                quantity=event.quantity,
+                fee=event.fee,
+                fee_currency=event.fee_currency,
+                liquidity_role=event.liquidity_role,
+                raw_payload=event.raw_payload,
+                source_timestamp=event.source_timestamp,
+            ),
+            now=now,
+        )
+
+    def _record_balance_in_session(
+        self,
+        session: Session,
+        balance: BalanceWrite,
+        *,
+        now: datetime,
+    ) -> AccountBalance:
+        row = AccountBalance(
+            exchange=self.config.exchange,
+            environment=self.config.environment,
+            account_scope=self.config.account_scope,
+            asset=balance.asset,
+            available=balance.available,
+            locked=balance.locked,
+            total=balance.total,
+            raw_payload=balance.raw_payload or {},
+            source_timestamp=balance.source_timestamp,
+            local_timestamp=now,
+        )
+        session.add(row)
+        return row
+
+    def _record_position_in_session(
+        self,
+        session: Session,
+        position: PositionWrite,
+        *,
+        now: datetime,
+    ) -> AccountPosition:
+        row = AccountPosition(
+            exchange=self.config.exchange,
+            environment=self.config.environment,
+            market_type=self.config.market_type,
+            account_scope=self.config.account_scope,
+            symbol=position.symbol,
+            side=position.side,
+            size=position.size,
+            entry_price=position.entry_price,
+            leverage=position.leverage,
+            liquidation_price=position.liquidation_price,
+            available_margin=position.available_margin,
+            maintenance_margin=position.maintenance_margin,
+            maintenance_margin_buffer=position.maintenance_margin_buffer,
+            funding_rate=position.funding_rate,
+            raw_payload=position.raw_payload or {},
+            source_timestamp=position.source_timestamp,
+            local_timestamp=now,
+        )
+        session.add(row)
+        return row
+
+    def _record_raw_event_in_session(
+        self,
+        session: Session,
+        message: JsonMapT,
+        *,
+        stream_kind: str,
+        received_at: datetime,
+        prune_raw: bool,
+    ) -> RawExchangeEvent:
+        event_type = str(message.get("feed") or message.get("event") or "unknown")
+        payload = dict(message)
+        source_timestamp = raw_event_source_timestamp(payload)
+        previous = (
+            session.execute(
+                select(RawExchangeEvent)
+                .where(
+                    RawExchangeEvent.exchange == self.config.exchange,
+                    RawExchangeEvent.environment == self.config.environment,
+                    RawExchangeEvent.stream_kind == stream_kind,
+                    RawExchangeEvent.event_type == event_type,
+                )
+                .order_by(RawExchangeEvent.received_at.desc(), RawExchangeEvent.id.desc())
+            )
+            .scalars()
+            .first()
+        )
+        if previous is not None and previous.payload == payload:
+            previous.duplicate_count = int(previous.duplicate_count or 0) + 1
+            previous.last_seen_at = received_at
+            if prune_raw:
+                prune_raw_events(
+                    session,
+                    config=self.config,
+                    retention_minutes=self.config.raw_retention_minutes,
+                    retention_limit=self.config.raw_retention_limit,
+                    now=received_at,
+                    stream_kind=stream_kind,
+                )
+            return previous
+        row = RawExchangeEvent(
+            exchange=self.config.exchange,
+            environment=self.config.environment,
+            market_type=self.config.market_type,
+            account_scope=self.config.account_scope,
+            symbol=raw_event_symbol(payload),
+            stream_kind=stream_kind,
+            event_type=event_type,
+            correlation_id=raw_event_correlation_id(payload),
+            exchange_sequence=optional_str(payload.get("seq")),
+            payload=payload,
+            source_timestamp=source_timestamp,
+            duplicate_count=0,
+            last_seen_at=received_at,
+            received_at=received_at,
+            created_at=received_at,
+        )
+        session.add(row)
+        if prune_raw:
+            prune_raw_events(
+                session,
+                config=self.config,
+                retention_minutes=self.config.raw_retention_minutes,
+                retention_limit=self.config.raw_retention_limit,
+                now=received_at,
+                stream_kind=stream_kind,
+            )
+        return row
+
+    def _record_ingest_audit_in_session(
+        self,
+        session: Session,
+        *,
+        message: JsonMapT,
+        feed: str,
+        stream_kind: str,
+        is_critical: bool,
+        source_timestamp: datetime | None,
+        received_at: datetime,
+        raw_committed_at: datetime,
+        normalized_committed_at: datetime,
+        row_count: int,
+        error_text: str | None,
+    ) -> None:
+        session.add(
+            PrivateIngestAudit(
+                exchange=self.config.exchange,
+                environment=self.config.environment,
+                market_type=self.config.market_type,
+                account_scope=self.config.account_scope,
+                stream_kind=stream_kind,
+                feed=feed,
+                is_critical=is_critical,
+                symbol=raw_event_symbol(message),
+                event_type=str(message.get("event") or message.get("feed") or "unknown"),
+                correlation_id=raw_event_correlation_id(message),
+                client_order_id=optional_str(
+                    first_present(message, "cli_ord_id", "cliOrdId")
+                ),
+                exchange_order_id=optional_str(
+                    first_present(message, "order_id", "orderId")
+                ),
+                source_timestamp=source_timestamp,
+                received_at=received_at,
+                raw_committed_at=raw_committed_at,
+                normalized_committed_at=normalized_committed_at,
+                row_count=row_count,
+                error_text=error_text,
+            )
+        )
+
     def record_connection_status(
         self,
         stream_kind: str,
@@ -301,119 +853,34 @@ class AccountStateStore:
 
     def ensure_order(self, order: OrderWrite) -> ExchangeOrder:
         """Retourne l'ordre existant ou cree une ligne placeholder."""
+        now = datetime.now(timezone.utc)
         with self.sessionmaker() as session:
-            row = find_order(session, self.config, order.exchange_order_id)
-            if row is None:
-                row = ExchangeOrder(
-                    local_uuid=str(uuid4()),
-                    exchange=self.config.exchange,
-                    environment=self.config.environment,
-                    market_type=self.config.market_type,
-                    account_scope=self.config.account_scope,
-                    symbol=order.symbol,
-                    exchange_order_id=order.exchange_order_id,
-                    client_order_id=order.client_order_id,
-                    side=order.side,
-                    order_type=order.order_type,
-                    status=order.status,
-                    price=order.price,
-                    quantity=order.quantity,
-                    filled_quantity=order.filled_quantity,
-                    reduce_only=order.reduce_only,
-                    raw_payload=order.raw_payload or {},
-                    source_timestamp=order.source_timestamp,
-                    local_timestamp=datetime.now(timezone.utc),
-                )
-                session.add(row)
-            else:
-                row.status = _prefer_known(order.status, row.status)
-                row.side = _prefer_known(order.side, row.side)
-                row.order_type = _prefer_known(order.order_type, row.order_type)
-                row.symbol = _prefer_known(order.symbol, row.symbol)
-                row.client_order_id = order.client_order_id or row.client_order_id
-                row.filled_quantity = max(row.filled_quantity, order.filled_quantity)
-                row.quantity = max(row.quantity, order.quantity)
-                row.price = order.price if order.price is not None else row.price
-                row.source_timestamp = order.source_timestamp or row.source_timestamp
-                row.raw_payload = _merge_raw_payload(row.raw_payload, order.raw_payload)
-                row.local_timestamp = datetime.now(timezone.utc)
+            row = self._ensure_order_in_session(session, order, now=now)
             session.commit()
-            session.refresh(row)
             return row
 
     def record_fill(self, fill: FillWrite) -> ExchangeFill:
         """Persiste une execution normalisee."""
+        now = datetime.now(timezone.utc)
         with self.sessionmaker() as session:
-            existing = find_fill(session, self.config, fill.exchange_fill_id)
-            if existing is not None:
-                return existing
-            row = ExchangeFill(
-                local_uuid=str(uuid4()),
-                order_id=fill.order_id,
-                exchange=self.config.exchange,
-                exchange_fill_id=fill.exchange_fill_id,
-                price=fill.price,
-                quantity=fill.quantity,
-                fee=fill.fee,
-                fee_currency=fill.fee_currency,
-                liquidity_role=fill.liquidity_role,
-                raw_payload=fill.raw_payload or {},
-                source_timestamp=fill.source_timestamp,
-                local_timestamp=datetime.now(timezone.utc),
-            )
-            session.add(row)
+            row = self._record_fill_in_session(session, fill, now=now)
             session.commit()
-            session.refresh(row)
             return row
 
     def record_fill_event(self, event: FillEvent) -> ExchangeFill:
         """Persiste un fill en creant l'ordre local si necessaire."""
-        order = self.ensure_order(
-            OrderWrite(
-                symbol=event.symbol,
-                side=event.side,
-                order_type=event.order_type,
-                status="filled",
-                quantity=event.quantity,
-                exchange_order_id=event.exchange_order_id,
-                client_order_id=event.client_order_id,
-                filled_quantity=event.quantity,
-                raw_payload=event.raw_payload,
-                source_timestamp=event.source_timestamp,
-            )
-        )
-        return self.record_fill(
-            FillWrite(
-                order_id=order.id,
-                exchange_fill_id=event.exchange_fill_id,
-                price=event.price,
-                quantity=event.quantity,
-                fee=event.fee,
-                fee_currency=event.fee_currency,
-                liquidity_role=event.liquidity_role,
-                raw_payload=event.raw_payload,
-                source_timestamp=event.source_timestamp,
-            )
-        )
+        now = datetime.now(timezone.utc)
+        with self.sessionmaker() as session:
+            row = self._record_fill_event_in_session(session, event, now=now)
+            session.commit()
+            return row
 
     def record_balance(self, balance: BalanceWrite) -> AccountBalance:
         """Persiste un solde normalise."""
+        now = datetime.now(timezone.utc)
         with self.sessionmaker() as session:
-            row = AccountBalance(
-                exchange=self.config.exchange,
-                environment=self.config.environment,
-                account_scope=self.config.account_scope,
-                asset=balance.asset,
-                available=balance.available,
-                locked=balance.locked,
-                total=balance.total,
-                raw_payload=balance.raw_payload or {},
-                source_timestamp=balance.source_timestamp,
-                local_timestamp=datetime.now(timezone.utc),
-            )
-            session.add(row)
+            row = self._record_balance_in_session(session, balance, now=now)
             session.commit()
-            session.refresh(row)
             return row
 
     def latest_balance_by_asset(self) -> dict[str, tuple[float, float, float]]:
@@ -437,98 +904,31 @@ class AccountStateStore:
 
     def record_position(self, position: PositionWrite) -> AccountPosition:
         """Persiste une position normalisee."""
+        now = datetime.now(timezone.utc)
         with self.sessionmaker() as session:
-            row = AccountPosition(
-                exchange=self.config.exchange,
-                environment=self.config.environment,
-                market_type=self.config.market_type,
-                account_scope=self.config.account_scope,
-                symbol=position.symbol,
-                side=position.side,
-                size=position.size,
-                entry_price=position.entry_price,
-                leverage=position.leverage,
-                liquidation_price=position.liquidation_price,
-                available_margin=position.available_margin,
-                maintenance_margin=position.maintenance_margin,
-                maintenance_margin_buffer=position.maintenance_margin_buffer,
-                funding_rate=position.funding_rate,
-                raw_payload=position.raw_payload or {},
-                source_timestamp=position.source_timestamp,
-                local_timestamp=datetime.now(timezone.utc),
-            )
-            session.add(row)
+            row = self._record_position_in_session(session, position, now=now)
             session.commit()
-            session.refresh(row)
             return row
 
     def record_raw_event(
-        self, message: JsonMapT, stream_kind: str = "private_ws"
+        self,
+        message: JsonMapT,
+        stream_kind: str = "private_ws",
+        *,
+        received_at: datetime | None = None,
+        prune_raw: bool = True,
     ) -> RawExchangeEvent:
         """Persist the exchange-native event before any normalized mapping."""
-        event_type = str(message.get("feed") or message.get("event") or "unknown")
-        payload = dict(message)
-        source_timestamp = parse_kraken_time(
-            first_present(payload, "timestamp", "time", "last_update_time")
-        )
-        now = datetime.now(timezone.utc)
+        now = received_at or datetime.now(timezone.utc)
         with self.sessionmaker() as session:
-            previous = (
-                session.execute(
-                    select(RawExchangeEvent)
-                    .where(
-                        RawExchangeEvent.exchange == self.config.exchange,
-                        RawExchangeEvent.environment == self.config.environment,
-                        RawExchangeEvent.stream_kind == stream_kind,
-                        RawExchangeEvent.event_type == event_type,
-                    )
-                    .order_by(RawExchangeEvent.received_at.desc(), RawExchangeEvent.id.desc())
-                )
-                .scalars()
-                .first()
-            )
-            if previous is not None and previous.payload == payload:
-                previous.duplicate_count = int(previous.duplicate_count or 0) + 1
-                previous.last_seen_at = now
-                prune_raw_events(
-                    session,
-                    config=self.config,
-                    retention_minutes=self.config.raw_retention_minutes,
-                    retention_limit=self.config.raw_retention_limit,
-                    now=now,
-                    stream_kind=stream_kind,
-                )
-                session.commit()
-                session.refresh(previous)
-                return previous
-            row = RawExchangeEvent(
-                exchange=self.config.exchange,
-                environment=self.config.environment,
-                market_type=self.config.market_type,
-                account_scope=self.config.account_scope,
-                symbol=raw_event_symbol(payload),
-                stream_kind=stream_kind,
-                event_type=event_type,
-                correlation_id=raw_event_correlation_id(payload),
-                exchange_sequence=optional_str(payload.get("seq")),
-                payload=payload,
-                source_timestamp=source_timestamp,
-                duplicate_count=0,
-                last_seen_at=now,
-                received_at=now,
-                created_at=now,
-            )
-            session.add(row)
-            prune_raw_events(
+            row = self._record_raw_event_in_session(
                 session,
-                config=self.config,
-                retention_minutes=self.config.raw_retention_minutes,
-                retention_limit=self.config.raw_retention_limit,
-                now=now,
+                message,
                 stream_kind=stream_kind,
+                received_at=now,
+                prune_raw=prune_raw,
             )
             session.commit()
-            session.refresh(row)
             return row
 
     def latest_status(self, stream_kind: str = "private_ws") -> dict[str, object]:
@@ -561,12 +961,22 @@ class KrakenFuturesPrivateStream:
         config: AccountStreamConfig,
         store: AccountStateStore,
         credentials: KrakenFuturesCredentials,
+        profile: PrivateStreamProfile | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.credentials = credentials
         self.logger = setup_logging(config.log_level)
+        self.profile = profile or PrivateStreamProfile(
+            name="default",
+            stream_kind="private_ws",
+            feeds=config.feeds,
+            is_critical=True,
+            health_aliases=(),
+        )
         self._running = True
+        self._maintenance_task: asyncio.Task[None] | None = None
+        self._ingest_task: asyncio.Task[None] | None = None
         self._last_balances: dict[str, tuple[float, float, float]] = (
             self.store.latest_balance_by_asset()
         )
@@ -578,11 +988,13 @@ class KrakenFuturesPrivateStream:
     async def run(self) -> None:
         """Tourne en continu avec reconnexion conservative."""
         self.logger.info(
-            "kraken_account starting env=%s db=%s ws=%s rest=%s",
+            "kraken_account starting env=%s db=%s ws=%s rest=%s profile=%s feeds=%s",
             self.config.environment,
             self.config.db_url,
             self.config.ws_url,
             self.config.rest_url,
+            self.profile.name,
+            ",".join(self.profile.feeds),
         )
         while self._running:
             try:
@@ -592,25 +1004,18 @@ class KrakenFuturesPrivateStream:
             except Exception as exc:
                 if self._is_shutdown_error(exc):
                     self._running = False
-                    self.store.record_connection_status(
-                        "private_ws",
-                        "stopped",
-                        last_error=str(exc),
-                    )
+                    self._set_status("stopped", last_error=str(exc))
                     self.logger.info(
                         "kraken_account stopping private stream during shutdown: %s",
                         exc,
                     )
                     break
-                self.store.record_connection_status(
-                    "private_ws",
-                    "reconnecting",
-                    last_error=str(exc),
-                )
+                self._set_status("reconnecting", last_error=str(exc))
                 self.logger.warning(
-                    "kraken_account reconnecting in %ss after error: %s",
+                    "kraken_account reconnecting in %ss after error: %s profile=%s",
                     self.config.reconnect_seconds,
                     exc,
+                    self.profile.name,
                 )
                 await asyncio.sleep(self.config.reconnect_seconds)
 
@@ -628,204 +1033,316 @@ class KrakenFuturesPrivateStream:
     async def run_once(self) -> None:
         """Ouvre une session privee, challenge, subscribe, puis consomme."""
         async with websockets.connect(self.config.ws_url) as ws:
-            self.store.record_connection_status("private_ws", "connecting")
+            self._set_status("connecting")
             challenge = await request_challenge(ws, self.credentials.api_key)
             signed = sign_challenge(challenge, self.credentials.api_secret)
             for message in subscribe_messages(
-                feeds=self.config.feeds,
+                feeds=self.profile.feeds,
                 api_key=self.credentials.api_key,
                 challenge=challenge,
                 signed_challenge=signed,
             ):
                 await ws.send(json.dumps(message))
-            self.store.record_connection_status("private_ws", "subscribed")
+            self._set_status("subscribed")
             self.logger.info(
-                "kraken_account subscribed env=%s feeds=%s ws=%s",
+                "kraken_account subscribed env=%s feeds=%s ws=%s profile=%s",
                 self.config.environment,
-                ",".join(self.config.feeds),
+                ",".join(self.profile.feeds),
                 self.config.ws_url,
+                self.profile.name,
             )
+            queue: asyncio.Queue[IngestMessage] = asyncio.Queue(
+                maxsize=max(self.config.queue_maxsize, 1)
+            )
+            self._ingest_task = asyncio.create_task(self._drain_ingest_queue(queue))
+            self._maintenance_task = asyncio.create_task(self._maintenance_loop())
             last_ping = time.monotonic()
             last_heartbeat_log = time.monotonic()
-            while self._running:
-                if time.monotonic() - last_ping >= self.config.ping_seconds:
-                    await ws.ping()
-                    last_ping = time.monotonic()
-                if (
-                    time.monotonic() - last_heartbeat_log
-                    >= self.config.heartbeat_log_seconds
-                ):
-                    self.logger.info(
-                        "kraken_account heartbeat env=%s db=%s stream=private_ws",
-                        self.config.environment,
-                        self.config.db_url,
+            try:
+                while self._running:
+                    if time.monotonic() - last_ping >= self.config.ping_seconds:
+                        await ws.ping()
+                        last_ping = time.monotonic()
+                    if (
+                        time.monotonic() - last_heartbeat_log
+                        >= self.config.heartbeat_log_seconds
+                    ):
+                        self.logger.info(
+                            "kraken_account heartbeat env=%s db=%s stream=%s",
+                            self.config.environment,
+                            self.config.db_url,
+                            self.profile.stream_kind,
+                        )
+                        last_heartbeat_log = time.monotonic()
+                    try:
+                        raw_message = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    except TimeoutError:
+                        continue
+                    payload = json.loads(raw_message)
+                    event = payload.get("event")
+                    if event == "heartbeat":
+                        self._set_status("healthy")
+                        continue
+                    await queue.put(
+                        IngestMessage(
+                            payload=payload,
+                            received_at=datetime.now(timezone.utc),
+                        )
                     )
-                    last_heartbeat_log = time.monotonic()
-                try:
-                    raw_message = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                except TimeoutError:
-                    continue
-                self.handle_message(json.loads(raw_message))
+            finally:
+                await self._cancel_worker_tasks()
 
     def stop(self) -> None:
         """Demande l'arret apres le message courant."""
         self._running = False
 
     def handle_message(self, message: JsonMapT) -> None:
-        """Mappe un message Kraken Futures prive en lignes normalisees."""
-        feed = str(message.get("feed", ""))
-        event = message.get("event")
-        if event == "heartbeat":
-            self.store.record_connection_status("private_ws", "healthy")
+        """Compatibility hook used by tests and single-message tooling."""
+        payload = dict(message)
+        if payload.get("event") == "heartbeat":
+            self._set_status("healthy")
             return
+        self._process_message(
+            IngestMessage(
+                payload=payload,
+                received_at=datetime.now(timezone.utc),
+            )
+        )
+
+    async def _cancel_worker_tasks(self) -> None:
+        tasks = [task for task in (self._ingest_task, self._maintenance_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._ingest_task = None
+        self._maintenance_task = None
+
+    async def _maintenance_loop(self) -> None:
+        interval = max(1, self.config.maintenance_seconds)
+        while self._running:
+            await asyncio.sleep(interval)
+            self.store.prune_raw_events_now(stream_kind=self.profile.stream_kind)
+
+    async def _drain_ingest_queue(self, queue: asyncio.Queue[IngestMessage]) -> None:
+        if self.profile.is_critical:
+            await self._drain_critical_queue(queue)
+            return
+        await self._drain_account_queue(queue)
+
+    async def _drain_critical_queue(self, queue: asyncio.Queue[IngestMessage]) -> None:
+        while self._running:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=1.0)
+            except TimeoutError:
+                continue
+            self._process_message(item)
+
+    async def _drain_account_queue(self, queue: asyncio.Queue[IngestMessage]) -> None:
+        pending: deque[IngestMessage] = deque()
+        batch_wait = max(0.05, self.config.account_batch_max_wait_seconds)
+        batch_limit = max(1, self.config.account_batch_max_rows)
+        while self._running:
+            timeout = batch_wait if pending else 1.0
+            timed_out = False
+            try:
+                pending.append(await asyncio.wait_for(queue.get(), timeout=timeout))
+            except TimeoutError:
+                timed_out = True
+            if not pending:
+                continue
+            if not timed_out and len(pending) < batch_limit:
+                continue
+            batch = tuple(pending)
+            pending.clear()
+            for result in self.store.ingest_message_batch(
+                batch,
+                stream_kind=self.profile.stream_kind,
+                is_critical=False,
+                prune_raw=False,
+            ):
+                self._log_ingest_result(result)
+            self._set_status("healthy")
+
+    def _process_message(self, item: IngestMessage) -> None:
+        payload = item.payload
+        event = payload.get("event")
+        feed = str(payload.get("feed", ""))
         if event == "subscribed":
-            self.store.record_raw_event(message)
-            self.store.record_connection_status("private_ws", "healthy")
+            self.store.record_raw_event(
+                payload,
+                stream_kind=self.profile.stream_kind,
+                received_at=item.received_at,
+                prune_raw=False,
+            )
+            self._set_status("healthy")
             return
         if event == "error":
-            self.store.record_raw_event(message)
-            self.store.record_connection_status(
-                "private_ws", "error", last_error=str(message.get("message", "error"))
+            self.store.record_raw_event(
+                payload,
+                stream_kind=self.profile.stream_kind,
+                received_at=item.received_at,
+                prune_raw=False,
             )
+            self._set_status("error", last_error=str(payload.get("message", "error")))
             return
-        self.store.record_raw_event(message)
         try:
-            if feed.startswith("open_orders"):
-                orders = iter_order_payloads(message)
-                if feed.endswith("snapshot"):
-                    self.logger.info(
-                        "kraken_account private_snapshot feed=%s rows=%d",
-                        feed,
-                        len(orders),
-                    )
-                for order in orders:
-                    mapped = map_order(order)
-                    persisted = self.store.ensure_order(mapped)
-                    if not feed.endswith("snapshot"):
-                        reason = optional_str(order.get("reason")) or "-"
-                        stop_price = first_float(order, "stop_price", "stopPrice")
-                        reduce_only = bool(
-                            order.get("reduce_only") or order.get("reduceOnly") or False
-                        )
-                        self.logger.info(
-                            "kraken_account order_event feed=%s symbol=%s order_id=%s client_id=%s side=%s type=%s status=%s qty=%.8f filled=%.8f price=%s stop_price=%s reduce_only=%s reason=%s",
-                            feed,
-                            persisted.symbol,
-                            persisted.exchange_order_id or "-",
-                            persisted.client_order_id or "-",
-                            persisted.side,
-                            persisted.order_type,
-                            persisted.status,
-                            persisted.quantity,
-                            persisted.filled_quantity,
-                            persisted.price,
-                            stop_price,
-                            reduce_only,
-                            reason,
-                        )
-            elif feed.startswith("fills"):
-                fills = iter_fill_payloads(message)
-                if feed.endswith("snapshot"):
-                    self.logger.info(
-                        "kraken_account private_snapshot feed=%s rows=%d",
-                        feed,
-                        len(fills),
-                    )
-                for fill in fills:
-                    mapped_fill = map_fill_event(fill)
-                    self.store.record_fill_event(mapped_fill)
-                    if not feed.endswith("snapshot"):
-                        self.logger.info(
-                            "kraken_account fill_event feed=%s symbol=%s order_id=%s fill_id=%s side=%s type=%s qty=%.8f price=%.8f liquidity=%s fee=%s fee_ccy=%s",
-                            feed,
-                            mapped_fill.symbol,
-                            mapped_fill.exchange_order_id or "-",
-                            mapped_fill.exchange_fill_id or "-",
-                            mapped_fill.side,
-                            mapped_fill.order_type,
-                            mapped_fill.quantity,
-                            mapped_fill.price,
-                            mapped_fill.liquidity_role or "-",
-                            mapped_fill.fee,
-                            mapped_fill.fee_currency or "-",
-                        )
-            elif feed.startswith("balances"):
-                balances = map_balances(message)
-                if feed.endswith("snapshot"):
-                    self.logger.info(
-                        "kraken_account private_snapshot feed=%s rows=%d",
-                        feed,
-                        len(balances),
-                    )
-                for balance in balances:
-                    self.store.record_balance(balance)
-                    if not feed.endswith("snapshot"):
-                        if _is_null_balance(balance):
-                            continue
-                        if not self._balance_changed(balance):
-                            continue
-                        self.logger.info(
-                            "kraken_account balance_event feed=%s asset=%s available=%.8f locked=%.8f total=%.8f",
-                            feed,
-                            balance.asset,
-                            balance.available,
-                            balance.locked,
-                            balance.total,
-                        )
-            elif feed.startswith("open_positions"):
-                positions = map_positions(message)
-                if feed.endswith("snapshot"):
-                    self.logger.info(
-                        "kraken_account private_snapshot feed=%s rows=%d",
-                        feed,
-                        len(positions),
-                    )
-                for position in positions:
-                    self.store.record_position(position)
-                    if not feed.endswith("snapshot"):
-                        if not self._position_changed(position):
-                            continue
-                        self.logger.info(
-                            "kraken_account position_event feed=%s symbol=%s side=%s size=%.8f entry_price=%s liquidation_price=%s leverage=%s",
-                            feed,
-                            position.symbol,
-                            position.side,
-                            position.size,
-                            position.entry_price,
-                            position.liquidation_price,
-                            position.leverage,
-                        )
-            elif feed.startswith(("account_log", "notifications_auth")):
-                kind = str(message.get("type") or message.get("event") or "unknown")
-                order_id = optional_str(
-                    first_present(message, "order_id", "orderId")
-                ) or "-"
-                notice = optional_str(
-                    first_present(message, "message", "reason")
-                ) or "-"
-                if _is_actionable_private_notice(kind, order_id, notice):
-                    self.logger.info(
-                        "kraken_account private_notice feed=%s kind=%s order_id=%s message=%s",
-                        feed,
-                        kind,
-                        order_id,
-                        notice,
-                    )
-                else:
-                    self.logger.debug(
-                        "kraken_account private_notice_ignored feed=%s kind=%s order_id=%s message=%s",
-                        feed,
-                        kind,
-                        order_id,
-                        notice,
-                    )
-
-        except Exception as exc:
-            self.store.record_connection_status(
-                "private_ws", "error", last_error=f"{feed}: {exc}"
+            result = self.store.ingest_message(
+                payload,
+                stream_kind=self.profile.stream_kind,
+                is_critical=self.profile.is_critical,
+                received_at=item.received_at,
+                prune_raw=False,
             )
+            self._log_ingest_result(result)
+        except Exception as exc:
+            self._set_status("error", last_error=f"{feed}: {exc}")
             raise
-        self.store.record_connection_status("private_ws", "healthy")
+        self._set_status("healthy")
+
+    def _set_status(
+        self,
+        status: str,
+        *,
+        last_error: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        targets = (self.profile.stream_kind,) + self.profile.health_aliases
+        for stream_kind in targets:
+            self.store.record_connection_status(
+                stream_kind,
+                status,
+                now=now,
+                last_error=last_error,
+            )
+
+    def _log_ingest_result(self, result: Mapping[str, object]) -> None:
+        feed = str(result.get("feed", ""))
+        if feed.startswith("open_orders"):
+            orders = cast(tuple[ExchangeOrder, ...], result.get("orders", ()))
+            if feed.endswith("snapshot"):
+                self.logger.info(
+                    "kraken_account private_snapshot feed=%s rows=%d",
+                    feed,
+                    len(orders),
+                )
+            for persisted in orders:
+                if feed.endswith("snapshot"):
+                    continue
+                stop_price = _stop_price_from_payload(persisted.raw_payload)
+                self.logger.info(
+                    "kraken_account order_event feed=%s symbol=%s order_id=%s client_id=%s side=%s type=%s status=%s qty=%.8f filled=%.8f price=%s stop_price=%s reduce_only=%s reason=%s",
+                    feed,
+                    persisted.symbol,
+                    persisted.exchange_order_id or "-",
+                    persisted.client_order_id or "-",
+                    persisted.side,
+                    persisted.order_type,
+                    persisted.status,
+                    persisted.quantity,
+                    persisted.filled_quantity,
+                    persisted.price,
+                    stop_price,
+                    persisted.reduce_only,
+                    optional_str(_reason_from_raw_payload(persisted.raw_payload)) or "-",
+                )
+            return
+        if feed.startswith("fills"):
+            fills = cast(tuple[tuple[FillEvent, ExchangeFill], ...], result.get("fills", ()))
+            if feed.endswith("snapshot"):
+                self.logger.info(
+                    "kraken_account private_snapshot feed=%s rows=%d",
+                    feed,
+                    len(fills),
+                )
+            for mapped_fill, _fill_row in fills:
+                if feed.endswith("snapshot"):
+                    continue
+                self.logger.info(
+                    "kraken_account fill_event feed=%s symbol=%s order_id=%s fill_id=%s side=%s type=%s qty=%.8f price=%.8f liquidity=%s fee=%s fee_ccy=%s",
+                    feed,
+                    mapped_fill.symbol,
+                    mapped_fill.exchange_order_id or "-",
+                    mapped_fill.exchange_fill_id or "-",
+                    mapped_fill.side,
+                    mapped_fill.order_type,
+                    mapped_fill.quantity,
+                    mapped_fill.price,
+                    mapped_fill.liquidity_role or "-",
+                    mapped_fill.fee,
+                    mapped_fill.fee_currency or "-",
+                )
+            return
+        if feed.startswith("balances"):
+            balances = cast(tuple[BalanceWrite, ...], result.get("balances", ()))
+            if feed.endswith("snapshot"):
+                self.logger.info(
+                    "kraken_account private_snapshot feed=%s rows=%d",
+                    feed,
+                    len(balances),
+                )
+            for balance in balances:
+                if feed.endswith("snapshot"):
+                    continue
+                if _is_null_balance(balance):
+                    continue
+                if not self._balance_changed(balance):
+                    continue
+                self.logger.info(
+                    "kraken_account balance_event feed=%s asset=%s available=%.8f locked=%.8f total=%.8f",
+                    feed,
+                    balance.asset,
+                    balance.available,
+                    balance.locked,
+                    balance.total,
+                )
+            return
+        if feed.startswith("open_positions"):
+            positions = cast(tuple[PositionWrite, ...], result.get("positions", ()))
+            if feed.endswith("snapshot"):
+                self.logger.info(
+                    "kraken_account private_snapshot feed=%s rows=%d",
+                    feed,
+                    len(positions),
+                )
+            for position in positions:
+                if feed.endswith("snapshot"):
+                    continue
+                if not self._position_changed(position):
+                    continue
+                self.logger.info(
+                    "kraken_account position_event feed=%s symbol=%s side=%s size=%.8f entry_price=%s liquidation_price=%s leverage=%s",
+                    feed,
+                    position.symbol,
+                    position.side,
+                    position.size,
+                    position.entry_price,
+                    position.liquidation_price,
+                    position.leverage,
+                )
+            return
+        if feed.startswith(("account_log", "notifications_auth")):
+            message = result.get("raw_event")
+            payload = message.payload if isinstance(message, RawExchangeEvent) else {}
+            kind = str(payload.get("type") or payload.get("event") or "unknown")
+            order_id = optional_str(first_present(payload, "order_id", "orderId")) or "-"
+            notice = optional_str(first_present(payload, "message", "reason")) or "-"
+            if _is_actionable_private_notice(kind, order_id, notice):
+                self.logger.info(
+                    "kraken_account private_notice feed=%s kind=%s order_id=%s message=%s",
+                    feed,
+                    kind,
+                    order_id,
+                    notice,
+                )
+            else:
+                self.logger.debug(
+                    "kraken_account private_notice_ignored feed=%s kind=%s order_id=%s message=%s",
+                    feed,
+                    kind,
+                    order_id,
+                    notice,
+                )
 
     def _balance_changed(self, balance: BalanceWrite) -> bool:
         current = (balance.available, balance.locked, balance.total)
@@ -844,6 +1361,66 @@ class KrakenFuturesPrivateStream:
         previous = self._last_positions.get(key)
         self._last_positions[key] = current
         return previous != current
+
+
+def stream_profiles_from_config(config: AccountStreamConfig) -> tuple[PrivateStreamProfile, ...]:
+    """Resolve run profiles for private websocket ingestion."""
+    profile = config.ingest_profile.strip().lower()
+    if profile == "all":
+        return (
+            PrivateStreamProfile(
+                name="all",
+                stream_kind="private_ws",
+                feeds=config.feeds,
+                is_critical=True,
+            ),
+        )
+    if profile == "critical":
+        return (
+            PrivateStreamProfile(
+                name="critical",
+                stream_kind="private_ws",
+                feeds=config.critical_feeds,
+                is_critical=True,
+            ),
+        )
+    if profile == "account":
+        return (
+            PrivateStreamProfile(
+                name="account",
+                stream_kind="private_ws_account",
+                feeds=config.account_feeds,
+                is_critical=False,
+            ),
+        )
+    return (
+        PrivateStreamProfile(
+            name="critical",
+            stream_kind="private_ws_critical",
+            feeds=config.critical_feeds,
+            is_critical=True,
+            health_aliases=("private_ws",),
+        ),
+        PrivateStreamProfile(
+            name="account",
+            stream_kind="private_ws_account",
+            feeds=config.account_feeds,
+            is_critical=False,
+        ),
+    )
+
+
+async def run_private_stream_group(streams: tuple[KrakenFuturesPrivateStream, ...]) -> None:
+    tasks = [asyncio.create_task(stream.run()) for stream in streams]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for stream in streams:
+            stream.stop()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class KrakenFuturesRestReconciler:
@@ -1368,10 +1945,16 @@ def count_private_rows(session: Session) -> dict[str, object]:
                 select(func.count()).select_from(RawExchangeEvent)
             ).scalar_one()
         ),
+        "ingest_audit_count": int(
+            session.execute(
+                select(func.count()).select_from(PrivateIngestAudit)
+            ).scalar_one()
+        ),
         "latest_raw_event_at": latest_iso(session, RawExchangeEvent.received_at),
         "latest_order_at": latest_iso(session, ExchangeOrder.local_timestamp),
         "latest_fill_at": latest_iso(session, ExchangeFill.local_timestamp),
         "latest_position_at": latest_iso(session, AccountPosition.local_timestamp),
+        "latest_ingest_audit_at": latest_iso(session, PrivateIngestAudit.received_at),
     }
 
 
@@ -1535,6 +2118,38 @@ def raw_event_symbol(payload: JsonMapT) -> str | None:
     return None
 
 
+def raw_event_source_timestamp(payload: JsonMapT) -> datetime | None:
+    """Best-effort exchange timestamp extraction for raw private events."""
+    feed = str(payload.get("feed") or "")
+    if feed.startswith("fills"):
+        fills = iter_fill_payloads(payload)
+        if fills:
+            return parse_kraken_time(
+                first_present(fills[0], "time", "timestamp", "fill_time")
+            )
+    if feed.startswith("open_orders"):
+        orders = iter_order_payloads(payload)
+        if orders:
+            return parse_kraken_time(
+                first_present(
+                    orders[0],
+                    "last_update_time",
+                    "lastUpdateTime",
+                    "time",
+                    "timestamp",
+                )
+            )
+    if feed.startswith("open_positions"):
+        positions = extract_list(payload, "positions", "openPositions")
+        if positions:
+            return parse_kraken_time(
+                first_present(positions[0], "time", "timestamp", "fill_time")
+            )
+    return parse_kraken_time(
+        first_present(payload, "timestamp", "time", "last_update_time")
+    )
+
+
 def raw_event_correlation_id(payload: JsonMapT) -> str | None:
     direct = optional_str(
         payload.get("order_id")
@@ -1555,6 +2170,31 @@ def raw_event_correlation_id(payload: JsonMapT) -> str | None:
                     if nested:
                         return nested
     return optional_str(payload.get("seq"))
+
+
+def _reason_from_raw_payload(payload: object) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    reason = payload.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return reason
+    return None
+
+
+def _stop_price_from_payload(payload: object) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("stop_price", "stopPrice", "stopPx", "triggerPrice"):
+        value = payload.get(key)
+        if isinstance(value, (int, float, str)):
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    trigger = payload.get("orderTrigger")
+    if isinstance(trigger, dict):
+        return _stop_price_from_payload(trigger)
+    return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1614,6 +2254,12 @@ def build_parser() -> argparse.ArgumentParser:
             "--stream-kind", default="private_ws", help="Stream kind for status queries."
         )
         cmd.add_argument(
+            "--ingest-profile",
+            choices=("split", "all", "critical", "account"),
+            default=AccountStreamConfig.ingest_profile,
+            help="Run-mode feed profile for private websocket ingestion.",
+        )
+        cmd.add_argument(
             "--log-level",
             default=AccountStreamConfig.log_level,
             help="Logging verbosity.",
@@ -1646,6 +2292,7 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
         rest_url=args.rest_url or env_cfg.rest_url,
         api_key_env=args.api_key_env or env_cfg.api_key_env,
         api_secret_env=args.api_secret_env or env_cfg.api_secret_env,
+        ingest_profile=args.ingest_profile,
         raw_retention_minutes=args.raw_retention_minutes,
         raw_retention_limit=args.raw_retention_limit,
         log_level=args.log_level,
@@ -1666,16 +2313,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         stats = KrakenFuturesRestReconciler(config, store, credentials).reconcile_once()
         print(json.dumps(stats, sort_keys=True))
         return 0
-    stream = KrakenFuturesPrivateStream(config, store, credentials)
+    profiles = stream_profiles_from_config(config)
+    streams = tuple(
+        KrakenFuturesPrivateStream(config, store, credentials, profile=profile)
+        for profile in profiles
+    )
     try:
-        asyncio.run(stream.run())
+        asyncio.run(run_private_stream_group(streams))
     except KeyboardInterrupt:
-        stream.stop()
-        store.record_connection_status(
-            "private_ws",
-            "stopped",
-            last_error="stopped by operator",
-        )
+        for stream in streams:
+            stream.stop()
+        for profile in profiles:
+            for stream_kind in (profile.stream_kind,) + profile.health_aliases:
+                store.record_connection_status(
+                    stream_kind,
+                    "stopped",
+                    last_error="stopped by operator",
+                )
         print("private account stream stopped by operator")
         return 0
     return 0
