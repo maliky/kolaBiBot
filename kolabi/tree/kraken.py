@@ -73,6 +73,8 @@ class KrakenConfig:
     trace_ws_format: str = "compact"
     trace_ws_max_lines: int = 0
     ticker_interval_seconds: float = 2.0
+    ticker_timeout_seconds: float = 1.0
+    maintenance_seconds: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,7 @@ class KrakenTree:
         self._rest_session = requests.Session()
         self._last_ticker_fetch_at: datetime | None = None
         self._latest_ticker_prices: TickerPrices | None = None
+        self._last_maintenance_at: datetime | None = None
 
     async def run(self) -> None:
         """Tourne en continu et relance la session websocket apres erreur."""
@@ -208,7 +211,9 @@ class KrakenTree:
                     self.handle_message(raw_message)
                 except TimeoutError:
                     pass
-                self.flush_due(datetime.now(timezone.utc))
+                now = datetime.now(timezone.utc)
+                self.flush_due(now)
+                self._maintenance_due(now)
 
     def stop(self) -> None:
         """Demande l'arret apres la reception websocket courante."""
@@ -241,6 +246,9 @@ class KrakenTree:
         self,
         message: dict[str, object],
         stream_kind: str = "public_ws",
+        *,
+        prune_raw: bool = False,
+        received_at: datetime | None = None,
     ) -> RawExchangeEvent:
         """Persiste le payload brut public avec collapse des doublons consecutifs."""
         event_type = str(message.get("feed") or message.get("event") or "unknown")
@@ -248,7 +256,7 @@ class KrakenTree:
         source_timestamp = parse_kraken_time(
             first_present(payload, "timestamp", "time", "last_update_time")
         )
-        now = datetime.now(timezone.utc)
+        now = received_at or datetime.now(timezone.utc)
         with self.sessionmaker() as session:
             previous = (
                 session.execute(
@@ -267,14 +275,15 @@ class KrakenTree:
             if previous is not None and previous.payload == payload:
                 previous.duplicate_count = int(previous.duplicate_count or 0) + 1
                 previous.last_seen_at = now
-                prune_raw_events(
-                    session,
-                    config=self.config,
-                    retention_minutes=self.config.raw_retention_minutes,
-                    retention_limit=self.config.raw_retention_limit,
-                    now=now,
-                    stream_kind=stream_kind,
-                )
+                if prune_raw:
+                    prune_raw_events(
+                        session,
+                        config=self.config,
+                        retention_minutes=self.config.raw_retention_minutes,
+                        retention_limit=self.config.raw_retention_limit,
+                        now=now,
+                        stream_kind=stream_kind,
+                    )
                 session.commit()
                 session.refresh(previous)
                 return previous
@@ -297,14 +306,15 @@ class KrakenTree:
                 created_at=now,
             )
             session.add(row)
-            prune_raw_events(
-                session,
-                config=self.config,
-                retention_minutes=self.config.raw_retention_minutes,
-                retention_limit=self.config.raw_retention_limit,
-                now=now,
-                stream_kind=stream_kind,
-            )
+            if prune_raw:
+                prune_raw_events(
+                    session,
+                    config=self.config,
+                    retention_minutes=self.config.raw_retention_minutes,
+                    retention_limit=self.config.raw_retention_limit,
+                    now=now,
+                    stream_kind=stream_kind,
+                )
             session.commit()
             session.refresh(row)
             return row
@@ -457,7 +467,7 @@ class KrakenTree:
     def _fetch_ticker_prices(self) -> TickerPrices:
         response = self._rest_session.get(
             f"{self.config.rest_url.rstrip('/')}/tickers/{self.config.pair}",
-            timeout=5.0,
+            timeout=max(0.2, self.config.ticker_timeout_seconds),
         )
         response.raise_for_status()
         payload = response.json()
@@ -482,6 +492,21 @@ class KrakenTree:
                 first_present(ticker_map, "indexPrice", "index_price", "indicativeSettlePrice")
             ),
         )
+
+    def _maintenance_due(self, now: datetime) -> None:
+        if not is_due(self._last_maintenance_at, now, self.config.maintenance_seconds):
+            return
+        self._last_maintenance_at = now
+        with self.sessionmaker() as session:
+            prune_raw_events(
+                session,
+                config=self.config,
+                retention_minutes=self.config.raw_retention_minutes,
+                retention_limit=self.config.raw_retention_limit,
+                now=now,
+                stream_kind="public_ws",
+            )
+            session.commit()
 
     def log_due(self, now: datetime, snapshot: MarketSnapshot | None) -> None:
         """Imprime un statut compact lisible dans screen ou un log."""
@@ -713,6 +738,29 @@ def upgrade_public_schema(engine: Engine) -> None:
                     "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_identity "
                     "ON raw_exchange_events "
                     "(exchange, environment, stream_kind, event_type, correlation_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_stream_received "
+                    "ON raw_exchange_events "
+                    "(exchange, environment, stream_kind, received_at, id)"
+                )
+            )
+        if "market_snapshots" in tables:
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_market_snapshots_symbol_time "
+                    "ON market_snapshots "
+                    "(exchange, environment, market_type, symbol, local_timestamp, id)"
+                )
+            )
+        if "market_indicators" in tables:
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_market_indicators_symbol_time "
+                    "ON market_indicators "
+                    "(exchange, environment, market_type, symbol, computed_at, id)"
                 )
             )
 
@@ -1224,19 +1272,18 @@ def latest_indicator_values(
     market_type: str | None = None,
 ) -> dict[str, MarketIndicator]:
     """Retourne le dernier indicateur par nom pour un produit."""
-    stmt = (
-        select(MarketIndicator)
+    base = (
+        select(func.max(MarketIndicator.id))
         .where(MarketIndicator.exchange == exchange, MarketIndicator.symbol == pair)
-        .order_by(MarketIndicator.computed_at.desc(), MarketIndicator.id.desc())
+        .group_by(MarketIndicator.indicator_name)
     )
     if environment is not None:
-        stmt = stmt.where(MarketIndicator.environment == environment)
+        base = base.where(MarketIndicator.environment == environment)
     if market_type is not None:
-        stmt = stmt.where(MarketIndicator.market_type == market_type)
-    latest: dict[str, MarketIndicator] = {}
-    for indicator in session.execute(stmt).scalars():
-        latest.setdefault(indicator.indicator_name, indicator)
-    return latest
+        base = base.where(MarketIndicator.market_type == market_type)
+    stmt = select(MarketIndicator).where(MarketIndicator.id.in_(base))
+    rows = session.execute(stmt).scalars().all()
+    return {row.indicator_name: row for row in rows}
 
 
 def snapshot_to_status(
@@ -1384,10 +1431,22 @@ def build_parser() -> argparse.ArgumentParser:
             help="Ticker REST polling cadence used for last/mark/index prices.",
         )
         command_parser.add_argument(
+            "--ticker-timeout-seconds",
+            type=float,
+            default=KrakenConfig.ticker_timeout_seconds,
+            help="Ticker REST timeout to prevent blocking public shutdown.",
+        )
+        command_parser.add_argument(
             "--log-interval-seconds",
             type=float,
             default=KrakenConfig.log_interval_seconds,
             help="Heartbeat log cadence.",
+        )
+        command_parser.add_argument(
+            "--maintenance-seconds",
+            type=float,
+            default=KrakenConfig.maintenance_seconds,
+            help="Periodic maintenance cadence for raw-event retention.",
         )
         command_parser.add_argument(
             "--retention-minutes",
@@ -1436,7 +1495,9 @@ def config_from_args(args: argparse.Namespace) -> KrakenConfig:
         snapshot_interval_seconds=args.snapshot_interval_seconds,
         indicator_interval_seconds=args.indicator_interval_seconds,
         ticker_interval_seconds=args.ticker_interval_seconds,
+        ticker_timeout_seconds=args.ticker_timeout_seconds,
         log_interval_seconds=args.log_interval_seconds,
+        maintenance_seconds=args.maintenance_seconds,
         retention_minutes=args.retention_minutes,
         reconnect_seconds=args.reconnect_seconds,
         trace_ws=args.trace_ws,
