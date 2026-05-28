@@ -27,7 +27,12 @@ from kolabi.shared.core.runtime_types import (
     PublicBookRecord,
     PublicIndicatorRecord,
 )
-from kolabi.shared.persistence import AccountPosition, ExchangeFill, ExchangeOrder
+from kolabi.shared.persistence import (
+    AccountPosition,
+    ExchangeFill,
+    ExchangeInstrument,
+    ExchangeOrder,
+)
 from kolabi.tree.account import AccountStreamConfig, latest_connection
 from kolabi.tree.kraken import latest_indicator_values, latest_snapshot
 
@@ -43,6 +48,7 @@ class PublicMarketState:
     last_price: float | None
     mark_price: float | None
     index_price: float | None
+    tick_size: float | None
     spread: float | None
     imbalance: float | None
     avg_bid: float | None
@@ -161,6 +167,7 @@ class KrakenRuntimeStateClient:
                     last_price=None,
                     mark_price=None,
                     index_price=None,
+                    tick_size=None,
                     spread=None,
                     imbalance=None,
                     avg_bid=None,
@@ -181,6 +188,13 @@ class KrakenRuntimeStateClient:
                 self.market_type,
             )
             public_book = _public_book_record_from_snapshot(snapshot, target_symbol)
+            tick_size = _instrument_tick_size(
+                session,
+                symbol=target_symbol,
+                exchange=self.exchange,
+                environment=self.environment,
+                market_type=self.market_type,
+            )
             public_indicators = _public_indicator_records(indicators, target_symbol)
             freshest_local_time = _latest_public_timestamp(
                 snapshot.local_timestamp,
@@ -198,6 +212,7 @@ class KrakenRuntimeStateClient:
                 last_price=_indicator_value(indicators, "last_price"),
                 mark_price=_indicator_value(indicators, "mark_price"),
                 index_price=_indicator_value(indicators, "index_price"),
+                tick_size=tick_size,
                 spread=public_book.spread,
                 imbalance=public_book.imbalance,
                 avg_bid=public_book.avg_bid,
@@ -568,6 +583,31 @@ def _indicator_value(indicators: dict[str, Any], name: str) -> float | None:
         return None
     value = getattr(indicator, "value", None)
     if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _instrument_tick_size(
+    session: Session,
+    *,
+    symbol: str,
+    exchange: str,
+    environment: str,
+    market_type: str,
+) -> float | None:
+    stmt = (
+        select(ExchangeInstrument.tick_size)
+        .where(
+            ExchangeInstrument.exchange == exchange,
+            ExchangeInstrument.environment == environment,
+            ExchangeInstrument.market_type == market_type,
+            ExchangeInstrument.symbol == symbol,
+        )
+        .order_by(ExchangeInstrument.id.desc())
+        .limit(1)
+    )
+    value = session.execute(stmt).scalar_one_or_none()
+    if isinstance(value, (int, float)) and value > 0:
         return float(value)
     return None
 
