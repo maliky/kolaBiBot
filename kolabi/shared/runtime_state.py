@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from time import sleep
 from typing import Any
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.shared.core.runtime_types import (
@@ -356,6 +356,76 @@ class KrakenRuntimeStateClient:
                     continue
             records.append(_private_order_record_from_fill(fill_row, order_row))
         return tuple(records)
+
+    def fetch_private_orders_for_identities(
+        self,
+        *,
+        client_order_ids: tuple[str, ...] = (),
+        exchange_order_ids: tuple[str, ...] = (),
+        symbol: str | None = None,
+        limit: int = 400,
+    ) -> tuple[PrivateOrderRecord, ...]:
+        """Return latest private order rows matching active order identities."""
+        if not client_order_ids and not exchange_order_ids:
+            return ()
+        target_symbol = symbol or self.symbol
+        with self._account_sessionmaker() as session:
+            predicates = []
+            if client_order_ids:
+                predicates.append(ExchangeOrder.client_order_id.in_(client_order_ids))
+            if exchange_order_ids:
+                predicates.append(ExchangeOrder.exchange_order_id.in_(exchange_order_ids))
+            statement = (
+                select(ExchangeOrder)
+                .where(
+                    ExchangeOrder.exchange == self.exchange,
+                    ExchangeOrder.environment == self.environment,
+                    ExchangeOrder.market_type == self.market_type,
+                    ExchangeOrder.symbol == target_symbol,
+                    or_(*predicates),
+                )
+                .order_by(ExchangeOrder.local_timestamp.desc(), ExchangeOrder.id.desc())
+                .limit(limit)
+            )
+            rows = session.execute(statement).scalars().all()
+        return tuple(_private_order_record(row) for row in rows)
+
+    def fetch_private_fills_for_identities(
+        self,
+        *,
+        client_order_ids: tuple[str, ...] = (),
+        exchange_order_ids: tuple[str, ...] = (),
+        symbol: str | None = None,
+        limit: int = 400,
+    ) -> tuple[PrivateOrderRecord, ...]:
+        """Return latest fill-derived records matching active order identities."""
+        if not client_order_ids and not exchange_order_ids:
+            return ()
+        target_symbol = symbol or self.symbol
+        with self._account_sessionmaker() as session:
+            predicates = []
+            if client_order_ids:
+                predicates.append(ExchangeOrder.client_order_id.in_(client_order_ids))
+            if exchange_order_ids:
+                predicates.append(ExchangeOrder.exchange_order_id.in_(exchange_order_ids))
+            statement = (
+                select(ExchangeFill, ExchangeOrder)
+                .join(ExchangeOrder, ExchangeFill.order_id == ExchangeOrder.id)
+                .where(
+                    ExchangeOrder.exchange == self.exchange,
+                    ExchangeOrder.environment == self.environment,
+                    ExchangeOrder.market_type == self.market_type,
+                    ExchangeOrder.symbol == target_symbol,
+                    or_(*predicates),
+                )
+                .order_by(ExchangeFill.local_timestamp.desc(), ExchangeFill.id.desc())
+                .limit(limit)
+            )
+            rows = session.execute(statement).all()
+        return tuple(
+            _private_order_record_from_fill(fill_row, order_row)
+            for fill_row, order_row in rows
+        )
 
     def wait_until_ready(
         self,

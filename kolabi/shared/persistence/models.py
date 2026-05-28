@@ -221,6 +221,22 @@ class ExchangeOrder(Base):
         Index("ix_exchange_orders_local_uuid", "local_uuid", unique=True),
         Index("ix_exchange_orders_exchange_id", "exchange", "exchange_order_id"),
         Index("ix_exchange_orders_client_id", "exchange", "client_order_id"),
+        Index(
+            "ix_exchange_orders_symbol_cursor",
+            "exchange",
+            "environment",
+            "market_type",
+            "symbol",
+            "local_timestamp",
+            "id",
+        ),
+        Index(
+            "ix_exchange_orders_env_client",
+            "exchange",
+            "environment",
+            "market_type",
+            "client_order_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -259,6 +275,13 @@ class ExchangeFill(Base):
     __table_args__ = (
         Index("ix_exchange_fills_local_uuid", "local_uuid", unique=True),
         Index("ix_exchange_fills_exchange_id", "exchange", "exchange_fill_id"),
+        Index(
+            "ix_exchange_fills_cursor",
+            "exchange",
+            "local_timestamp",
+            "id",
+            "order_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -386,6 +409,43 @@ class RawExchangeEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
+
+
+class PrivateIngestAudit(Base):
+    """Latency and processing audit for private websocket ingestion."""
+
+    __tablename__ = "private_ingest_audits"
+    __table_args__ = (
+        Index("ix_private_ingest_audits_stream_time", "stream_kind", "received_at"),
+        Index(
+            "ix_private_ingest_audits_identity",
+            "symbol",
+            "client_order_id",
+            "exchange_order_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exchange: Mapped[str] = mapped_column(String(32), nullable=False)
+    environment: Mapped[str] = mapped_column(String(32), nullable=False)
+    market_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_scope: Mapped[str] = mapped_column(String(64), nullable=False)
+    stream_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    feed: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_critical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    symbol: Mapped[str | None] = mapped_column(String(64))
+    event_type: Mapped[str | None] = mapped_column(String(64))
+    correlation_id: Mapped[str | None] = mapped_column(String(128))
+    client_order_id: Mapped[str | None] = mapped_column(String(128))
+    exchange_order_id: Mapped[str | None] = mapped_column(String(128))
+    source_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    raw_committed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    normalized_committed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_text: Mapped[str | None] = mapped_column(String(1024))
 
 
 class ExchangeRestCall(Base):

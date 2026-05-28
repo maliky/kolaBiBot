@@ -208,7 +208,7 @@ class KrakenPublicTriggerSource:
         self,
         client: PublicRuntimeStateReader,
         *,
-        poll_seconds: float = 1.0,
+        poll_seconds: float = 0.25,
     ) -> None:
         self.client = client
         self.poll_seconds = poll_seconds
@@ -271,7 +271,7 @@ class KrakenPrivateOrderPollingSource:
         self,
         client: PrivateOrderStateReader,
         *,
-        poll_seconds: float = 1.0,
+        poll_seconds: float = 0.25,
         head_fill_reference_grace_seconds: float = _DEFAULT_HEAD_FILL_REFERENCE_GRACE_SECONDS,
     ) -> None:
         self.client = client
@@ -305,6 +305,30 @@ class KrakenPrivateOrderPollingSource:
                 after_local_id=self.after_fill_id,
                 symbol=runtime.symbol,
             )
+            active_client_ids, active_exchange_ids = self._active_identity_sets(runtime)
+            if active_client_ids or active_exchange_ids:
+                fetch_orders_by_identity = getattr(
+                    self.client, "fetch_private_orders_for_identities", None
+                )
+                if callable(fetch_orders_by_identity):
+                    identity_orders = fetch_orders_by_identity(
+                        client_order_ids=active_client_ids,
+                        exchange_order_ids=active_exchange_ids,
+                        symbol=runtime.symbol,
+                    )
+                    records = self._merge_unique_private_records(records, identity_orders)
+                fetch_fills_by_identity = getattr(
+                    self.client, "fetch_private_fills_for_identities", None
+                )
+                if callable(fetch_fills_by_identity):
+                    identity_fills = fetch_fills_by_identity(
+                        client_order_ids=active_client_ids,
+                        exchange_order_ids=active_exchange_ids,
+                        symbol=runtime.symbol,
+                    )
+                    fill_records = self._merge_unique_private_records(
+                        fill_records, identity_fills
+                    )
             candidates = tuple(self._pending_records)
             self._pending_records = []
             candidates = candidates + tuple(
@@ -369,6 +393,38 @@ class KrakenPrivateOrderPollingSource:
             if runtime.all_pairs_terminal:
                 return
             await asyncio.sleep(self.poll_seconds)
+
+    @staticmethod
+    def _active_identity_sets(runtime: RuntimeQueueLike) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        client_ids: set[str] = set()
+        exchange_ids: set[str] = set()
+        for pair_state in runtime.state.pairs.values():
+            for identity in (pair_state.head_identity, pair_state.tail_identity):
+                if identity is None:
+                    continue
+                if identity.client_order_id:
+                    client_ids.add(identity.client_order_id)
+                if identity.exchange_order_id:
+                    exchange_ids.add(identity.exchange_order_id)
+        return tuple(sorted(client_ids)), tuple(sorted(exchange_ids))
+
+    @staticmethod
+    def _merge_unique_private_records(
+        primary: tuple[PrivateOrderRecord, ...],
+        extra: tuple[PrivateOrderRecord, ...],
+    ) -> tuple[PrivateOrderRecord, ...]:
+        merged: dict[tuple[object, ...], PrivateOrderRecord] = {}
+        for record in primary + extra:
+            key = (
+                record.local_id,
+                record.exchange_order_id,
+                record.client_order_id,
+                record.local_timestamp,
+                record.status,
+                record.order_type,
+            )
+            merged[key] = record
+        return tuple(merged.values())
 
     def _with_reference_price(
         self,

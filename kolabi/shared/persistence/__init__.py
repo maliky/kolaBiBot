@@ -15,6 +15,7 @@ from .models import (
     MarketSnapshot,
     OrderEvent,
     OrderRun,
+    PrivateIngestAudit,
     RawExchangeEvent,
     TailTelemetry,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "MarketSnapshot",
     "OrderEvent",
     "OrderRun",
+    "PrivateIngestAudit",
     "RawExchangeEvent",
     "TailTelemetry",
     "get_sessionmaker",
