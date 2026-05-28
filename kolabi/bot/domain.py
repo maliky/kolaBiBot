@@ -283,6 +283,8 @@ class PairCycleState:
     last_processed_private_event_ts: datetime | None = None
     last_emitted_command_id: str | None = None
     last_emitted_command_ts: datetime | None = None
+    attempt_index: int = 1
+    completed_at: datetime | None = None
 
     @property
     def head_client_order_id(self) -> str | None:

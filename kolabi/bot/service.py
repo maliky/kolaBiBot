@@ -4,7 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Iterable, Optional, Protocol, TypedDict, cast
+from typing import Any, Callable, Iterable, Optional, Protocol, TypeVar, TypedDict, cast
 
 from kolabi.bot.indicators import (
     DummyIndicatorClient,
@@ -49,6 +49,7 @@ from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntim
 from kolabi.bot.ogun_executor import OgunExecutor
 
 _LOGGER = logging.getLogger("kola")
+_T = TypeVar("_T")
 
 
 class InstrumentRulesExchange(Protocol):
@@ -231,14 +232,13 @@ class BotService:
         if not dry_run and not simulate:
             self.start()
         for pair in pair_list:
-            kwargs = self._pair_to_kwargs(pair)
             snapshot = self.indicators.fetch_snapshot(self.config.symbol)
             run_id: Optional[int] = None
             if self.recorder:
                 run = self.recorder.start_run(pair, snapshot)
                 run_id = run.id
                 self.logger.info(f"[{pair.name}] submitted run #{run_id}")
-            del kwargs, run_id
+            del run_id
         runtime = StrategyRuntime(
             strategy=strategy,
             symbol=self.config.symbol,
@@ -315,14 +315,6 @@ class BotService:
                     f"the minimum quantity {min_qty:g} for {self.config.symbol}."
                 )
 
-    def _pair_to_kwargs(self, pair: OrderPairSpec) -> dict[str, object]:
-        """Conserve un resume local pour journaux/tests de transition."""
-        return {
-            "nameT": pair.name,
-            "side": pair.head.side.value,
-            "prix": pair.head_price,
-        }
-
     def _build_executor(self, *, simulate: bool):
         if simulate:
             return SimulatedExecutor()
@@ -334,6 +326,7 @@ class BotService:
             exchange_config=self.exchange_config,
             verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
             verify_poll_seconds=self.config.tail_verify_poll_seconds,
+            run_blocking_calls_in_thread=True,
         )
         return OgunExecutor(port)
 
@@ -349,10 +342,7 @@ class BotService:
     def _build_private_source(self, *, simulate: bool):
         if simulate or self.runtime_state is None:
             return None
-        return KrakenPrivateOrderPollingSource(
-            self.runtime_state,
-            public_client=cast(PublicRuntimeStateReader, self.runtime_state),
-        )
+        return KrakenPrivateOrderPollingSource(self.runtime_state)
 
     def _ensure_exchange_config(self) -> None:
         if self.exchange_config is not None:
@@ -376,6 +366,7 @@ class BotService:
             exchange_config=self.exchange_config,
             verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
             verify_poll_seconds=self.config.tail_verify_poll_seconds,
+            run_blocking_calls_in_thread=True,
         )
 
     def cancel_all_orders(self) -> list[OrderAck]:
@@ -384,7 +375,7 @@ class BotService:
         executor = OgunExecutor(port)
         cancelled: list[OrderAck] = []
         seen: set[str] = set()
-        for order in _safe_cancel_order_candidates(port.adapter):
+        for order in _safe_cancel_order_candidates(cast(OpenOrderReader, port.adapter)):
             identity = _extract_cancelable_order_id(order)
             if identity is None:
                 continue
@@ -483,6 +474,7 @@ class AdapterExchangePort(ExchangePort):
         exchange_config: ExchangeConfig,
         verify_timeout_seconds: float = 11.0,
         verify_poll_seconds: float = 0.5,
+        run_blocking_calls_in_thread: bool = False,
     ) -> None:
         adapter_cls = get_adapter(exchange)
         self.adapter = cast(
@@ -497,23 +489,29 @@ class AdapterExchangePort(ExchangePort):
         )
         self.verify_timeout_seconds = verify_timeout_seconds
         self.verify_poll_seconds = verify_poll_seconds
+        self.run_blocking_calls_in_thread = run_blocking_calls_in_thread
 
     async def place_head(self, command: PlaceHeadCommand) -> OrderAck:
-        return self._place(command.request)
+        return await self._call_blocking(self._place, command.request)
 
     async def place_tail(self, command: PlaceTailCommand) -> OrderAck:
-        ack = self._place(command.request)
+        ack = await self._call_blocking(self._place, command.request)
         await self._verify_tail_trigger(command.request, ack)
         return ack
 
     async def amend_head(self, command: AmendHeadCommand) -> OrderAck:
-        return self._amend_head(command.request)
+        return await self._call_blocking(self._amend_head, command.request)
 
     async def amend_tail(self, command: AmendTailCommand) -> OrderAck:
-        return self._amend_tail(command.request)
+        return await self._call_blocking(self._amend_tail, command.request)
 
     async def cancel(self, command: CancelCommand) -> OrderAck:
-        return self.adapter.cancel_order(command.request.clOrdID)
+        return await self._call_blocking(self.adapter.cancel_order, command.request.clOrdID)
+
+    async def _call_blocking(self, func: Callable[..., _T], *args: object) -> _T:
+        if self.run_blocking_calls_in_thread:
+            return await asyncio.to_thread(func, *args)
+        return func(*args)
 
     def _place(self, request: PlaceOrderCommandRequest) -> OrderAck:
         if request.orderQty is None:
@@ -553,8 +551,8 @@ class AdapterExchangePort(ExchangePort):
         last_db_orders: list[dict[str, Any]] = []
         contradictory_ack = not _ack_can_rest_as_trigger(ack)
         while True:
-            live_orders = reader.live_trigger_orders()
-            db_orders = _trigger_orders_from_private_db(reader)
+            live_orders = await self._call_blocking(reader.live_trigger_orders)
+            db_orders = await self._call_blocking(_trigger_orders_from_private_db, reader)
             last_live_orders = live_orders
             last_db_orders = db_orders
             match, source = _match_trigger_evidence(

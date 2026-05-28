@@ -31,7 +31,13 @@ from kolabi.bot.strategy_runtime import (
 )
 from kolabi.bot.tail_tracking import initial_tail_trail
 from kolabi.shared.core.models import OrderAck
-from kolabi.shared.core.runtime_types import AmendTailCommand, RuntimeCommandKind, Symbol
+from kolabi.shared.core.runtime_types import (
+    AmendTailCommand,
+    PlaceOrderCommandRequest,
+    PlaceTailCommand,
+    RuntimeCommandKind,
+    Symbol,
+)
 
 
 async def _run_runtime_for(runtime: StrategyRuntime, *, seconds: float = 0.05):
@@ -139,6 +145,68 @@ def test_strategy_runtime_live_mode_does_not_synthesise_head_played_from_ack() -
     assert followups[0].kind == EggMoveKind.HEAD_SUBMITTED
 
 
+def test_tail_submitted_followup_uses_exchange_rounded_ack_price() -> None:
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=sample_strategy()),
+        symbol="PI_XBTUSD",
+        executor=SimulatedExecutor(),
+        simulate=False,
+    )
+    command = PlaceTailCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="sell",
+            ordType="Stop",
+            orderQty=Decimal("1"),
+            stopPx=Decimal("99.49"),
+            clOrdID="CID-T",
+        ),
+    )
+
+    followups = runtime._followup_events(
+        command,
+        OrderAck(order_id="OID-T", status="New", price=99.5),
+    )
+
+    assert followups[0].reply is not None
+    assert followups[0].reply["stopPx"] == 99.5
+
+
+def test_strategy_runtime_dispatches_exchange_commands_without_blocking_loop() -> None:
+    class SlowExecutor:
+        async def execute(self, command):
+            await asyncio.sleep(0.2)
+            return OrderAck(order_id="OID", status="New", price=100.0)
+
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=sample_strategy()),
+        symbol="PI_XBTUSD",
+        executor=SlowExecutor(),
+        simulate=False,
+    )
+    event = EggMove(
+        kind=EggMoveKind.HEAD_HOOKED,
+        occurred_at=datetime.now(timezone.utc),
+        symbol="PI_XBTUSD",
+        pair_name="pair-a",
+    )
+
+    async def _run() -> bool:
+        await runtime.start()
+        await runtime.enqueue(event)
+        task = asyncio.create_task(runtime.run())
+        await asyncio.sleep(0.05)
+        command_pending = bool(runtime._inflight_commands)
+        await runtime.stop()
+        await task
+        return command_pending
+
+    assert asyncio.run(_run()) is True
+
+
 def test_strategy_runtime_waits_for_tail_after_filled_head() -> None:
     runtime = StrategyRuntime(
         strategy=StrategySpec(name="demo", pairs=sample_strategy()),
@@ -196,6 +264,7 @@ def test_public_polling_emits_market_ticks_for_living_tails() -> None:
         last_price = 102.0
         mark_price = None
         index_price = None
+        tick_size = 0.5
         recorded_at = "tick-1"
 
     class Client:
@@ -261,6 +330,7 @@ def test_public_polling_does_not_deduplicate_changed_tail_reference() -> None:
         mid_price = 102.25
         mark_price = None
         index_price = None
+        tick_size = 0.5
         recorded_at = "same-book-row"
 
         def __init__(self, last_price: float) -> None:
@@ -371,6 +441,7 @@ def test_tail_telemetry_rows_include_distance_and_last_update() -> None:
         last_price = 102.0
         mark_price = None
         index_price = None
+        tick_size = 0.5
         recorded_at = "tick-1"
 
     class Reader:
