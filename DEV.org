@@ -1371,3 +1371,71 @@ The observed non-updating tail was not only a pure reducer problem: REST audit s
 There was also a semantic split: local telemetry treated =-y S= as =src=book= while Kraken placement defaulted the stop trigger to last price. I made =S= and =S-= resolve to LastPrice, with =Sf/Sf-= for MarkPrice and =Si/Si-= for IndexPrice, so telemetry, order building, and exchange trigger mapping use the same source.
 
 State is now grounded more strictly in exchange acknowledgement: tail amend accepts update the confirmed stop from the adapter ack, rejected amend acks revert the desired stop back to the last confirmed stop. Telemetry can still show market/reference movement, but =tail_stop= should only move when the platform has accepted or confirmed the new stop.
+
+* Chronos Repeat and Logging Review 2026-05-27
+
+** Findings
+
+- Active core path is now concentrated in =StrategyRuntime -> Chronos -> Isis -> step_pair -> Horus -> Ogun=. The old =kolabi/runtime/kola= and archived runners are still present for reference, but they are not on the active =kolabi.bot= path.
+- The main live risk was not inside the pure reducer. =StrategyRuntime.run()= awaited exchange execution inline, so a REST call or tail trigger verification could stop Chronos from draining queued private/public events. That can delay =closed head -> tail submitted= visibility and can also delay repeat scheduling.
+- Pair repetition existed in the vocabulary (=try_num= and =dr_pause=) but had no active Chronos scheduler. A terminal pair could finish cleanly and the runtime would stop instead of re-hooking the next attempt.
+- Chronos command deduplication was too coarse for repetition. It keyed a command by pair and command shape before =StrategyRuntime= generated a fresh client order id, so a second =PLACE_HEAD= for the same pair could be treated like an old command.
+- Logging was close but not precise enough for operator review: =CS= could show the unrounded desired stop from the request instead of the stop price returned by the exchange acknowledgement. The =# >= note in =testRepB.log= was correct.
+- Test overlap remains: =tests/bot/test_chronos_supervisor.py= and =tests/bdd/test_chronos_supervisor_bdd.py= cover the same Chronos behaviours. Keep both for now: the classic test is the fast precise regression surface; the BDD file is the operator-readable behaviour contract. If this becomes noisy, make BDD canonical and reduce the classic file to edge cases only.
+
+** Changes Implemented
+
+- Added Chronos-owned repeat scheduling with per-pair =attempt_index=. Terminal pairs repeat until =try_num= is exhausted, honour =dr_pause= through =pending_repeats=, and re-hook the next attempt through the same pure reducer path.
+- Changed Chronos command dedupe to include the active attempt number, so a repeated pair can emit a fresh =PLACE_HEAD= without bypassing duplicate protection inside one attempt.
+- Moved command execution out of the main runtime event loop into background command tasks. Chronos can keep processing queued events and ready repeats while Ogun/exchange execution is in flight.
+- Kept blocking exchange calls at the adapter boundary configurable: active BotService ports run blocking exchange calls in a thread, while unit tests keep direct calls to avoid test-runner thread hangs in the sandbox.
+- Tail submitted follow-up events now prefer =ack.price= over the raw requested =stopPx=, so the confirmed stop and =CS= display the tick-rounded exchange acknowledgement.
+- Runtime logs now include attempt index with =UPDATE (pair#attempt)= and =METRICS (pair#attempt)=, and =CS= means confirmed/platform-grounded stop while =DS= remains the local desired stop.
+
+** Remaining Limits
+
+- I did not delete legacy tests or archived runtime code in this pass. The review found redundancy, but not a safe deletion target that is clearly unrelated to the active path without a broader cleanup commit.
+- The active runtime still has transitional names such as =OrderState= shared by head and tail. That is not blocking this fix, but it remains part of the typed-cleanup backlog.
+- If the host cannot create worker threads, active BotService exchange calls would need a fully async adapter instead of the current threaded bridge. The pure core and Chronos scheduling do not depend on that bridge.
+
+* Reinforced Runtime Plan Implemented 2026-05-28
+
+** Clarified Terms
+
+- Terminal pair means one pair attempt whose lifecycle cannot progress further in this attempt: =head_state=failed=, or =head_state=closed= with either no played qty or tail terminal (=tail_state=closed|failed=).
+- In-flight command means one exchange command already sent to Ogun/adapter and still waiting for ack/exception. In-flight tracking is now keyed by =pair_name + attempt_index + role=.
+- Reducer means the pure state transition function (=step_pair= via Isis). It can look non deterministic if tick rounding only happens at adapter boundary; now tick size is carried into market tick events and used in pure tail update decisions, so reducer output is stable for the same event stream.
+
+** Why Chronos Had Internal Queues Before
+
+- It was an intermediate shell pattern from earlier async experiments where Chronos owned event batching directly.
+- After StrategyRuntime became the single async owner, keeping a second queue path in Chronos only duplicated responsibilities and complicated tests, so it has been removed.
+
+** What Was Implemented
+
+- Removed Chronos internal queue API (=event_queue=, =command_queue=, =run_once()= batch drain path). StrategyRuntime is now the only async queue owner.
+- Added strict head-fill anchor for relative tails: private polling only sets tail reference from private fill execution price. Public price fallback was removed for this path.
+- Added 20s grace waiting for missing private fill reference on relative tails. If no fill price appears within grace, runtime fails loudly with pair/order identities, instead of placing a misanchored tail.
+- Added per-slot command serialisation in runtime: slot key is =pair + attempt + role=. Commands in the same slot are serialised; different slots run concurrently.
+- Added tail amend coalescing: while one tail amend is in flight for a slot, only the latest pending amend is kept.
+- Wired instrument tick size from runtime market state into public market tick events and into =step_tail_trail(..., tick_size=...)=.
+- Updated client order id format to attempt-aware readable ids: =H<attempt><word>-<yymmddHHMMSS>= and =T<attempt><word>-<yymmddHHMMSS>=.
+
+** Failure Cases For 20s Fill Grace
+
+- Private fills stream delayed or stale while order stream is fresh.
+- Exchange emits order terminal status before the corresponding fill row is persisted locally.
+- Fill row exists but has missing/invalid execution price in payload.
+- DB cursor lag or temporary connectivity issue prevents fill row read in time.
+
+** Async Process Map
+
+#+begin_src text
+run-once -> StrategyRuntime queue
+  -> Chronos.process_event(s) -> Isis/step_pair -> Horus commands
+  -> StrategyRuntime slot dispatcher
+      slot free: execute now (Ogun -> Adapter -> Exchange)
+      slot busy: queue, and for tail amend keep latest only
+  -> ack/failure followup event -> StrategyRuntime queue
+  -> Chronos state update, repeat scheduling, and next dispatch
+#+end_src

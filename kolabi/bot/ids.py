@@ -19,24 +19,40 @@ import coolname
 from kolabi.bot.domain import OrderPairSpec
 
 
-def head_client_order_id(pair: OrderPairSpec, *, at: datetime | None = None) -> str:
+def head_client_order_id(
+    pair: OrderPairSpec,
+    *,
+    attempt_index: int = 1,
+    at: datetime | None = None,
+) -> str:
     """Build a readable, exchange-safe client identifier for head submissions."""
     del pair
-    return _client_order_id("H", at=at)
+    return _client_order_id("H", attempt_index=attempt_index, at=at)
 
 
-def tail_client_order_id(pair: OrderPairSpec, *, at: datetime | None = None) -> str:
+def tail_client_order_id(
+    pair: OrderPairSpec,
+    *,
+    attempt_index: int = 1,
+    at: datetime | None = None,
+) -> str:
     """Build a readable, exchange-safe client identifier for tail submissions."""
     del pair
-    return _client_order_id("T", at=at)
+    return _client_order_id("T", attempt_index=attempt_index, at=at)
 
 
-def _client_order_id(prefix: str, *, at: datetime | None = None) -> str:
+def _client_order_id(
+    prefix: str,
+    *,
+    attempt_index: int,
+    at: datetime | None = None,
+) -> str:
     timestamp = at if at is not None else datetime.now(timezone.utc)
     stamp = timestamp.strftime("%y%m%d%H%M%S")
     word = _slug_word()
-    candidate = f"{prefix}-{word}-{stamp}".lower()
-    safe = re.sub(r"[^a-z0-9-]+", "-", candidate).strip("-")
+    attempt = max(1, int(attempt_index))
+    candidate = f"{prefix}{attempt}{word}-{stamp}"
+    safe = re.sub(r"[^A-Za-z0-9-]+", "-", candidate).strip("-")
     return safe[:64]
 
 
