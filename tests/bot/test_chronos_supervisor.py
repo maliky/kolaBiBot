@@ -20,11 +20,13 @@ from kolabi.bot.domain import (
     TailState,
     TimeWindow,
 )
-from kolabi.shared.core.runtime_types import DragonSong
-from kolabi.shared.core.runtime_types import PlaceHeadCommand
-from kolabi.shared.core.runtime_types import RuntimeCommandKind
-from kolabi.shared.core.runtime_types import PlaceOrderCommandRequest
-from kolabi.shared.core.runtime_types import Symbol
+from kolabi.shared.core.runtime_types import (
+    DragonSong,
+    PlaceHeadCommand,
+    PlaceOrderCommandRequest,
+    RuntimeCommandKind,
+    Symbol,
+)
 
 
 def sample_pair(name: str) -> OrderPairSpec:

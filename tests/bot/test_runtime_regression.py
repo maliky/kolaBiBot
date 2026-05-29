@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pathlib import Path
 import asyncio
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
 from kolabi.bot.domain import HeadState, OrderIdentity, PairCycleState, TailState
 from kolabi.bot.indicators import DummyIndicatorClient
@@ -12,7 +12,12 @@ from kolabi.bot.strategy_runtime import StrategyRunResult, StrategyRuntime
 from kolabi.bot.tsv import read_strategy_file
 from kolabi.shared.config import ExchangeConfig
 from kolabi.shared.core.models import OrderAck, Position
-from kolabi.shared.core.runtime_types import PlaceHeadCommand, PlaceOrderCommandRequest, RuntimeCommandKind, Symbol
+from kolabi.shared.core.runtime_types import (
+    PlaceHeadCommand,
+    PlaceOrderCommandRequest,
+    RuntimeCommandKind,
+    Symbol,
+)
 
 
 def test_demo_ada_strategy_parsed_and_planned_on_active_runtime() -> None:

@@ -1,7 +1,8 @@
 
+from typing import cast
+
 import pytest
 import responses
-from typing import Any, cast
 from kolabi.shared.exchanges.binance_adapter import BinanceAdapter
 
 EXCHANGE_INFO = {

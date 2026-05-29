@@ -7,14 +7,15 @@ import threading
 from time import sleep
 from urllib.parse import urlparse
 
-import kolabi.runtime.kola.utils.exceptions as ke
 import websocket
-from kolabi.shared.exchanges.bitmex_api.auth import generate_nonce, generate_signature
+from pandas import DataFrame
+from websocket import create_connection
+
+import kolabi.runtime.kola.utils.exceptions as ke
 from kolabi.runtime.kola.settings import ORDERID_PREFIX, SYMBOL, TEST_URL
 from kolabi.runtime.kola.utils.general import round_half_up, trim_dic
 from kolabi.runtime.kola.utils.logfunc import get_logger
-from pandas import DataFrame
-from websocket import create_connection
+from kolabi.shared.exchanges.bitmex_api.auth import generate_nonce, generate_signature
 
 # Connects to BitMEX websocket for streaming realtime data or dummy data
 # The Marketmaker still interacts with this as if it were a REST Endpoint, but now it can get

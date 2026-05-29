@@ -13,17 +13,17 @@ Transitional: yes, still bridges legacy order function signatures.
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, cast
+from typing import cast
 
 from kolabi.shared.core.runtime_types import (
     AmendOrderCommandRequest,
-    DragonSong,
     CancelOrderCommandRequest,
     CommandRequestRecord,
+    DragonSong,
     HeadCommandPayload,
-    PlaceOrderCommandRequest,
     OrderDict,
     OrderRole,
+    PlaceOrderCommandRequest,
     RuntimeCommand,
     RuntimeCommandKind,
     Symbol,

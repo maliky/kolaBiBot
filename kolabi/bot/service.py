@@ -4,14 +4,15 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Callable, Iterable, Optional, Protocol, TypeVar, TypedDict, cast
+from typing import Any, Callable, Iterable, Optional, Protocol, TypeVar, cast
 
+from kolabi.bot.domain import OrderPairSpec, StrategySpec
 from kolabi.bot.indicators import (
     DummyIndicatorClient,
     IndicatorClient,
     KrakenDbIndicatorClient,
 )
-from kolabi.bot.domain import OrderPairSpec, StrategySpec
+from kolabi.bot.ogun_executor import OgunExecutor
 from kolabi.bot.persistence import (
     OrderRecorder,
     PersistenceConfig,
@@ -22,9 +23,9 @@ from kolabi.bot.strategy_runtime import (
     KrakenPublicTriggerSource,
     PublicRuntimeStateReader,
     SimulatedExecutor,
+    StaticHookSource,
     StrategyRunResult,
     StrategyRuntime,
-    StaticHookSource,
     plan_strategy_once,
 )
 from kolabi.shared.config import ExchangeConfig, load_exchange_config
@@ -46,7 +47,6 @@ from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.kraken_futures import kraken_futures_environment
 from kolabi.shared.logging import setup_logging
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntimeState
-from kolabi.bot.ogun_executor import OgunExecutor
 
 _LOGGER = logging.getLogger("kola")
 _T = TypeVar("_T")

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from pytest_bdd import given, scenario, then, when
-
 from kolabi.bot.domain import (
     EggMove,
     EggMoveKind,
@@ -18,6 +16,7 @@ from kolabi.bot.domain import (
     TimeWindow,
 )
 from kolabi.bot.isis import step_strategy
+from pytest_bdd import given, scenario, then, when
 
 
 @scenario("features/isis_functional_core.feature", "Routed event changes only one pair")

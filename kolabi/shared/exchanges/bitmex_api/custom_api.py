@@ -6,11 +6,11 @@ import datetime as dt
 from json import dumps
 from time import sleep, time
 
-import kolabi.runtime.kola.utils.exceptions as ke
 import pandas as pd
 import requests as rq
-from kolabi.shared.exchanges.bitmex_api.auth import APIKeyAuthWithExpires
-from kolabi.shared.exchanges.bitmex_api.custom_ws_thread import BitMEXWebsocket
+from numpy import random
+
+import kolabi.runtime.kola.utils.exceptions as ke
 from kolabi.runtime.kola.settings import (
     HTTP_BULK_RATE_LIMITE,
     HTTP_SIMPLE_RATE_LIMITE,
@@ -25,7 +25,8 @@ from kolabi.runtime.kola.utils.orderfunc import (
     newClID,
     split_ids,
 )
-from numpy import random
+from kolabi.shared.exchanges.bitmex_api.auth import APIKeyAuthWithExpires
+from kolabi.shared.exchanges.bitmex_api.custom_ws_thread import BitMEXWebsocket
 
 # https://www.bitmex.com/api/explorer/
 

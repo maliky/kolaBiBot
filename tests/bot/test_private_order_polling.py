@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-
 from typing import Protocol, cast
 
-from kolabi.bot.domain import EggMove, HeadSpec, OrderIdentity, OrderPairSpec, OrderRole, PairCycleState, Side, StrategyState, TailSpec, TimeWindow
+from kolabi.bot.domain import (
+    EggMove,
+    HeadSpec,
+    OrderIdentity,
+    OrderPairSpec,
+    OrderRole,
+    PairCycleState,
+    Side,
+    StrategyState,
+    TailSpec,
+    TimeWindow,
+)
 from kolabi.bot.strategy_runtime import KrakenPrivateOrderPollingSource
 from kolabi.shared.core.runtime_types import PrivateOrderRecord
 from kolabi.shared.persistence import Base, ExchangeOrder

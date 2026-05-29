@@ -5,6 +5,7 @@ from time import sleep
 
 import numpy.random as rnd
 import pandas as pd
+
 from kolabi.runtime.kola.settings import XBTSATOSHI
 from kolabi.runtime.kola.utils.constantes import PRICE_PRECISION
 from kolabi.runtime.kola.utils.datefunc import now

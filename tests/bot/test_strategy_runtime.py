@@ -11,9 +11,9 @@ from kolabi.bot.domain import (
     EggMoveKind,
     HeadSpec,
     HeadState,
-    OrderRole,
     OrderIdentity,
     OrderPairSpec,
+    OrderRole,
     PairCycleState,
     Side,
     StrategySpec,
@@ -26,7 +26,6 @@ from kolabi.bot.pair_cycle import step_pair
 from kolabi.bot.strategy_runtime import (
     KrakenPublicTriggerSource,
     SimulatedExecutor,
-    StaticHookSource,
     StrategyRuntime,
     plan_strategy_once,
 )

@@ -4,11 +4,10 @@ import argparse
 from pathlib import Path
 from typing import Any, cast
 
-from pytest_bdd import given, scenario, then, when
-
 from kolabi.bot.__main__ import build_single_strategy
 from kolabi.bot.domain import OrderMove, OrderState, StrategySpec
 from kolabi.bot.tsv import order_pair_from_legacy_values, read_strategy_file
+from pytest_bdd import given, scenario, then, when
 
 
 @scenario("features/strategy_spec_monolith.feature", "TSV row maps to canonical StrategySpec")

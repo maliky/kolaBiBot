@@ -12,8 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-from decimal import ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal
 
 from kolabi.bot.domain import OrderPairSpec, Side, TailTrailSample, TailTrailState
 from kolabi.shared.core.runtime_types import to_decimal

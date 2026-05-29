@@ -16,18 +16,17 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Mapping
 
-from kolabi.bot.domain import OrderPairSpec
-from kolabi.bot.pricing import pair_window_is_open
 from kolabi.bot.domain import (
     ConfirmedOrder,
     EggMove,
     EggMoveKind,
     HeadState,
     OrderIdentity,
+    OrderPairSpec,
     OrderReason,
     classify_confirmed_move,
 )
-from kolabi.bot.pricing import reference_price, tail_reference_price
+from kolabi.bot.pricing import pair_window_is_open, tail_reference_price
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     BrokerReply,

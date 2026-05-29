@@ -6,17 +6,68 @@ Check https://packaging.python.org/tutorials/packaging-projects/
 and file in python/Docs/python-in-nutshell.pdf
 upload to https://test.pypi.org/manage/projects/.
 """
+from pathlib import Path
+
 from setuptools import find_packages, setup
 
-with open("README.rst", "r") as f:
-    long_description = f.read()
+ROOT = Path(__file__).resolve().parent
+
+
+def _unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def _read_requirements(path: Path, *, _seen: set[Path] | None = None) -> list[str]:
+    seen = _seen if _seen is not None else set()
+    resolved = path.resolve()
+    if resolved in seen:
+        return []
+    seen.add(resolved)
+    requirements: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("-r "):
+            nested = (path.parent / line[3:].strip()).resolve()
+            requirements.extend(_read_requirements(nested, _seen=seen))
+            continue
+        if line.startswith("--"):
+            continue
+        requirements.append(line)
+    return requirements
+
+
+def _is_test_dependency(requirement: str) -> bool:
+    normalized = requirement.strip().lower()
+    if normalized.startswith("pytest"):
+        return True
+    return normalized.startswith("hypothesis")
+
+
+long_description = (ROOT / "README.org").read_text(encoding="utf-8")
+install_requires = _unique(_read_requirements(ROOT / "requirements.txt"))
+dev_requires = _unique(
+    [req for req in _read_requirements(ROOT / "requirements-dev.txt") if req not in install_requires]
+)
+test_requires = _unique(
+    [req for req in dev_requires if _is_test_dependency(req)]
+    + [req for req in install_requires if req.strip().lower() == "responses"]
+)
 
 setup(
     name="kolabi",
     version="1.1.11",
     description="Kraken Futures trading bot and local market-data services.",
     long_description=long_description,
-    long_description_content_type="text/x-rst",
+    long_description_content_type="text/plain",
     author="Malik Koné",
     author_email="malik.kone@pm.me",
     url="https://github.com/maliky/kolabi",
@@ -31,22 +82,12 @@ setup(
             "kolabi-kraken-smoke=kolabi.bargain.smoke:main",
         ]
     },
-    # la verions de websocket est importante
-    install_requires=[
-        "pandas",
-        "numpy",
-        "sqlalchemy",
-        "python-binance",
-        "requests",
-        "dateparser",
-        "coolname",
-        "websocket-client==0.53.0",
-        "websockets>=15,<16",
-    ],
+    # la version des dependances est pilotee par requirements*.txt
+    install_requires=install_requires,
     extras_require={
-        "dev": ["mypy", "flake8", "black", "ruff", "pyright", "pylint"],
+        "dev": dev_requires,
         "packaging": ["twine"],
-        "test": ["pytest", "hypothesis", "responses"],
+        "test": test_requires,
     },
     classifiers=[
         "Development Status :: 4 - Beta",

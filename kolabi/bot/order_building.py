@@ -15,16 +15,14 @@ from dataclasses import replace
 from decimal import Decimal
 from typing import cast
 
-from kolabi.bot.domain import OrderPairSpec, PairCycleState, Side, opposite_side
+from kolabi.bot.domain import OrderPairSpec, PairCycleState, opposite_side
 from kolabi.bot.pricing import tail_trigger_source
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
     AmendOrderCommandRequest,
     AmendTailCommand,
-    CancelOrderCommandRequest,
     OrderDict,
     OrderQty,
-    OrderRole,
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
     PlaceTailCommand,

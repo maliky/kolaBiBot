@@ -2,14 +2,6 @@
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.pytest.ini_options]
-addopts = "-p no:cacheprovider --assert=plain --strict-markers"
-python_files = ["tests.py", "test_*.py", "*_tests.py"]
-norecursedirs = ["archives", ".*", "__pycache__", "build", "dist"]
-markers = [
-  "selenium: browser-facing end-to-end tests powered by Selenium",
-]
-
 [tool.black]
 line-length = 90
 target-version = ["py313"]

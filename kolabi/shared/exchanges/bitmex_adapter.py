@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict
 
-from kolabi.shared.exchanges.bitmex_api.custom_api import BitMEX
 from kolabi.shared.core.models import OrderAck, Position
 from kolabi.shared.core.runtime_types import OrderQty, Price, StopPrice
 from kolabi.shared.core.types import ExchangeABC
+from kolabi.shared.exchanges.bitmex_api.custom_api import BitMEX
 
 
 class BitmexAdapter(ExchangeABC):

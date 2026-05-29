@@ -3,8 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from pytest_bdd import given, scenario, then, when
-
 from kolabi.bot.chronos import Chronos, ChronosNotice, ChronosNoticeKind
 from kolabi.bot.domain import (
     EggMove,
@@ -17,11 +15,12 @@ from kolabi.bot.domain import (
     Side,
     StrategyState,
     TailMode,
-    TailState,
     TailSpec,
+    TailState,
     TimeWindow,
 )
 from kolabi.shared.core.runtime_types import DragonSong
+from pytest_bdd import given, scenario, then, when
 
 
 @scenario("features/chronos_supervisor.feature", "Event routing changes only pair B")

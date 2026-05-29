@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, replace
 from collections import deque
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from itertools import count
@@ -26,16 +26,13 @@ from kolabi.bot.domain import (
     EggMove,
     EggMoveKind,
     HeadState,
-    OrderRole,
     OrderIdentity,
+    OrderRole,
     PairCycleState,
     StrategySpec,
     StrategyState,
     TailState,
 )
-from kolabi.bot.ids import head_client_order_id, tail_client_order_id
-from kolabi.bot.persistence import TailTelemetryRow
-from kolabi.bot.order_building import head_order_dict
 from kolabi.bot.dragon import (
     MarketSnapshotFact,
     head_hooked_event,
@@ -47,21 +44,23 @@ from kolabi.bot.dragon import (
     simulated_private_fill_from_submission,
     tail_submitted_from_ack,
 )
+from kolabi.bot.ids import head_client_order_id, tail_client_order_id
+from kolabi.bot.order_building import head_order_dict
 from kolabi.bot.pricing import tail_reference_price
+from kolabi.bot.telemetry import TailTelemetryRow
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
+    AmendTailCommand,
     CancelCommand,
     DragonSong,
-    AmendTailCommand,
     OrderDict,
     OrderQty,
-    PlaceOrderCommandRequest,
     PlaceHeadCommand,
+    PlaceOrderCommandRequest,
     PlaceTailCommand,
     Price,
     PrivateOrderRecord,
-    Symbol,
     to_decimal,
 )
 

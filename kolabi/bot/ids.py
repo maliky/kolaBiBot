@@ -57,7 +57,7 @@ def _client_order_id(
 
 
 def _slug_word() -> str:
-    slug = coolname.generate_slug(2)
+    slug = str(coolname.generate_slug(2))
     words = [word for word in slug.split("-") if word]
     if words:
         return words[0]

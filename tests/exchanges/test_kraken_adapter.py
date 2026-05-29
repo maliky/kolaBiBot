@@ -246,6 +246,64 @@ def test_record_rest_call_serializes_nested_decimal_payload(tmp_path) -> None:
     assert history[0] == "1.2"
 
 
+def test_record_rest_call_recovers_order_id_from_request_for_edit_failures(tmp_path) -> None:
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, DummySession([])),
+    )
+
+    adapter._record_rest_call(
+        method="POST",
+        path="/editorder",
+        request_params=[("order_id", "OID-EDIT-1"), ("stopPrice", 77166.5)],
+        attempt_count=1,
+        http_status=503,
+        response_payload={"raw_text": "Service Unavailable"},
+        result_kind="http_error",
+        error_text="503",
+    )
+
+    with Session(adapter._engine) as db_session:
+        row = db_session.execute(select(ExchangeRestCall)).scalars().one()
+    assert row.endpoint_order_id == "OID-EDIT-1"
+    assert row.exchange_order_id == "OID-EDIT-1"
+    assert row.correlation_id == "OID-EDIT-1"
+
+
+def test_record_rest_call_recovers_order_id_from_request_for_cancel_failures(tmp_path) -> None:
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, DummySession([])),
+    )
+
+    adapter._record_rest_call(
+        method="POST",
+        path="/cancelorder",
+        request_params=[("order_id", "OID-CANCEL-1")],
+        attempt_count=1,
+        http_status=503,
+        response_payload={"raw_text": "Service Unavailable"},
+        result_kind="http_error",
+        error_text="503",
+    )
+
+    with Session(adapter._engine) as db_session:
+        row = db_session.execute(select(ExchangeRestCall)).scalars().one()
+    assert row.endpoint_order_id == "OID-CANCEL-1"
+    assert row.exchange_order_id == "OID-CANCEL-1"
+    assert row.correlation_id == "OID-CANCEL-1"
+
+
 def test_record_rest_call_persistence_failure_is_fail_open(tmp_path, caplog) -> None:
     adapter = KrakenFuturesAdapter(
         api_key="k",
@@ -290,6 +348,124 @@ def test_record_rest_call_persistence_failure_is_fail_open(tmp_path, caplog) -> 
             error_text=None,
         )
     assert "rest call audit persistence failed" in caplog.text
+
+
+def test_place_generates_client_order_id_when_missing(tmp_path):
+    session = DummySession(
+        [
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "OID-GEN-1",
+                    "status": "placed",
+                    "qty": 1,
+                    "filled": 0,
+                    "direction": 0,
+                },
+            },
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    reply = adapter.place(orderQty=1, side="buy", ordType="Limit", price=80000)
+
+    payload = dict(session.calls[0]["data"])
+    assert payload["cliOrdId"].startswith("k-")
+    assert len(payload["cliOrdId"]) == 34
+    assert reply["clOrdID"] == payload["cliOrdId"]
+
+
+def test_sendorder_without_client_order_id_is_not_retried_on_503(tmp_path):
+    session = DummySession(
+        [
+            (503, {"raw_text": "Service Unavailable"}),
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "OID-LATE",
+                    "status": "placed",
+                    "qty": 1,
+                    "filled": 0,
+                    "direction": 0,
+                },
+            },
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    try:
+        adapter._request(
+            "POST",
+            "/sendorder",
+            params=[("orderType", "mkt"), ("symbol", "PI_XBTUSD"), ("side", "buy"), ("size", 1)],
+            auth=True,
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected single-attempt sendorder failure without cliOrdId")
+
+    assert len(session.calls) == 1
+
+
+def test_sendorder_with_client_order_id_retries_on_503(tmp_path):
+    session = DummySession(
+        [
+            (503, {"raw_text": "Service Unavailable"}),
+            {
+                "result": "success",
+                "sendStatus": {
+                    "order_id": "OID-OK",
+                    "cli_ord_id": "CID-RETRY",
+                    "status": "placed",
+                    "qty": 1,
+                    "filled": 0,
+                    "direction": 0,
+                },
+            },
+        ]
+    )
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        session=cast(Any, session),
+    )
+
+    payload = adapter._request(
+        "POST",
+        "/sendorder",
+        params=[
+            ("orderType", "mkt"),
+            ("symbol", "PI_XBTUSD"),
+            ("side", "buy"),
+            ("size", 1),
+            ("cliOrdId", "CID-RETRY"),
+        ],
+        auth=True,
+    )
+
+    assert payload["result"] == "success"
+    assert len(session.calls) == 2
 
 
 def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):

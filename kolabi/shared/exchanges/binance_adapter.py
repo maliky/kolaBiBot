@@ -13,7 +13,7 @@ Known quirks: only a subset of the API is supported and WebSockets are ignored.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from binance.client import Client  # type: ignore[import-untyped]
 

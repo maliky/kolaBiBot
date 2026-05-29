@@ -6,9 +6,10 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Dict, Iterable, Optional, Sequence, TypeAlias, cast
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any, Dict, Iterable, Sequence, TypeAlias, cast
 from urllib.parse import urlencode
+from uuid import uuid4
 
 import requests
 from sqlalchemy import select
@@ -29,7 +30,6 @@ from kolabi.shared.persistence import (
     create_persistence_engine,
 )
 from kolabi.tree.account import sign_rest_auth
-from uuid import uuid4
 
 _LOGGER = logging.getLogger("kola")
 _REST_AUDIT_LOCK_RETRIES = 3
@@ -129,8 +129,14 @@ class KrakenFuturesAdapter(ExchangeABC):
             list(params.items()) if isinstance(params, dict) else list(params or [])
         )
         payload = self._clean_params(raw_params)
+        max_attempts = _effective_retry_attempts(
+            method=method,
+            path=path,
+            payload=payload,
+            configured=retry_attempts,
+        )
         last_error: RuntimeError | None = None
-        for attempt in range(1, retry_attempts + 1):
+        for attempt in range(1, max_attempts + 1):
             headers: Dict[str, str] = {}
             if auth:
                 nonce = self._next_nonce()
@@ -158,7 +164,7 @@ class KrakenFuturesAdapter(ExchangeABC):
                 error = RuntimeError(
                     f"Kraken transport error on {path}: {exc.__class__.__name__}: {exc}"
                 )
-                if attempt < retry_attempts:
+                if attempt < max_attempts:
                     time.sleep(0.5 * attempt)
                     last_error = error
                     continue
@@ -180,7 +186,7 @@ class KrakenFuturesAdapter(ExchangeABC):
             status_code = getattr(response, "status_code", 200)
             if status_code >= 400:
                 error = RuntimeError(f"Kraken HTTP {status_code} on {path}: {data}")
-                if status_code in {502, 503, 504} and attempt < retry_attempts:
+                if status_code in {502, 503, 504} and attempt < max_attempts:
                     time.sleep(0.5 * attempt)
                     last_error = error
                     continue
@@ -199,7 +205,7 @@ class KrakenFuturesAdapter(ExchangeABC):
                 raise RuntimeError(f"Unexpected Kraken payload type: {type(data)!r}")
             if data.get("result") == "error":
                 error = RuntimeError(str(data))
-                if "nonceBelowThreshold" in str(data) and attempt < retry_attempts:
+                if "nonceBelowThreshold" in str(data) and attempt < max_attempts:
                     time.sleep(0.25 * attempt)
                     last_error = error
                     continue
@@ -251,9 +257,13 @@ class KrakenFuturesAdapter(ExchangeABC):
         payload = cast(Dict[str, Any], _json_safe_value(payload))
         request_payload = cast(Dict[str, Any], _json_safe_value(request_payload))
         order_like = _extract_order_like(payload) if payload else {}
-        endpoint_order_id = optional_str(
+        response_order_id = optional_str(
             order_like.get("order_id") or order_like.get("orderId")
         )
+        request_order_id = optional_str(
+            request_payload.get("order_id") or request_payload.get("orderId")
+        )
+        endpoint_order_id = response_order_id or request_order_id
         client_order_id = optional_str(
             order_like.get("cli_ord_id")
             or order_like.get("cliOrdId")
@@ -285,7 +295,7 @@ class KrakenFuturesAdapter(ExchangeABC):
                             client_order_id=client_order_id,
                             exchange_order_id=exchange_order_id,
                             endpoint_order_id=endpoint_order_id,
-                            correlation_id=client_order_id or endpoint_order_id,
+                            correlation_id=client_order_id or endpoint_order_id or request_order_id,
                             ack_status=ack_status,
                             ack_order_id=ack_order_id,
                             ack_client_order_id=ack_client_order_id,
@@ -580,6 +590,7 @@ class KrakenFuturesAdapter(ExchangeABC):
         **_opts: Any,
     ) -> Dict[str, Any]:
         del asBulk
+        client_order_id = clOrdID or _generated_client_order_id()
         fallback_market_price = None
         contract = build_send_order_contract(
             ord_type=ordType,
@@ -589,7 +600,7 @@ class KrakenFuturesAdapter(ExchangeABC):
             price=price,
             stop_price=stopPx,
             fallback_market_price=fallback_market_price,
-            cli_ord_id=clOrdID,
+            cli_ord_id=client_order_id,
             reduce_only=_has_exec_flag(execInst, "ReduceOnly"),
             post_only=self.post_only
             or _has_exec_flag(execInst, "ParticipateDoNotInitiate"),
@@ -611,7 +622,7 @@ class KrakenFuturesAdapter(ExchangeABC):
             price=price if price is not None else fallback_market_price,
             stop_price=stopPx,
             reduce_only=_has_exec_flag(execInst, "ReduceOnly"),
-            cli_ord_id=clOrdID,
+            cli_ord_id=client_order_id,
         )
         return self._legacy_ack_from_order(order)
 
@@ -1149,6 +1160,35 @@ def _should_persist_rest_call(*, method: str, path: str) -> bool:
     if method.upper() != "POST":
         return False
     return path in {"/sendorder", "/editorder", "/cancelorder"}
+
+
+def _effective_retry_attempts(
+    *,
+    method: str,
+    path: str,
+    payload: Sequence[tuple[str, Any]],
+    configured: int,
+) -> int:
+    if method.upper() != "POST":
+        return max(1, configured)
+    if path != "/sendorder":
+        return max(1, configured)
+    if _payload_has_client_order_id(payload):
+        return max(1, configured)
+    return 1
+
+
+def _payload_has_client_order_id(payload: Sequence[tuple[str, Any]]) -> bool:
+    for key, value in payload:
+        if str(key) != "cliOrdId":
+            continue
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
+
+
+def _generated_client_order_id() -> str:
+    return f"k-{uuid4().hex}"
 
 
 def _is_sqlite_locked_error(exc: BaseException) -> bool:

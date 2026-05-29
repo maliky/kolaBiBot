@@ -152,9 +152,10 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
             self.calls: list[tuple[StrategySpec, bool, bool]] = []
 
         def run_strategy(self, strategy: StrategySpec, *, dry_run: bool, simulate: bool):
-            from kolabi.bot.strategy_runtime import StrategyRunResult
-            from kolabi.bot.domain import StrategyState, PairCycleState
             from datetime import datetime, timezone
+
+            from kolabi.bot.domain import PairCycleState, StrategyState
+            from kolabi.bot.strategy_runtime import StrategyRunResult
 
             self.calls.append((strategy, dry_run, simulate))
             state = StrategyState(

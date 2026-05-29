@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from kolabi.tree import account as account_module
 from kolabi.shared.persistence import (
     AccountBalance,
     AccountPosition,
@@ -11,6 +10,7 @@ from kolabi.shared.persistence import (
     ExchangeOrder,
     RawExchangeEvent,
 )
+from kolabi.tree import account as account_module
 from kolabi.tree.account import (
     AccountStateStore,
     AccountStreamConfig,

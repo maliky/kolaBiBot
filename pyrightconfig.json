@@ -1,7 +1,5 @@
 {
   "include": ["kolabi", "tests"],
-  "venvPath": "/home/mlk/.pyenv/versions",
-  "venv": "kola",
   "extraPaths": ["kolabi"],
   "pythonVersion": "3.13",
   "pythonPlatform": "Linux",

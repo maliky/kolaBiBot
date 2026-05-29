@@ -4,7 +4,6 @@ import asyncio
 from typing import Any
 
 import pytest
-
 from kolabi.bot.service import AdapterExchangePort
 from kolabi.shared.config import ExchangeConfig
 from kolabi.shared.core.models import OrderAck

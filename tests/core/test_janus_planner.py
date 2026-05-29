@@ -5,7 +5,6 @@ from decimal import Decimal
 from typing import cast
 
 import pytest
-
 from kolabi.bot.domain import (
     HeadSpec,
     HeadState,
@@ -16,9 +15,9 @@ from kolabi.bot.domain import (
     PairIntentKind,
     Side,
     TailSpec,
+    TailState,
     TailTrailSample,
     TailTrailState,
-    TailState,
     TimeWindow,
 )
 from kolabi.bot.horus import plan_runtime_commands

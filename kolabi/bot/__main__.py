@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, is_dataclass
 import json
 import sys
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -14,6 +14,7 @@ from kolabi.bot.tsv import (
     strategy_from_run_once_args,
     strategy_to_pretty_dict,
 )
+
 
 class RawTextDefaultsFormatter(
     argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter

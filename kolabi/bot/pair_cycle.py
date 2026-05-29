@@ -13,23 +13,22 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import cast
 
 from kolabi.bot.domain import (
-    classify_confirmed_move,
     ConfirmedOrder,
     EggMove,
     EggMoveKind,
     HeadState,
     OrderIdentity,
     OrderPairSpec,
+    OrderReason,
+    OrderRole,
+    PairCycleState,
     PairIntent,
     PairIntentKind,
-    OrderReason,
-    PairCycleState,
-    OrderRole,
     TailMode,
     TailState,
+    classify_confirmed_move,
 )
 from kolabi.bot.dragon import reason_from_status_or_reason
 from kolabi.bot.tail_tracking import initial_tail_trail, step_tail_trail

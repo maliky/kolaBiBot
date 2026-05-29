@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
 
-
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 

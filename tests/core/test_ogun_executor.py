@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
-import asyncio
 import pytest
-
 from kolabi.bot.ogun_executor import OgunExecutor, RetryPolicy
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (

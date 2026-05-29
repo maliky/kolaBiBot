@@ -17,8 +17,8 @@ from enum import StrEnum
 from typing import Iterable
 
 from kolabi.bot.domain import EggMove, EggMoveKind, HeadState, StrategyState, TailState
-from kolabi.bot.isis import step_strategy
 from kolabi.bot.horus import plan_runtime_commands
+from kolabi.bot.isis import step_strategy
 from kolabi.shared.core.runtime_types import DragonSong, RuntimeCommandKind, Symbol
 
 
@@ -465,8 +465,8 @@ def _event_order_id(event: EggMove) -> str | None:
     for payload in (event.order, event.reply):
         if payload is None:
             continue
-        for field in ("orderID", "clOrdID"):
-            candidate = payload.get(field)
+        for key_name in ("orderID", "clOrdID"):
+            candidate = payload.get(key_name)
             if isinstance(candidate, str) and candidate:
                 return candidate
     return None
@@ -476,8 +476,8 @@ def _event_status(event: EggMove) -> str | None:
     for payload in (event.reply, event.order):
         if payload is None:
             continue
-        for field in ("ordStatus", "status"):
-            candidate = payload.get(field)
+        for key_name in ("ordStatus", "status"):
+            candidate = payload.get(key_name)
             if isinstance(candidate, str) and candidate:
                 return candidate
     return None

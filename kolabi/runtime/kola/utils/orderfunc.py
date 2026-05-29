@@ -16,9 +16,9 @@ from typing import Any, Optional, Sequence, cast
 from uuid import uuid4
 
 from kolabi.runtime.kola.settings import LOGNAME, ORDERID_PREFIX
-from kolabi.runtime.kola.utils.pricefunc import get_prix_decl, setdef_stopPrice
 from kolabi.runtime.kola.utils.general import contains, opt_add_to_
 from kolabi.runtime.kola.utils.logfunc import get_logger
+from kolabi.runtime.kola.utils.pricefunc import get_prix_decl, setdef_stopPrice
 from kolabi.shared.core.runtime_types import (
     OrderDict,
     OrderQty,
