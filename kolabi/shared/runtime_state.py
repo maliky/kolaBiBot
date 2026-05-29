@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from time import sleep
 from typing import Any
 
-from sqlalchemy import create_engine, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.shared.core.runtime_types import (
@@ -32,6 +32,7 @@ from kolabi.shared.persistence import (
     ExchangeFill,
     ExchangeInstrument,
     ExchangeOrder,
+    create_persistence_engine,
 )
 from kolabi.tree.account import AccountStreamConfig, latest_connection
 from kolabi.tree.kraken import latest_indicator_values, latest_snapshot
@@ -136,12 +137,12 @@ class KrakenRuntimeStateClient:
         self.max_private_age_seconds = max_private_age_seconds
         self.max_reconcile_age_seconds = max_reconcile_age_seconds
         self._market_sessionmaker = sessionmaker(
-            bind=create_engine(self.market_db_url),
+            bind=create_persistence_engine(self.market_db_url),
             expire_on_commit=False,
             class_=Session,
         )
         self._account_sessionmaker = sessionmaker(
-            bind=create_engine(self.account_db_url),
+            bind=create_persistence_engine(self.account_db_url),
             expire_on_commit=False,
             class_=Session,
         )

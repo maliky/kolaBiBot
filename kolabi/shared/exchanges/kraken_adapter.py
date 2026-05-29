@@ -11,7 +11,8 @@ from typing import Any, Dict, Iterable, Optional, Sequence, TypeAlias, cast
 from urllib.parse import urlencode
 
 import requests
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.kraken_contract import build_send_order_contract
@@ -25,11 +26,14 @@ from kolabi.shared.persistence import (
     ExchangeInstrument,
     ExchangeOrder,
     ExchangeRestCall,
+    create_persistence_engine,
 )
 from kolabi.tree.account import sign_rest_auth
 from uuid import uuid4
 
 _LOGGER = logging.getLogger("kola")
+_REST_AUDIT_LOCK_RETRIES = 3
+_REST_AUDIT_LOCK_SLEEP_SECONDS = 0.05
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -74,8 +78,8 @@ class KrakenFuturesAdapter(ExchangeABC):
         self.dummy = False
         self.dummyID = ""
         self._last_nonce = 0
-        self._engine = create_engine(self.account_db_url)
-        self._public_engine = create_engine(self.public_db_url)
+        self._engine = create_persistence_engine(self.account_db_url)
+        self._public_engine = create_persistence_engine(self.public_db_url)
         self._sessionmaker = sessionmaker(
             bind=self._engine,
             expire_on_commit=False,
@@ -260,44 +264,62 @@ class KrakenFuturesAdapter(ExchangeABC):
         ack_order_id = endpoint_order_id
         ack_client_order_id = client_order_id
         with self._sessionmaker() as session:
-            try:
-                session.add(
-                    ExchangeRestCall(
-                        local_uuid=str(uuid4()),
-                        exchange="kraken",
-                        environment=self.environment,
-                        market_type="futures",
-                        account_scope="default",
-                        symbol=self.symbol,
-                        method=method.upper(),
-                        path=path,
-                        request_params=request_payload,
-                        attempt_count=attempt_count,
-                        http_status=http_status,
-                        result_kind=result_kind,
-                        response_payload=payload,
-                        error_text=error_text,
-                        client_order_id=client_order_id,
-                        exchange_order_id=exchange_order_id,
-                        endpoint_order_id=endpoint_order_id,
-                        correlation_id=client_order_id or endpoint_order_id,
-                        ack_status=ack_status,
-                        ack_order_id=ack_order_id,
-                        ack_client_order_id=ack_client_order_id,
+            for retry in range(_REST_AUDIT_LOCK_RETRIES + 1):
+                try:
+                    session.add(
+                        ExchangeRestCall(
+                            local_uuid=str(uuid4()),
+                            exchange="kraken",
+                            environment=self.environment,
+                            market_type="futures",
+                            account_scope="default",
+                            symbol=self.symbol,
+                            method=method.upper(),
+                            path=path,
+                            request_params=request_payload,
+                            attempt_count=attempt_count,
+                            http_status=http_status,
+                            result_kind=result_kind,
+                            response_payload=payload,
+                            error_text=error_text,
+                            client_order_id=client_order_id,
+                            exchange_order_id=exchange_order_id,
+                            endpoint_order_id=endpoint_order_id,
+                            correlation_id=client_order_id or endpoint_order_id,
+                            ack_status=ack_status,
+                            ack_order_id=ack_order_id,
+                            ack_client_order_id=ack_client_order_id,
+                        )
                     )
-                )
-                session.commit()
-            except Exception as exc:
-                session.rollback()
-                _LOGGER.warning(
-                    "rest call audit persistence failed method=%s path=%s clOrdID=%s orderID=%s error=%s",
-                    method.upper(),
-                    path,
-                    client_order_id or "-",
-                    endpoint_order_id or "-",
-                    exc,
-                )
-                return
+                    session.commit()
+                    return
+                except OperationalError as exc:
+                    session.rollback()
+                    if _is_sqlite_locked_error(exc) and retry < _REST_AUDIT_LOCK_RETRIES:
+                        time.sleep(_REST_AUDIT_LOCK_SLEEP_SECONDS * (retry + 1))
+                        continue
+                    _LOGGER.warning(
+                        "rest call audit persistence failed method=%s path=%s clOrdID=%s orderID=%s retry=%s error=%s",
+                        method.upper(),
+                        path,
+                        client_order_id or "-",
+                        endpoint_order_id or "-",
+                        retry,
+                        _compact_error(exc),
+                    )
+                    return
+                except Exception as exc:
+                    session.rollback()
+                    _LOGGER.warning(
+                        "rest call audit persistence failed method=%s path=%s clOrdID=%s orderID=%s retry=%s error=%s",
+                        method.upper(),
+                        path,
+                        client_order_id or "-",
+                        endpoint_order_id or "-",
+                        retry,
+                        _compact_error(exc),
+                    )
+                    return
 
     def _ticker(self) -> _Ticker:
         payload = self._request("GET", f"/tickers/{self.symbol}")
@@ -1127,6 +1149,30 @@ def _should_persist_rest_call(*, method: str, path: str) -> bool:
     if method.upper() != "POST":
         return False
     return path in {"/sendorder", "/editorder", "/cancelorder"}
+
+
+def _is_sqlite_locked_error(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if "database is locked" in message or "database table is locked" in message:
+            return True
+        nested = getattr(current, "orig", None)
+        if isinstance(nested, BaseException):
+            current = nested
+            continue
+        cause = current.__cause__
+        current = cause if isinstance(cause, BaseException) else None
+    return False
+
+
+def _compact_error(exc: BaseException) -> str:
+    message = str(exc).strip().replace("\n", " ")
+    if len(message) <= 280:
+        return message
+    return f"{message[:277]}..."
 
 
 def optional_str(value: object) -> str | None:

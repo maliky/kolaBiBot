@@ -1,6 +1,6 @@
 """Shared persistence utilities (SQLAlchemy models, sessions)."""
 
-from .db import get_sessionmaker, init_engine
+from .db import create_persistence_engine, get_sessionmaker, init_engine
 from .models import (
     AccountBalance,
     AccountPosition,
@@ -37,6 +37,7 @@ __all__ = [
     "PrivateIngestAudit",
     "RawExchangeEvent",
     "TailTelemetry",
+    "create_persistence_engine",
     "get_sessionmaker",
     "init_engine",
 ]
