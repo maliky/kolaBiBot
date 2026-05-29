@@ -269,8 +269,16 @@ class BotService:
             return asyncio.run(runtime.run())
         except KeyboardInterrupt:
             if not simulate:
-                cancelled = self.cancel_living_tails(runtime)
-                self.logger.info("interrupt tail_cancelled=%d", len(cancelled))
+                cleanup = self.cleanup_interrupted_pairs(runtime)
+                self.logger.info(
+                    "interrupt cleanup pairs=%s tail_cancelled=%s close_orders=%s qty_before=%s qty_after=%s errors=%s",
+                    cleanup["pairs"],
+                    cleanup["tail_cancelled"],
+                    cleanup["close_orders"],
+                    cleanup["position_before_qty"],
+                    cleanup["position_after_qty"],
+                    cleanup["errors"],
+                )
             raise
 
     def run_orders(self, pairs: Iterable[OrderPairSpec], *, dry_run: bool = False, simulate: bool = False) -> StrategyRunResult:
@@ -428,37 +436,72 @@ class BotService:
     def cancel_living_tails(self, runtime: StrategyRuntime) -> list[OrderAck]:
         """Best-effort cancellation of living/submitted tails on operator interrupt."""
         port = self._build_admin_port()
-        executor = OgunExecutor(port)
         cancelled: list[OrderAck] = []
-        seen: set[str] = set()
-        for pair_name, pair_state in runtime.chronos.state.pairs.items():
-            if pair_state.tail_state is None:
-                continue
-            if pair_state.tail_state.value not in {"submitted", "living", "hooked"}:
-                continue
-            identity = pair_state.tail_identity
-            if identity is None:
-                continue
-            cancel_id = identity.client_order_id or identity.exchange_order_id
+        for target in _interrupt_cleanup_targets(runtime):
+            cancel_id = _resolve_tail_cancel_id(
+                cast(OpenOrderReader, port.adapter),
+                target.tail_exchange_order_id,
+                target.tail_client_order_id,
+            )
             if cancel_id is None:
                 continue
-            if cancel_id in seen:
-                continue
-            seen.add(cancel_id)
-            command = CancelCommand(
-                kind=RuntimeCommandKind.CANCEL,
-                symbol=Symbol(self.config.symbol),
-                pair_name=pair_name,
-                request=CancelOrderCommandRequest(
-                    pair_name=pair_name,
-                    clOrdID=cancel_id,
-                ),
-            )
             try:
-                cancelled.append(asyncio.run(executor.execute(command)))
+                cancelled.append(port.adapter.cancel_order(cancel_id))
             except Exception:
                 continue
         return cancelled
+
+    def cleanup_interrupted_pairs(self, runtime: StrategyRuntime) -> dict[str, object]:
+        """Cancel active tails and close associated head-opened exposure."""
+        port = self._build_admin_port()
+        adapter = port.adapter
+        targets = _interrupt_cleanup_targets(runtime)
+        cancelled: list[OrderAck] = []
+        close_acks: list[OrderAck] = []
+        errors = 0
+        position_before = adapter.get_position()
+        remaining_long = max(0.0, float(position_before.qty))
+        remaining_short = max(0.0, -float(position_before.qty))
+        for target in targets:
+            cancel_id = _resolve_tail_cancel_id(
+                cast(OpenOrderReader, adapter),
+                target.tail_exchange_order_id,
+                target.tail_client_order_id,
+            )
+            if cancel_id is not None:
+                try:
+                    cancelled.append(adapter.cancel_order(cancel_id))
+                except Exception:
+                    errors += 1
+            close_qty = target.played_quantity
+            if target.close_side == "sell":
+                close_qty = min(close_qty, remaining_long)
+                remaining_long = max(0.0, remaining_long - close_qty)
+            else:
+                close_qty = min(close_qty, remaining_short)
+                remaining_short = max(0.0, remaining_short - close_qty)
+            if close_qty <= 0.0:
+                continue
+            try:
+                close_acks.append(
+                    adapter.place_order(
+                        side=target.close_side,
+                        orderQty=close_qty,
+                        type_="MARKET",
+                        reduceOnly=True,
+                    )
+                )
+            except Exception:
+                errors += 1
+        position_after = adapter.get_position()
+        return {
+            "pairs": len(targets),
+            "tail_cancelled": len(cancelled),
+            "close_orders": len(close_acks),
+            "position_before_qty": float(position_before.qty),
+            "position_after_qty": float(position_after.qty),
+            "errors": errors,
+        }
 
 
 async def _run_private_stack(
@@ -744,3 +787,63 @@ def _extract_cancelable_order_id(order: dict[str, object]) -> str | None:
         if value:
             return str(value)
     return None
+
+
+@dataclass(frozen=True)
+class _InterruptCleanupTarget:
+    pair_name: str
+    close_side: str
+    played_quantity: float
+    tail_client_order_id: str | None
+    tail_exchange_order_id: str | None
+
+
+def _interrupt_cleanup_targets(runtime: StrategyRuntime) -> tuple[_InterruptCleanupTarget, ...]:
+    targets: list[_InterruptCleanupTarget] = []
+    for pair_name, pair_state in runtime.state.pairs.items():
+        if pair_state.head_state.value != "closed":
+            continue
+        if pair_state.tail_state is None:
+            continue
+        if pair_state.tail_state.value not in {"hooked", "submitted", "living"}:
+            continue
+        played_quantity = float(pair_state.played_quantity or 0.0)
+        if played_quantity <= 0.0:
+            continue
+        close_side = "sell" if pair_state.pair.head.side.value == "buy" else "buy"
+        identity = pair_state.tail_identity
+        targets.append(
+            _InterruptCleanupTarget(
+                pair_name=pair_name,
+                close_side=close_side,
+                played_quantity=played_quantity,
+                tail_client_order_id=None if identity is None else identity.client_order_id,
+                tail_exchange_order_id=None if identity is None else identity.exchange_order_id,
+            )
+        )
+    return tuple(targets)
+
+
+def _resolve_tail_cancel_id(
+    adapter: OpenOrderReader,
+    tail_exchange_order_id: str | None,
+    tail_client_order_id: str | None,
+) -> str | None:
+    if tail_exchange_order_id:
+        return tail_exchange_order_id
+    if not tail_client_order_id:
+        return None
+    for order in _safe_cancel_order_candidates(adapter):
+        client_id = str(
+            order.get("client_order_id")
+            or order.get("cli_ord_id")
+            or order.get("clOrdID")
+            or order.get("cliOrdId")
+            or ""
+        )
+        if client_id != tail_client_order_id:
+            continue
+        order_id = _extract_cancelable_order_id(order)
+        if order_id:
+            return order_id
+    return tail_client_order_id
