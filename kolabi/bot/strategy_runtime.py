@@ -643,6 +643,7 @@ class StrategyRuntime:
                     and self.event_queue.empty()
                     and not self._inflight_commands
                     and not self._pending_commands
+                    and not self.chronos.pending_repeats
                 ):
                     break
                 try:
@@ -876,42 +877,107 @@ class StrategyRuntime:
             if not (quantity_changed or stop_changed or state_changed):
                 continue
             head_lifecycle = self._head_order_lifecycle.get(pair_name, _OrderLifecycleSnapshot())
-            update_signature = (
-                str(current.attempt_index),
+            update_signature: tuple[str, ...]
+            message: str
+            message_args: tuple[object, ...]
+            transition = (
                 current.head_state.value,
                 current.tail_state.value if current.tail_state is not None else "-",
-                str(current.played_quantity) if current.played_quantity is not None else "-",
-                _fmt_compact_price(stop_current),
-                _fmt_compact_price(desired_stop),
-                head_lifecycle.side or "-",
-                _fmt_compact_price(head_lifecycle.filled_qty),
-                _fmt_compact_price(head_lifecycle.filled_price),
-                head_lifecycle.filled_at.isoformat() if head_lifecycle.filled_at is not None else "-",
             )
+            played_qty = str(current.played_quantity) if current.played_quantity is not None else "-"
+            if transition == ("closed", "hooked"):
+                update_signature = (
+                    str(current.attempt_index),
+                    transition[0],
+                    transition[1],
+                    played_qty,
+                    _fmt_compact_price(desired_stop),
+                    head_lifecycle.side or "-",
+                    _fmt_compact_price(head_lifecycle.filled_qty),
+                    _fmt_compact_price(head_lifecycle.filled_price),
+                    head_lifecycle.filled_at.isoformat()
+                    if head_lifecycle.filled_at is not None
+                    else "-",
+                )
+                message = (
+                    "UPDATE (%s#%s): (%s--%s) PQ=%s DS=%s HFS=%s HFQ=%s HFP=%s HFT=%s"
+                )
+                message_args = (
+                    pair_name,
+                    update_signature[0],
+                    update_signature[1],
+                    update_signature[2],
+                    update_signature[3],
+                    update_signature[4],
+                    update_signature[5],
+                    update_signature[6],
+                    update_signature[7],
+                    update_signature[8],
+                )
+            elif transition in {("closed", "submitted"), ("closed", "living")}:
+                tail_identity = current.tail_identity
+                update_signature = (
+                    str(current.attempt_index),
+                    transition[0],
+                    transition[1],
+                    played_qty,
+                    _fmt_compact_price(stop_current),
+                    _fmt_compact_price(desired_stop),
+                    "-"
+                    if tail_identity is None or tail_identity.client_order_id is None
+                    else tail_identity.client_order_id,
+                    "-"
+                    if tail_identity is None or tail_identity.exchange_order_id is None
+                    else tail_identity.exchange_order_id,
+                    "-"
+                    if current.tail_trail is None or current.tail_trail.last_confirmed_at is None
+                    else current.tail_trail.last_confirmed_at.isoformat(),
+                )
+                message = (
+                    "UPDATE (%s#%s): (%s--%s) PQ=%s CS=%s DS=%s TCID=%s TOID=%s TLU=%s"
+                )
+                message_args = (
+                    pair_name,
+                    update_signature[0],
+                    update_signature[1],
+                    update_signature[2],
+                    update_signature[3],
+                    update_signature[4],
+                    update_signature[5],
+                    update_signature[6],
+                    update_signature[7],
+                    update_signature[8],
+                )
+            else:
+                update_signature = (
+                    str(current.attempt_index),
+                    transition[0],
+                    transition[1],
+                    played_qty,
+                    _fmt_compact_price(stop_current),
+                    _fmt_compact_price(desired_stop),
+                )
+                message = "UPDATE (%s#%s): (%s--%s) PQ=%s CS=%s DS=%s"
+                message_args = (
+                    pair_name,
+                    update_signature[0],
+                    update_signature[1],
+                    update_signature[2],
+                    update_signature[3],
+                    update_signature[4],
+                    update_signature[5],
+                )
             if self._last_pair_updates.get(pair_name) == update_signature:
                 continue
             self._last_pair_updates[pair_name] = update_signature
-            _LOGGER.info(
-                "UPDATE (%s#%s): (%s--%s) PQ=%s CS=%s DS=%s HFS=%s HFQ=%s HFP=%s HFT=%s",
-                pair_name,
-                update_signature[0],
-                update_signature[1],
-                update_signature[2],
-                update_signature[3],
-                update_signature[4],
-                update_signature[5],
-                update_signature[6],
-                update_signature[7],
-                update_signature[8],
-                update_signature[9],
-            )
+            _LOGGER.info(message, *message_args)
 
     def _log_runtime_legend_once(self) -> None:
         if self._legend_logged:
             return
         self._legend_logged = True
         _LOGGER.info(
-            "RAPPEL: AI=attempt_index PU=pair_update HS=head_state TS=tail_state PQ=played_qty CS=confirmed_stop DS=desired_stop ID=initial_dist CD=current_dist LU=last_update HFS=head_fill_side HFQ=head_fill_qty HFP=head_fill_price HFT=head_fill_time"
+            "RAPPEL: AI=attempt_index PU=pair_update HS=head_state TS=tail_state PQ=played_qty CS=confirmed_stop DS=desired_stop ID=initial_dist CD=current_dist LU=last_update TCID=tail_client_id TOID=tail_order_id TLU=tail_last_update HFS/HFQ/HFP/HFT=head_fill_fields(closed--hooked)"
         )
 
     def _record_head_lifecycle(self, move: EggMove) -> None:

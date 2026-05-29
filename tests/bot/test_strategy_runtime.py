@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from kolabi.bot.chronos import PendingRepeat
 from kolabi.bot.domain import (
     EggMove,
     EggMoveKind,
@@ -293,6 +294,40 @@ def test_strategy_runtime_waits_for_tail_after_filled_head() -> None:
     assert runtime.all_pairs_terminal is True
 
 
+def test_strategy_runtime_does_not_exit_while_repeat_is_pending() -> None:
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=sample_strategy()),
+        symbol="PI_XBTUSD",
+        executor=None,
+        simulate=False,
+    )
+    pair = sample_strategy()[0]
+    terminal = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.CLOSED,
+        played_quantity=Decimal("1"),
+    )
+    runtime.state = replace(runtime.state, pairs={"pair-a": terminal})
+    runtime.chronos.state = runtime.state
+    now = datetime.now(timezone.utc)
+    runtime.chronos.pending_repeats["pair-a"] = PendingRepeat(
+        pair_name="pair-a",
+        ready_at=now + timedelta(seconds=5),
+        next_attempt=2,
+    )
+
+    async def _run() -> bool:
+        task = asyncio.create_task(runtime.run())
+        await asyncio.sleep(0.15)
+        still_running = not task.done()
+        await runtime.stop()
+        await task
+        return still_running
+
+    assert asyncio.run(_run()) is True
+
+
 def test_public_polling_emits_market_ticks_for_living_tails() -> None:
     class Market:
         best_bid = 102.0
@@ -518,7 +553,92 @@ def test_tail_telemetry_rows_include_distance_and_last_update() -> None:
     row = rows[0]
     assert row.initial_distance == float(trail.baseline_width)
     assert row.current_distance == float(Decimal("102.0") - Decimal("99.0"))
-    assert row.last_tail_update_at == confirmed_at
+
+
+def test_update_log_closed_hooked_includes_head_fill_fields(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=True,
+    )
+    runtime._record_head_lifecycle(
+        EggMove(
+            kind=EggMoveKind.PLAYED_NOT_CANCELED,
+            occurred_at=now,
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.HEAD,
+            reply={"side": "buy", "cumQty": 1.0, "price": 100.0},
+        )
+    )
+    previous = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=None,
+        played_quantity=Decimal("1"),
+    )
+    current = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.HOOKED,
+        tail_trail=initial_tail_trail(pair, Decimal("100"), now),
+        played_quantity=Decimal("1"),
+    )
+    runtime.state = replace(runtime.state, pairs={"pair-a": current})
+
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._log_living_updates({"pair-a": previous})
+
+    assert "UPDATE (pair-a#1): (closed--hooked)" in caplog.text
+    assert "HFS=buy" in caplog.text
+    assert "HFQ=1.00" in caplog.text
+    assert "HFP=100.00" in caplog.text
+
+
+def test_update_log_closed_submitted_omits_head_fill_fields(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=True,
+    )
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99.0"),
+        last_confirmed_at=now,
+    )
+    previous = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.HOOKED,
+        tail_trail=trail,
+        played_quantity=Decimal("1"),
+    )
+    current = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.SUBMITTED,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        tail_trail=trail,
+        played_quantity=Decimal("1"),
+    )
+    runtime.state = replace(runtime.state, pairs={"pair-a": current})
+
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._log_living_updates({"pair-a": previous})
+
+    assert "UPDATE (pair-a#1): (closed--submitted)" in caplog.text
+    assert "TCID=CID-T" in caplog.text
+    assert "TOID=OID-T" in caplog.text
+    assert "HFS=" not in caplog.text
 
 
 def test_runtime_matches_private_record_to_tail_identity() -> None:

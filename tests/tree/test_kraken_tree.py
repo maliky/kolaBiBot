@@ -165,7 +165,32 @@ def test_status_log_suppresses_identical_lines(tmp_path, caplog):
         tree.log_due(fixed_time(0), snapshot=None)
         tree.log_due(fixed_time(1), snapshot=None)
 
-    assert caplog.text.count("kraken_tree env=demo") == 1
+    assert caplog.text.count(
+        "kraken_tree\tenv\tcount\tpair\tpersisted\traw\tbook\tbest_bid\tbest_ask\tspread\tmid\timbalance"
+    ) == 1
+    assert caplog.text.count("kraken_tree\tdemo\t0\tPI_XBTUSD\tFalse") == 1
+
+
+def test_status_log_prints_header_every_fifty_rows(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+    tree = KrakenTree(
+        KrakenConfig(db_url=db_url, pair="PI_XBTUSD", log_interval_seconds=0)
+    )
+    tree.ingest_book(
+        [{"price": 101, "qty": 1}],
+        [{"price": 99, "qty": 1}],
+        fixed_time(0),
+    )
+
+    with caplog.at_level("INFO"):
+        for offset in range(51):
+            tree._stored_count = offset + 1
+            tree.log_due(fixed_time(offset), snapshot=None)
+
+    header = (
+        "kraken_tree\tenv\tcount\tpair\tpersisted\traw\tbook\tbest_bid\tbest_ask\tspread\tmid\timbalance"
+    )
+    assert caplog.text.count(header) == 2
 
 
 def test_indicator_client_filters_pair_and_environment(tmp_path):

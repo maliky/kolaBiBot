@@ -172,6 +172,7 @@ class KrakenTree:
         self._trace_count = 0
         self._last_trace_cap_logged = False
         self._last_status_log_line: str | None = None
+        self._status_rows_logged = 0
         self._stop_event = asyncio.Event()
         self._rest_session = requests.Session()
         self._last_ticker_fetch_at: datetime | None = None
@@ -528,7 +529,10 @@ class KrakenTree:
         if status_line == self._last_status_log_line:
             return
         self._last_status_log_line = status_line
+        if self._status_rows_logged % 50 == 0:
+            self.logger.info(format_market_status_header())
         self.logger.info(status_line)
+        self._status_rows_logged += 1
 
     def trace_message(self, message: object, raw_payload: str) -> None:
         """Ecrit les messages websocket bruts si le mode trace est actif."""
@@ -1345,17 +1349,22 @@ def format_market_status(
     book_message_count: int,
     tick_size: float | None = None,
 ) -> str:
-    """Retourne une ligne courte lisible dans screen ou un log."""
+    """Retourne une ligne courte tabulee lisible dans screen ou un log."""
     best_bid = round_price_for_display(metrics.best_bid, tick_size)
     best_ask = round_price_for_display(metrics.best_ask, tick_size)
     spread = round_price_for_display(metrics.spread, tick_size)
     mid_price = round_price_for_display(metrics.mid_price, tick_size)
     return (
-        f"kraken_tree env={config.environment} count={stored_count} pair={config.pair} "
-        f"persisted={persisted} raw={raw_message_count} book={book_message_count} "
-        f"best_bid={best_bid:.2f} best_ask={best_ask:.2f} "
-        f"spread={spread:.2f} mid={mid_price:.2f} "
-        f"imbalance={metrics.imbalance:.4f}"
+        f"kraken_tree\t{config.environment}\t{stored_count}\t{config.pair}\t{persisted}\t"
+        f"{raw_message_count}\t{book_message_count}\t{best_bid:.2f}\t{best_ask:.2f}\t"
+        f"{spread:.2f}\t{mid_price:.2f}\t{metrics.imbalance:.4f}"
+    )
+
+
+def format_market_status_header() -> str:
+    """Retourne l'en-tete tabulee pour les lignes de statut compactes."""
+    return (
+        "kraken_tree\tenv\tcount\tpair\tpersisted\traw\tbook\tbest_bid\tbest_ask\tspread\tmid\timbalance"
     )
 
 
