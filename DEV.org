@@ -1,7 +1,41 @@
 #+TITLE: kolaBiBot
 #+OPTIONS: toc:2 num:nil
 
-* <2026-05-26 Tue 18:08>
+* <2026-05-28 Thu 10:05>
+
+** DONE plan
+   CLOSED: [2026-05-29 Fri 09:55]
+   #+BEGIN_SRC plantuml :results file link :file Docs/Map/view.png
+ @startuml   
+  actor Market 
+  participant "Public/Private DB Pollers" as Pollers 
+  participant "StrategyRuntime async loop" as Runtime
+  participant "Chronos supervisor" as Chronos
+  participant "Isis + step_pair reducer" as Reducer
+  participant "Horus command planner" as Horus
+  participant "Ogun executor" as Ogun
+  participant "Exchange adapter" as Adapter
+ 
+ 
+  Market -> Pollers: raw book/order/fill events
+  Pollers -> Runtime: EggMove
+  Runtime -> Chronos: process event
+  Chronos -> Reducer: targeted state + event
+  Reducer -> Chronos: new state + intents
+  Chronos -> Horus: intents
+  Horus -> Runtime: typed commands
+  Runtime -> Ogun: execute in background task
+  Ogun -> Adapter: REST command
+  Adapter -> Runtime: ack
+  Runtime -> Chronos: ack follow-up event
+  Chronos -> Runtime: next commands or repeat scheduling
+  @enduml
+   #+END_SRC
+   #+RESULTS:
+   [[file:Docs/Map/view.png]]
+
+* DONE <2026-05-26 Tue 18:08>
+  CLOSED: [2026-05-28 Thu 10:05]
 
 ** skewed f F pareto/lomax
 
@@ -78,32 +112,6 @@ for a stop buy:
 for a stop sell:
   t_{n+1} = t_n + f(r) * d'_{n+1}
   
-* <2026-05-24 dim. 20:10> Percent tail live failure notes
-stop sell at 75869
-stop buy at 76525.5
-stop buy at 77514.5
-
-- A private fill can arrive before the runtime has recorded the submitted head  identity. If the poller advances its cursor while the record is unmatched, the  event is lost for this run.
-- Account fill mapping receives =cli_ord_id= in raw Kraken payloads, but  fill-created order rows can lose it unless the fill event carries the client  order id through persistence.
-
-Limitations:
-
-- Kraken =fairPrice= does not map one-to-one to the old BitMEX vocabulary here;  =Sf-= is treated as mark-price trigger until a more precise Kraken source is  wired.
-
-Implementation result:
-
-- Tail vocabulary is translated at the pure command boundary: =S-= becomes  ordType =S= plus =ReduceOnly,LastPrice=, =Sf-= becomes =ReduceOnly,MarkPrice=,  and =Si-= becomes =ReduceOnly,IndexPrice=.
-- Relative =t%= and =tD= tails still fail loudly if no =tail_trail= exists;  private head fills now receive side-aware =reference_price= before Isis sees  the event.
-  # > What is this side-aware reference price ? does not sound functional
-- Private polling now starts from =launched_at - 5s=, buffers fresh unmatched  private records, and retries them after head identity is known instead of  losing the event.
-  # Why was the event lost what mechanisme and route did it take to get lost ?
-
-Remaining limitations:
-
-- Demo DB status can lag actual REST position state. During validation,  =close-all= verified the exchange position was flat even while preflight still  showed a stale local position snapshot.
-# > where does preflight takes its info from ?  
-- A future recovery patch should make =run-once= print the executed command list  or persist a run-local command journal so tail placement can be audited without relying on the account websocket DB.
-
 * <2026-05-20 Wed 16:18> Vocab
  - Hooked order :: ready to submit.
  - Sent order :: produced from hooked order and sent to the exchange; REST reply not yet known.
@@ -243,103 +251,6 @@ Remaining limitations:
  - separate =BaseOrderState= from =HeadState= if you want the five-layer model to be enforced cleanly.
 
 * <2026-05-20 mer. 08:52>
-** Audit basis
- - Ruff: 5 minor fixable issues.
- - Mypy: 123 errors in 29 files.  # >  I want to fixe this
- - Pyright: not meaningful # >  explain
-
-** Revised progress estimate
-
-- Typed vocabulary ( 60% -> 68%)  Real progress: =HeadState=, =TailState=, =TailMode=, =OrderReason=, =EggMove=, =RuntimeCommand=. But the vocabulary is still transitional: =OrderState = HeadState=, duplicated =Side= enums, legacy property aliases inside =OrderPairSpec=, mutable =dict= inside frozen dataclasses.
-# > Remove OrderState and replace them to HeadState
-# > Remove duplicated Side enums and legacy property aliases from OrderPairSpec
-# > Remove mutable dict from frozen dataclass
-
-- Pure reducer (40% -> 45%)
-   =step_pair()= exists, is side-effect-free, and has tests. But it is not yet the active runtime path.
-   # > What is the current active path ?  make step_pair the active path.
-    It also has a likely semantic inconsistency: first tail activation can emit =AMEND_TAIL= before any =tail_identity= exists, so =intents_to_commands()= silently emits no command.
-
-- Async readiness (45% -> 45)
-  0% | =AsyncChronos= exists and is tested, but it has =# mypy: ignore-errors=, uses =asyncio.to_thread= around blocking legacy calls, and the active =BotService.run_orders()= still uses threads. Async is available, not architecturally dominant.
-  Solution: flip ownership of orchestration:
-  - Make async the default control plane in =BotService.run_orders()=: run one event loop, schedule per-pair tasks, and use cancellation/timeouts as first-class flow control.
-  - Move all exchange and condition interactions behind async contracts (=ExchangeABC= async methods or async adapter facades), so =AsyncChronos= does not rely on =asyncio.to_thread= for core behaviour.
-  - Restrict threads to temporary compatibility adapters only, with clear deprecation markers and metrics around remaining thread crossings.
-  - Remove =# mypy: ignore-errors= from =async_chronos.py= by typing queue payloads, event unions, and adapter boundaries; make mypy clean as a merge gate for async modules.
-  - Promote =PairCycleRunner= + =step_pair()= into the async runtime path so deterministic reducer transitions drive the loop, while IO remains at the boundary.
-  - Replace blocking legacy waits with awaitable clocks/feeds and async persistence hooks (SQLAlchemy async engine later, sync bridge only at edges now).
-  - Expand tests from unit-only async wrappers to integration tests that assert: no thread spawn on active path, deterministic event order, and graceful cancellation on shutdown.
-# > do the above.
-    
-- Haskell migration readiness (45-->50%)
-  The shape is improving: pure helpers, enums, dataclasses, command/event types. But too much remains Pythonic and mutable: =Any=, =dict= payloads, pandas, queues, threads, legacy objects, dynamic order dictionaries.
-  Continue plan toward 60% readiness:
-  - replace dynamic payload =dict= with frozen typed records for pair/head/tail events.
-  - remove =Any= from command/event/public state boundaries and introduce explicit sum-type enums.    
-  - isolate pandas and queue/thread adapters behind IO ports so =step_pair()= stays pure.
-  - Remove dynamic order dictionaries by introducing one frozen order-spec type per head and tail lifecycle phase.
-  - Move thread and legacy object interactions into explicit effect handlers, keeping =step_pair()= and runner transitions side-effect free.
-  - ban in-place mutation in strategic state (copy-on-write records only).
-        # >, dot the above
-
-- Behavioral-test readiness (55% -> 65%)
- Stronger than before because 121 tests pass and reducer/contract tests exist. But the tests may encode wrong behavior in places; they test =AMEND_TAIL= on first tail hook, which may be exactly the bug.
-# > Yes I need to review the tests.
-
-** # > How do we make the new =PairCycleRunner= and =step_pair()=  the active strategic engine.
-** Critical incoherences
-
-  1. =HEAD_FILLED= creates a tail state but emits =AMEND_TAIL=.
-
-     In =step_pair()=, a filled head produces:
-
-     - =tail_state = TailState.HOOKED=
-     - =tail_mode = TailMode.FLAPPING=
-     - intent from =_tail_intent_for_state()=
-
-     But =_tail_intent_for_state()= returns =AMEND_TAIL= when =tail_state= is =HOOKED=. Then =intents_to_commands()= drops the amend if =tail_identity is None=.
-
-     Question: if the tail has no exchange identity yet, what exactly is being amended?
-
-     This is the most important bug or ambiguity I found.
-
-  2. =can_hook_tail()= and =step_pair()= do not fully agree.
-
-     =can_hook_tail()= says a tail can hook only if the head is “played” and not failed.
-
-     But =step_pair()= allows =HEAD_CANCELED_ZERO_FILL= to hook/place a tail.
-
-     That may be correct for your special meaning of “played” — e.g. post-only rejected because it would fill, reduce-only reducing nothing, cancel-if-touched fulfilled — but then the reducer needs a clearer outcome type. Right now, “canceled zero fill” is too broad.
-
-# > What do you suggest
-
-  3. =classify_confirmed_state()= maps =CANCELED_UNPLAYED= to =FAILED=, while =HEAD_CANCELED_ZERO_FILL= maps to =CLOSED= and may place a tail.
-
-     This is not necessarily wrong, but the distinction must be explicit:
-      # > This is ok and is clear for me.
-     - failed cancel: no tail
-     - fulfilled zero-fill cancel: tail allowed
-     - ordinary user/admin cancel: probably no tail unless intentionally treated as fulfilled
-      # > ordinary / admin cancel should not hook a tail.
-
-  4. =PairCycleRunner= does not yet consume private confirmation as a full event loop.
-
-     It submits the head and stops at “awaiting private confirmation.” The helper =egg_move_from_confirmed_head()= exists, but I do not see it wired into the active runner path.
-
-     # > wire the egg_move_... to the active runner.
-     
-  5. =StrategyState= is marked frozen but contains mutable =dict=.
-
-     This is acceptable in transitional Python, but not Haskell-like. For migration readiness, use immutable mappings conceptually: events in, new state out.
-# > Remove the mutable dict and use immutable mappings instead.
-** Why the previous estimate may be false
- For example, having =TailMode.FLAPPING= and =TailMode.FLYING= looks clean, but if =HOOKED + FLAPPING= emits an amend before placement, the vocabulary has not yet stabilized the lifecycle.
-
- It may also underestimate progress in testing: =121 passed= is significant. The problem is not lack of tests; the problem is whether the tests encode the right semantics.
-** Next decisive question
-
-# > remove the vocabulary activated and replace it by hooked.
 
 | Head outcome                                       | Fill | Tail allowed?                       |
 |----------------------------------------------------+------+-------------------------------------|
@@ -350,57 +261,7 @@ Remaining limitations:
 | ordinary user/admin cancel before play             |    0 | no                                  |
 | exchange technical failure / margin failure        |    0 | no                                  |
 
-# > Make this table should become the reducer contract.
-
 * <2026-05-19 mar. 20:33>
-
-Source reviewed: your =<2026-05-19 mar. 17:38>= tree and pasted =pair_cycle.py= notes. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
-
-** 1. Is =PairCycle= already addressing =StrategyState / step_strategy=?
-
-Partly, not fully.
-
-| Item                               | Current situation                                        | Correction                                                        |
-|------------------------------------+----------------------------------------------------------+-------------------------------------------------------------------|
-| =PairCycleRunner.run_pairs_once()= | Runs a list of pairs concurrently with =asyncio.gather=. | This is a batch runner, not yet a persistent strategy supervisor. |
-| =run_pair_once(pair)=              | Creates =state = PairCycleState(pair=pair)= each time.   | This loses persistent =dict[pair_id, PairState]= behavior.        |
-| =step_pair(state,event)=           | Good pure reducer for one pair.                          | Keep it. This is the Haskell-like nucleus.                        |
-| Missing piece                      | No =StrategyState(pairs: dict[str, PairCycleState])=.    | Add =step_strategy()= above =step_pair()=.                        |
-
-So your intuition is right, but the current code does not yet implement the full recommendation. =PairCycleRunner= runs multiple pairs once; =StrategyState= would own many pair states across time and events.
-
-** DONE 2. Main incoherence in the =17:38= tree: =Chronos= / =Ogun= confusion
-   CLOSED: [2026-05-19 mar. 20:38]
-
- You have two conflicting lines:
-
- | In document                                            | Problem                                        |
- |--------------------------------------------------------+------------------------------------------------|
- | =strategy_supervisor()  # I want this to be chronos()= | Good.                                          |
- | =command_executor_chronos()  # and this as Ogun()=     | Good.                                          |
- | =StrategySupervisor= =Ogun=                            | Incoherent: this assigns =Ogun= to supervisor. |
- | =Chronos= = Async coordinator of all pairs=            | Coherent with your intent.                     |
-
- Use this corrected vocabulary:
-
- | Technical role                  | Name          | Metaphor                 | Responsibility                                                   |
- |---------------------------------+---------------+--------------------------+------------------------------------------------------------------|
- | =StrategySupervisor=            | =Chronos=     | Timekeeper / coordinator | Owns =StrategyState=, routes DB events to pairs, emits commands. |
- | =CommandExecutor=               | =Ogun=        | Forge / executor         | Executes typed =RuntimeCommand= through exchange write port.     |
-| =OrderPairSpec=                 | =DragonPollen= | Pair seed / shell        | Static TSV-defined head/tail plan.                               |
- | =PairState=                     | =DragonEgg=   | Maturity of the egg      | Runtime state of one pair.                                       |
- | =PairActor=                     | =DragonFly=   | Live flying process      | Optional async task for one pair.                                |
- | =StrategySpec=                  | =Dragon=      | Whole strategy           | Collection of pair specs plus global settings.                   |
- | =StrategyBook= or =StrategySet= | =DragonGrove= | Grove                    | Collection of strategies, if needed.                             |
-
- I would not rename =OrderDict= to =DragonEgg=. That is misleading. =OrderDict= is one low-level exchange payload, not the pair embryo. Better metaphor:
-
- | Type             | Better metaphor          |
- |------------------+--------------------------|
-| =OrderPairSpec=  | =DragonPollen=            |
- | =OrderDict=      | keep literal =OrderDict= |
- | =RuntimeCommand= | =ForgeCommand=           |
- |                  |                          |
 
 
 ** DONE 4. Corrected architecture
@@ -432,39 +293,6 @@ Private DB update
   -> CommandConfirmation / PairEvent
      -> back to Chronos
 #+end_src
-
-** 5. Proposed =StrategyState= layer
-
-#+begin_src python
-@dataclass(frozen=True)
-class StrategyState:
-    strategy_id: str
-    pairs: dict[str, PairCycleState]
-    last_event_id: str | None = None
-
-
-def step_strategy(
-    state: StrategyState,
-    event: PairEvent,
-) -> tuple[StrategyState, tuple[RuntimeCommand, ...]]:
-    """Route one event to the affected pair and return updated strategy state."""
-    pair_id = event.pair_id
-    pair_state = state.pairs[pair_id]
-
-    next_pair_state, commands = step_pair(pair_state, event)
-
-    return (
-        replace(
-            state,
-            pairs={**state.pairs, pair_id: next_pair_state},
-            last_event_id=event.event_id,
-        ),
-        commands,
-    )
-#+end_src
-
-This is the missing layer above =step_pair()=.
-
 ** DONE 6. Corrected metaphor table
    CLOSED: [2026-05-19 mar. 20:51]
 
@@ -509,12 +337,6 @@ This is the missing layer above =step_pair()=.
 | =TailClosed=            | private DB                 | Tail terminal                               | OK.                                                                                         |
 | =DuplicateEventIgnored= | reducer/internal           | Idempotency no-op                           | OK.                                                                                         |
 
-I do not agree and I want you to align with the following, still you can argue and give me arguments to defend your point.
-I want =HeadCanceledZeroFill= to still hook at tail after.
-If the =HeadFailed= then no tail.
-The selection of failed and canceledzerofill is my prerogative and is done at event emission after carreful review ot the exachange order reason
-
-The tail should not be hooked if fail.
 ** DONE 8. Important correction about tail purpose
    CLOSED: [2026-05-19 mar. 21:02]
 
@@ -527,19 +349,8 @@ Tail is not only exposure protection.
 - tail materializes from played/canceled/filled condition
 - zero-fill cancel creates tail only if chain rule explicitly allows it
 - tail quantity equals the rule-defined quantity, often played quantity
-*
-** TODO 9. What to change in =pair_cycle.py=
-# > for the following correct by doing the recommended changes
- | Current issue                                      | Why                                       | Change                                                             |
- |----------------------------------------------------+-------------------------------------------+--------------------------------------------------------------------|
- | run_pair_once() = initializes state every call     | No persistent strategy memory.            | Move persistent state to =Chronos/StrategyState=.                  |
- | =pair_window_is_active()= uses relative zero test  | Ambiguous for windows like =[60,120]=.    | Use absolute launch time or store =activated_at=.                  |
- | =step_pair()= uses =event.note= strings            | Weak type model.                          | Replace with =PairEvent= dataclasses or enum.                      |
- | =tail_order_dict(pair)= uses planned head quantity | Wrong for partial fills.                  | Use =state.played_quantity= or =TailPlan.resolve_quantity(state)=. |
- | =confirmed_from_ack()= advances semantic state     | REST ack is not private truth.            | REST ack -> submitted only; private DB -> confirmed/played/closed. |
- | Price and ID helpers live in =pair_cycle.py=       | File mixes reducer, runner, pricing, IDs. | Split into =order_building.py=, =pricing.py=, =ids.py=.            |
 
-# > create dataclass for pairevent but call it EggMove
+create dataclass for pairevent but call it EggMove
 
 ** DONE 10. Immediate design decisions for you
    CLOSED: [2026-05-19 mar. 21:07]
@@ -555,89 +366,6 @@ Tail is not only exposure protection.
 | Should DB monitor fire commands?              | No. DB monitor emits facts; =Chronos= routes events; reducer emits commands; =Ogun= executes. |
 
 * <2026-05-19 mar. 17:38>
-** kolabi/
-*** bot/
-**** domain.py : Pure vocabulary: Side, HeadState, TailState, OrderReason, PairCycleState.
- - [ ] split TailState into base state vs mode; avoid float for quantities.
- # ok
-**** pair_cycle.py :  Pure reducer + runner bridge: step_pair(), PairCycleRunner.
- - [ ] strengthen terminal guards, idempotency, partial-fill quantity, private confirmation.
-
-**** runtime/auditor.py :  New MarketAuditor shell around old market-auditor behavior.
-  - [ ] keep as interpreter/orchestrator, not as semantic owner.
-# > this may be moved to chronos
-
-**** service.py :  Application service: config, preflight, TSV execution, runtime-state startup.
- - [ ] keep out of pure-domain import path.
-
-**** tsv/parser.py :  Strategy file parser.
- - [ ] map TSV rows into typed OrderPairSpec earlier.
- # > ok lets do that, make DragonPollen
-*** shared/core
-**** runtime_types : Canonical runtime types: RuntimeEvent, RuntimeCommand, OrderDict, BrokerReply.
-  - [ ] step_runtime() is still empty; reduce loose string payloads.
-*** runtime/kola/
-**** chronos.py :  Legacy Chronos becoming typed interpreter.
-   - [ ] still owns too much behavior; should only execute commands and emit events.
-# > yes I agree.
-# > propose a split of this file, what behavior are you identifying which should be moved.
-**** async_chronos.py :  Async-compatible Chronos shell.
-   - [ ] not final async design; use only after step_pair() is stable.
-# > ok
-**** pure_runtime.py: Extracted pure helper functions.
-   - [ ] expand this pattern; move more logic here.
-# > logic comming from chronos.py for example ?
-*** shared/exchanges/
-**** kraken_adapter.py : Exchange adapter and Kraken mapping.
-   - [ ] keep exchange semantics separate from pair lifecycle.
-# > what semantics do you want to split ?
-**** runtime_compat.py : Compatibility layer for BitMEX/Binance/Kraken-like calls.
-   - [ ] transitional only; avoid making it the domain model.
-# > yet ack.
-*** shared/runtime_state.py : DB-backed public/private state.
-   - [ ] pure tests should not import this directly.
-# > Why not ?
-** tests/
-*** bot/test_pair_cycle_step.py : First semantic tests.
-  - [ ] add quantity, terminal-state, idempotency, and private-confirmation tests
-# > is there a way I can guide you for those test ? like filling in a behavioral driven test template ?
-
-** TODO General
-*** Pure imports are not isolated :
-    Identify the pure import and propose reorganisation for isolating them
-*** Events are still string notes.
-    list all event still string notes
-    build a translation table
-    move the event from string notes to real types
-*** Tail quantity is not safely derived from played quantity.
- Fixe that
-*** Terminal states are not guarded.
- Remind me what you mean by guarded
-*** REST ack and private confirmation are still too close.
- Rest ack should be done somewhere with the db updating service. why does kolabi takes care of this
-*** =Chronos= still duplicates lifecycle meaning
- yes and we need to work on that. identify and propose what you want to deduplicate.
-** TODO Tests
-** VOCAB
- runtime_event_from_confirme_head
- played_quantity_from_event
-
- I'm thinking of renaming methaphoricaly PairCycle as DragonFly DrgFly
- OrderDict could be a dragon's egg DrgEgg
- # Is the PairCycle the Strategy supervisor ?
-
- Instead of PairActor name this DragonFly
-
- load TSV
- create typed pair specs
- initialize PairState for each pair
-
- async TaskGroup:
- public_db_event_source()
- private_db_event_source()
- strategy_supervisor()  # > I want this to be chronos()
- command_executor_chronos()  # and this as Ogun()
-
 
  #+begin_src text
  "Make Chronos the strategy supervisor
@@ -645,50 +373,6 @@ Tail is not only exposure protection.
  #+end_src
 
 ** Questions to guide the design
- When the TSV file is loaded, does each row create a =TailPlan= immediately, or only a =HeadPlan= with tail parameters?
-
- # > The issue I have here is I can give the full detail of the tail until the head is trigger.  Head can be updated at relative to price market for example as a sell limit order placed at 1% above mid price and updated every 10 minutes. when this head is filled, is the time I will know the price it is filled at and be able to create the tail.
-
- #+begin_src text
- TSV row -> OrderPairSpec
- OrderPairSpec contains HeadPlan + TailPlan.
- No exchange order exists yet.
- #+end_src
-
- Active order are set only by a time window.
- The time window define the active time pair can be hooked.
-
- by hooked I mean that the conditions (price and maybe other) of an active order are satisfied from the local db, and the order can be emitted to the exchange
-
- An submitted order is an order for wich we have executed the rest cmd.
- A confirmed order is an order for which we have received REST ack and which has been mirored/amended in the local private db
-
-
- =Ogun= should receive typed RuntimeCommand.
-  Legacy dicts should exist only at the adapter boundary.
-
-
- Two events should never produce conflicting commands even if they arrive at the same time.
-  Private order terminal event wins over public price event.
-
-
- We have one StragegySupervisor That we call =Chrono= he is the one owning dict[pair_id, PairState]
-
- We should persist at the minimum:
-  #+begin_src text
-  strategy_id
-  pair_id
-  head client_order_id
-  tail client_order_id
-  head state
-  tail state/mode
-  played quantity
-  last processed private event id/timestamp
-  last emitted command id
-  #+end_src
-
-
-
 ** Vocabulary
  Strategysupervisor Chronos
  Executer of RuntimeCommand Ogun
@@ -734,9 +418,6 @@ Tail is not only exposure protection.
  | =TailClosed=            | private DB                 | Tail terminal                    |              |
  | =DuplicateEventIgnored= | reducer/internal           | Idempotency protection           |              |
 
- # > The error is to think that tail comes as an exposure protection. In most time yes but it is also used as a tool to enter the market.  Orders can be chained together and sometime we want to chain on a tail been filled after a canceled head for example.
-
-
  | Command           | Executor    |
  | ----------------- | ----------- |
  | =placehead=       | =Ogun=     |
@@ -748,254 +429,7 @@ Tail is not only exposure protection.
  | =Ignore=          | no-op       |
 
 
-** Check
-
-
- #+begin_src python
- @dataclass(frozen=True)
- class StrategyState:
- pairs: dict[str, PairCycleState]
-
- def step_strategy(
- state: StrategyState,
- event: PairEvent,
- ) -> tuple[StrategyState, tuple[RuntimeCommand, ...]]:
- ...
- #+end_src
-
- Then tests:
-
- #+begin_src text
- Given three TSV rows
- When one private event arrives for pair B
- Then only pair B changes
- And commands for pair A and C are empty
- #+end_src
-
- That preserves the legacy “multiple orderpairs in TSV loop” idea in a Haskell-compatible way.
-** DONE Questions
-   CLOSED: [2026-05-20 Wed 15:50]
- - Q01 domain.py   Tail state split
-     FLAPPING and FLYING are modes of a tail, not base lifecycle states.
- - Q02 HeadState   Meaning of NEW
-  NEW mean confirmed order (hence db validated order) with the reason listed in the adequate table [[*<2026-05-17 dim. 11:22> ref table][<2026-05-17 dim. 11:22> ref table]]
- - Q03 HeadState   Overlap with SUBMITTED
-  SUBMITTED is just something that has been sent to the plateform
-  NEW order is db confirmed plus specific reasons
- - Q04 TailState   Tail base states
-   The base states of a tail are the same as for any other order : LATENT, HOOKED, SUBMITTED, CONFIRMED, LIVING, FAILED, CLOSED.
- - Q05 TailMode   Tail modes
-  FLAPPING mean “tail adjusts while head is still living,” and FLYING mean “tail acts after head is closed/played”. the flying does not had much fonctionality.  as it is not a state and just a metaphore
- - Q06 OrderReason   Exchange reason mapping
-   All Kraken statuses/reasons must be mapped for real trading safety.
- - Q07 ConfirmedOrder.is_played   Meaning of played
-  “played” mean  “fulfilled strategy meaning,” wich can but not necessarely mean exposure.
- - Q08 ConfirmedOrder.is_played   Zero-fill cases
-  an order be semantically played with zero filled quantity. the the ref table  [[*<2026-05-17 dim. 11:22> ref table][<2026-05-17 dim. 11:22> ref table]]
- - Q09 ConfirmedOrder.is_played   Reduce-only fulfillment
-             If reduce-only reduces nothing because no position exists, should it be played and closed. There is no state fulfilled_without_exposure.
- - Q10 ConfirmedOrder.is_played   Post-only rejection
-   A post-only is rejected because it would take liquidity, is a close see [[*<2026-05-17 dim. 11:22> ref table][<2026-05-17 dim. 11:22> ref table]]  you can map closed to strategiclay fullfilled
- - Q11 can_hook_tail(   Tail after zero-fill close
-    a tail can be hookable after a head closes with zero filled quantity YES
- - Q12 can_hook_tail(   Tail after cancel
-    the head is canceled after partial fill, the tail be hooked for the filled quantity and submitted
- - Q13 tail_mode_for_head(   Tail mode source
-    Should tail mode depend on HeadState only, or on HeadState + played_quantity + reason?
- # Here we have tail state and tail mode
- - Q14 PairCycleState   Quantity type
-             played/filled/remaining quantities should use Decimal immediately and not wrap existing floats with typed aliases.
- - Q15 PairCycleState   Tail identity
-             theT   The identity that  must be stored for a submitted tail is the same that for any other order. usualy we keep the client order id and, exchange order id.
- - Q16 PairCycleState   Command history
-   Only the two latest command per order role should be store for idempotency.
- - Q17 pair_cycle.py   Centrality
-     pair_cycle.py should become the authoritative pure model for head/tail behavior.
- - Q18 step_pair(   Reducer scope
-    Should step_pair() should only state transitions and not construct exchange commands.
-   # > check
- - Q19 step_pair(   Terminal guards
-     States are absolutely terminal are failed and closed.
- - Q20 step_pair(   Duplicate events
-             If the same private confirmation event arrives twice the reducer should ignore it log as a small warning.
- - Q21 PAIR_EVENT_   Event vocabulary
-   We  full typed event dataclasses immediately.
- - Q22 RuntimeEvent.note   String dispatch
-             note  should be removed from logic entirely and not kept for human-readable diagnostics.
- - Q23 tail_order_dict(pair)   Partial fill quantity
-     tail quantity always equal played_quantity rather than original head.quantity.
- - Q24 tail_order_dict(pair)   Quantity source
-             If the head is amended before fill, the tail quantity should be derive the actual filled quantity.
- - Q25 tail_command(   Amend identity
-    For tail amendment, both  clOrdID, exchange order_id, should be mandatory.
- - Q26 played_quantity_from_event(   Missing quantity
-             If an event has no filled quantity, it should it default to unknown.
- - Q27 played_quantity_from_event(   String quantity
-    All exchange quantities be parsed as Decimal(str(value)).
- - Q28 runtime_event_from_confirmed_head(   Source of truth
-             Should this function only be called from private DB/WebSocket confirmation, never from REST placement acknowledgment ?
- # > need to check.
- - Q29 confirmed_from_ack(   Dangerous naming
-    this be renamed to submitted_from_ack() because REST ack confirms submission, not lifecycle completion.
-
-
- - Q30 PairCycleRunner   Shell responsibility
-     PairCycleRunner should only submit commands and feed confirmed events back to step_pair().
- - Q31 run_pair_once(   REST ack progression
-     REST placement ack should only move the order to SUBMITTED never to CLOSED or FAILED.
- - Q32 runtime_types.py   Boundary typing
-             Which should be typed first: RuntimeEvent, RuntimeCommand, OrderDict, or BrokerReply ?
- # > you choose
- - Q33 RuntimeCommand   Idempotency
-     two commands are duplicates when they have, same client order id and same semantic action.
- - Q34 step_runtime(   Placeholder
-     step_runtime() should be deleted until needed.
- - Q35 runtime_commands.py   Pure vs IO split
-             execute_runtime_command() should move to an interpreter module, leaving this file pure.
-
- - Q36 runtime_command_from_order(   Malformed orders
-     malformed legacy order dicts should raise exceptions.
- - Q37 validation_conditions_for(   Confirmation rules
-             Validation rules should be exchange-independent and not Kraken-specific. The later should be removed.
- - Q38 execute_runtime_command(   Legacy binding
-             this function should not be  allowed to call legacy order functions directly anymore. we want to move one. If we break we will repear.
- - Q39 Chronos   Metaphor preservation
-     Chronos should remain the intentional metaphorical name for the time-bound orchestration.
- - Q40 Chronos   Internal split
-             Which part should be extracted first: normalizer, dispatcher, confirmation matcher, or event emitter.
- # > you choose.
- - Q41 Chronos.handle_load(   Exception logic
-    I think exception handling should be pushed into command execution/interpreter code (Ogun)
- - Q42 Chronos.build_runtime_command(   Purity
-             this function shoulb be required to stay pure: no DB, no exchange, no mutation.
- - Q43 Chronos.confirm_pair_transition(   Duplicated lifecycle logic
-    This function delegate all lifecycle decisions to step_pair().
- - Q44 Chronos.matches_confirmation_rule(   Confirmation identity
-             the minimum valid confirmation match is an order id and a timestamp.
- - Q45 latest_execution_for_status(   IO helper
-     this stay only as query/helper code with no domain decision authority.
- - Q46 async_chronos.py   Async timing
-     async work should not pause or wait for  the synchronous reducer model is stable. They should be done together.
- - Q47 AsyncChronos.emit_event(   Event stream
-     Emitted events should be logged only and fed immediately into step_pair.
- - Q48 pure_runtime.py   Extraction target
-             Which logic should move here next: price derivation, condition evaluation, hook update, or payload construction?
-    # > you choose
- - Q49 condition_truth_value(   Invalid comparisons
-             If a condition has invalid values,  it should a typed validation error.
- - Q50 derive_hooked_order_update(   Hook vocabulary
-     “hooked” mean formally verified and ready for automatic submission.
- - Q51 build_order_payload(   Payload ownership
-   head/tail  builders should use the same funcion but not at the same time.
- - Q52 MarketAuditor   Metaphor preservation
-     MarketAuditor should the human-level market observer/orchestrator.
- - Q53 MarketAuditor.go(   Semantic ownership
-     MarketAuditor.go() should call the typed pair-cycle interpreter rather than deciding lifecycle semantics itself
- - Q54 kraken_adapter.py   Exchange boundary
-             Which Kraken quirks must never leak into step_pair()?
-    # > I do not know give example of what quirks could leak
- - Q55 _map_order_status_from_payload(   Real payload tests 
- I do not have real Kraken payload examples so check the api doc only. they should have it
- - Q56 build_exec_orders(   Private DB truth
-     Private DB execution rows should be the only trusted source for played/filled/closed status.
- - Q57 runtime_compat.py   Transitional wrapper
-     This file can be removed aggressively after ExchangePort is stable.
- - Q58 runtime_state.py   Pure/IO split
-             we should extract a pure PublicMarketState dataclass/protocol before touching DB code.
- - Q59 KrakenRuntimeStateClient   IO boundary
-             Should this client be forbidden from importing pure domain reducers?
-     # >  why do you ask ?
- - Q60 service.py   Heavy imports
-     Service.py should be treated as application composition only not imported by pure tests.
- - Q61 kolabi/bot/__init__.py   Import blocker
-     __init__.py should be reduced to package metadata only.
- - Q62 test_pair_cycle_step.py   Behavioral coverage
-   We shoud test all the behavior: partial fill quantity, duplicate events, terminal guards, or private confirmation. it does not matter which one we start with
- - Q63 test_runtime_commands.py   Dependency blockage
-   Isolate pure tests be so they never require dateparser, SQLAlchemy, or legacy runtime imports if this this feasible.
- - Q64 requirements.txt   Dependency policy
-   Try to split dev/runtime dependencies from pure-domain test dependencies.
- - Q65 DEV.org   Design-to-test flow
-   Each explicity and clear rule from DEV.org become one pytest scenario with the same wording
- - Q66 Whole model    Head/tail vocabulary
-    you can use the word Order as an abstraction of both head and tail.
- - Q67 Whole model    Exchange confirmation
-   My intended rule: is  REST ack creates SUBMITTED whil private DB/WebSocket creates CONFIRMED/LIVING/CLOSED/FAILED?
- - Q68 Whole model    Haskell migration
-   The target mental model be State + Event -> State + Commands as much as possible.
- - Q69 Whole model    Metaphor boundary
-   Adopte the rule “metaphor outside, typed literal vocabulary inside”  as an agent instruction.
-
- Use the anser above to tighen our work.  do not revert decision taht were already made . use this question only to fill in hole in interpreation
-* <2026-05-19 mar. 11:05>
-** Proposed action plan
-11. Concrete success criteria.
-    - No active runtime import path contains =legacy=.
-    - One main execution path only.
-    - Minimal mypy noise in active runtime modules. (< 80)
-    - Price and quantity arithmetic no longer use bare =float= in core logic.
-    - Touched files have docstrings explaining role and typed boundaries.
-    - Tests cover head/tail cycle decisions plus exchange command construction.
-
-** Pass status
-
-*** 2026-05-19 runtime migration pass
-- Dead code removal completed with guards:
-  - removed unused bridge modules:
-    - =kolabi/bot/runtime/orders.py=
-    - =kolabi/runtime/kola/exchange.py=
-    - =kolabi/runtime/kola/exchanges/base.py=
-    - =kolabi/runtime/kola/exchanges/__init__.py=
-  - sacred paths preserved: order submission, amend logic, condition evaluation, head/tail activation.
-  - evidence and rationale tracked in =kolabi/runtime/DEAD_CODE_AUDIT.org=.
-
-- File-level documentation pass completed for touched modules:
-  - module docstrings now include:
-    - purpose
-    - inputs and outputs
-    - side effects
-    - important types
-    - role classification (=pure logic=, =boundary adapter=, =interpreter shell=)
-    - explicit transitional status when applicable.
-  - applied across touched files in:
-    - =kolabi/runtime/kola/=
-    - =kolabi/shared/core/=
-    - =kolabi/shared/runtime_state.py=
-    - =kolabi/bot/=
-    - runtime regression tests touched in this pass.
-
-- 2026-05-19 closure state:
-  - active strategy path now runs through =python -m kolabi.bot run= and =python -m kolabi.bot run-once= only.
-  - =kolabi/bot/runtime/auditor.py= no longer subclasses =KolaMarketAuditor=.
-  - =run_kola.py= removed as an extra execution surface.
-  - active-module mypy gate reduced to =66= lines for the tracked set.
-  - targeted regressions cover pair-cycle decisions, command construction, and the shared service path for =run= plus =run-once=.
-
-
-**** Architectural question
- The migration order should optimize for cleanliness and runnable bot.
-
- non-negotiable success :
-  - no active import path contains =legacy=
-  - one main execution path only
-  - minimal mypy noise (below 50 for all code base)
-  - no bare =float= in core price/quantity logic
-  - tests cover head/tail cycle decisions
-  - tests cover exchange command construction
-
 * <2026-05-17 dim. 07:37> rewrite and vocabulary
-1. A tail cannot be hooked after the failed head.
-2. A tail can only be hooked after a played head.
-3. Played order should not be amended.
-4. Failed and Closed are terminal states
-5. Tail is creation :
-   - Latent -- Hooked -- submitted tail when head is Played
-   - Flapping when head is Living
-   - Flying when head is Closed
-6. In case of Flapping Tail we only have one tail, that is amended on the plateform as partial_fills comes in the private db.
-7. If a head is partially filled and then canceled, then it should live behind flying tail associated with the partialy filled amound.
-8. When an order is hooked the next automatic step is the submission.
-
 ** Vocabulary definition
 - Private DB :: source of truth for my orders, execution, confirmation, position, and balance.
 - Public DB :: source of truth for market conditions, price/index indicators, and trigger conditions.
@@ -1058,7 +492,6 @@ Tail is not only exposure protection.
   - not a separate base order state.
   - sized according to the final confirmed played quantity of the head.
 
-    
 ** Diagrams
    
 #+BEGIN_SRC plantuml :results file link :file ordercycle.png
@@ -1165,14 +598,6 @@ Tail is not only exposure protection.
 | T       | T         | closed |
 
 * <2026-05-16 sam. 14:48> Fix the type architecture.
-
-2. Strengthen BargainLike until Chronos, Condition, HookOrder, TrailStop can use it.
-3. Split OrderDict into typed variants: NewOrderDict, AmendOrderDict, CancelOrderDict, BrokerReply.
-4. Make get_order_from return a narrower type, or add separate helpers for different payloads.
-5. Fix mypy errors in touched runtime files first, not the whole repository.
-6. Expand RuntimeState to model primary/tail/hook lifecycle explicitly.
-7. Keep all behavior and tests unchanged.
-
 * Environments
 
 | Environment | REST endpoint                                      | WebSocket endpoint                  |
@@ -1190,27 +615,6 @@ KRAKEN_FUTURE_API_KEY
 KRAKEN_FUTURE_API_SECRET
 #+end_example
 
-* Installation
-
-#+begin_src bash
-python -m pip install -e .
-#+end_src
-
-Main entry points:
-
-#+begin_src bash
-python -m kolabi.tree.kraken --help
-python -m kolabi.tree.account --help
-python -m kolabi.bot run --help
-#+end_src
-
-Console scripts:
-
-#+begin_example
-kolabi-kraken-tree
-kolabi-kraken-account
-#+end_example
-
 * Databases
 
 Demo and live databases are separated. Public and private databases are also separated.
@@ -1222,26 +626,6 @@ Demo and live databases are separated. Public and private databases are also sep
 
 The public service stores market-book snapshots.
 The private service stores orders, fills, balances, positions, margin fields, and connection health.
-
-Private account state is the source of truth for our own orders.
-
-Instrument rule cache:
-
-- Kraken instrument metadata is cached locally in the public DB.
-- Demo location:
-  - DB file: =pub-futures-demo.sqlite=
-  - table: =exchange_instruments=
-- Live location:
-  - DB file: =pub-futures-live.sqlite=
-  - table: =exchange_instruments=
-- Cached fields include:
-  - =symbol=
-  - =tick_size=
-  - =contract_size=
-  - =min_quantity=
-  - =instrument_type=
-  - =tradeable=
-  - =raw_payload=
 
 Local inspection commands:
 #+BEGIN_SRC bash  -i
@@ -1347,27 +731,3 @@ python -m kolabi.bot run --strategy Orders/pi_xbtusd_sell_plus1_tail_0p5.tsv --e
  | =spot-margin-costs= | get Spot pair leverage/margin metadata, plus margin-fee warning |
  | =futures-costs=     | get Futures maker/taker schedule, funding, margin parameters    |
  | =costs=             | compare Spot and Futures for one logical asset pair             |
-* Tests
-
-#+begin_src bash
-python -m pytest -q \
-  tests/exchanges \
-  tests/bot/test_runtime_regression.py \
-  tests/test_config.py \
-  tests/tree/test_account_state.py \
-  tests/tree/test_kraken_tree.py
-#+end_src
-
-* Tail Fix Trace 2026-05-25
-
-I changed live runtime flow so a head REST ack only emits HEAD_SUBMITTED; HEAD_PLAYED now comes from private order polling, which gates tail placement on confirmed fill. I added raw exchange interaction logging at the adapter port boundary to `logs/kraken-exchange-raw.ndjson` with request, ack, and raw payload fields for deterministic troubleshooting. I also kept trigger-order verification and updated runtime tests to require private fill confirmation before tail submission.
-
-Limitations: if private feed is stale or unavailable, tail placement is delayed or can time out by design; this fails loudly rather than placing a potentially invalid reduce-only trigger too early.
-
-* Tail Amend Ground-Truth Fix 2026-05-27
-
-The observed non-updating tail was not only a pure reducer problem: REST audit showed repeated =/editorder= replies with =editStatus.status=invalidPrice= for unrounded stop amendments such as =74757.668749999999998470=, while placement was rounded correctly. I fixed this at the Kraken adapter boundary by rounding amend =price= and =stopPx= to the instrument tick before sending =/editorder=.
-
-There was also a semantic split: local telemetry treated =-y S= as =src=book= while Kraken placement defaulted the stop trigger to last price. I made =S= and =S-= resolve to LastPrice, with =Sf/Sf-= for MarkPrice and =Si/Si-= for IndexPrice, so telemetry, order building, and exchange trigger mapping use the same source.
-
-State is now grounded more strictly in exchange acknowledgement: tail amend accepts update the confirmed stop from the adapter ack, rejected amend acks revert the desired stop back to the last confirmed stop. Telemetry can still show market/reference movement, but =tail_stop= should only move when the platform has accepted or confirmed the new stop.
