@@ -33,8 +33,10 @@ from kolabi.bot.tail_tracking import initial_tail_trail
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     AmendTailCommand,
+    PlaceHeadCommand,
     PlaceOrderCommandRequest,
     PlaceTailCommand,
+    PrivateOrderRecord,
     RuntimeCommandKind,
     Symbol,
 )
@@ -116,7 +118,7 @@ def test_strategy_runtime_simulation_initialises_relative_tail_reference() -> No
     assert result.state.pairs["pair-a"].tail_trail.entry_reference_price == Decimal("100.0")
 
 
-def test_strategy_runtime_live_mode_does_not_synthesise_head_played_from_ack() -> None:
+def test_strategy_runtime_live_mode_does_not_emit_state_followups_from_ack() -> None:
     pair = sample_strategy()[0]
     pair = replace(pair, tail_price_spec=1.5, tail_price_spec_type="t%", amount_type="qAt%p%")
 
@@ -141,16 +143,15 @@ def test_strategy_runtime_live_mode_does_not_synthesise_head_played_from_ack() -
     )
 
     followups = runtime._followup_events(prepared, ack)
-    assert len(followups) == 1
-    assert followups[0].kind == EggMoveKind.HEAD_SUBMITTED
+    assert followups == ()
 
 
-def test_tail_submitted_followup_uses_exchange_rounded_ack_price() -> None:
+def test_tail_submitted_followup_uses_exchange_rounded_ack_price_in_simulation() -> None:
     runtime = StrategyRuntime(
         strategy=StrategySpec(name="demo", pairs=sample_strategy()),
         symbol="PI_XBTUSD",
         executor=SimulatedExecutor(),
-        simulate=False,
+        simulate=True,
     )
     command = PlaceTailCommand(
         kind=RuntimeCommandKind.PLACE,
@@ -173,6 +174,42 @@ def test_tail_submitted_followup_uses_exchange_rounded_ack_price() -> None:
 
     assert followups[0].reply is not None
     assert followups[0].reply["stopPx"] == 99.5
+
+
+def test_runtime_resolves_private_record_from_live_command_identity_without_ack_state() -> None:
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=sample_strategy()),
+        symbol="PI_XBTUSD",
+        executor=SimulatedExecutor(),
+        simulate=False,
+    )
+    command = PlaceHeadCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="buy",
+            ordType="Market",
+            orderQty=Decimal("1"),
+            clOrdID="CID-HEAD-LIVE",
+        ),
+    )
+    identity = runtime._command_identity_from_command(command)
+    assert identity is not None
+    runtime._live_command_identities["test"] = identity
+    record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="filled",
+        client_order_id="CID-HEAD-LIVE",
+    )
+
+    resolved = runtime.pair_state_for_record(record)
+
+    assert resolved is not None
+    pair_state, role = resolved
+    assert pair_state.pair.name == "pair-a"
+    assert role == OrderRole.HEAD
 
 
 def test_strategy_runtime_dispatches_exchange_commands_without_blocking_loop() -> None:

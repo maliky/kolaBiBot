@@ -105,6 +105,7 @@ class BotConfig:
     max_reconcile_age_seconds: float = 300.0
     tail_verify_timeout_seconds: float = 11.0
     tail_verify_poll_seconds: float = 0.5
+    tail_visibility_timeout_seconds: float = 20.0
 
 
 class BotService:
@@ -259,6 +260,7 @@ class BotService:
             environment=self.config.environment,
             market_type="futures",
             account_scope="default",
+            tail_visibility_timeout_seconds=self.config.tail_visibility_timeout_seconds,
             simulate=simulate,
         )
         if dry_run:
@@ -327,6 +329,7 @@ class BotService:
             verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
             verify_poll_seconds=self.config.tail_verify_poll_seconds,
             run_blocking_calls_in_thread=True,
+            verify_tail_on_place=False,
         )
         return OgunExecutor(port)
 
@@ -475,6 +478,7 @@ class AdapterExchangePort(ExchangePort):
         verify_timeout_seconds: float = 11.0,
         verify_poll_seconds: float = 0.5,
         run_blocking_calls_in_thread: bool = False,
+        verify_tail_on_place: bool = True,
     ) -> None:
         adapter_cls = get_adapter(exchange)
         self.adapter = cast(
@@ -490,13 +494,15 @@ class AdapterExchangePort(ExchangePort):
         self.verify_timeout_seconds = verify_timeout_seconds
         self.verify_poll_seconds = verify_poll_seconds
         self.run_blocking_calls_in_thread = run_blocking_calls_in_thread
+        self.verify_tail_on_place = verify_tail_on_place
 
     async def place_head(self, command: PlaceHeadCommand) -> OrderAck:
         return await self._call_blocking(self._place, command.request)
 
     async def place_tail(self, command: PlaceTailCommand) -> OrderAck:
         ack = await self._call_blocking(self._place, command.request)
-        await self._verify_tail_trigger(command.request, ack)
+        if self.verify_tail_on_place:
+            await self._verify_tail_trigger(command.request, ack)
         return ack
 
     async def amend_head(self, command: AmendHeadCommand) -> OrderAck:
