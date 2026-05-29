@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -202,10 +201,10 @@ def test_chronos_emits_typed_runtime_commands_only() -> None:
     assert all(isinstance(command, DragonSong.__args__) for command in commands)
 
 
-def test_chronos_async_event_loop_routes_batch() -> None:
+def test_chronos_processes_batch_events() -> None:
     chronos = Chronos(state=sample_state())
-    async def _run() -> tuple[DragonSong, ...]:
-        await chronos.event_queue.put(
+    commands = chronos.process_events(
+        [
             EggMove(
                 kind=EggMoveKind.HEAD_HOOKED,
                 occurred_at=datetime(2026, 5, 21, 12, 5, tzinfo=timezone.utc),
@@ -213,14 +212,11 @@ def test_chronos_async_event_loop_routes_batch() -> None:
                 pair_name="pair-a",
                 event_id="evt-5",
             )
-        )
-        return await chronos.run_once()
-
-    commands = asyncio.run(_run())
+        ]
+    )
 
     assert commands
-    queued = asyncio.run(chronos.command_queue.get())
-    assert isinstance(queued, DragonSong.__args__)
+    assert isinstance(commands[0], DragonSong.__args__)
 
 
 def test_closed_tail_can_hook_dependent_pair() -> None:
@@ -254,3 +250,81 @@ def test_closed_tail_can_hook_dependent_pair() -> None:
 
     assert commands
     assert chronos.state.pairs["pair-y"].head_state == HeadState.HOOKED
+
+
+def test_chronos_repeats_terminal_pair_with_fresh_attempt_key() -> None:
+    pair = replace(sample_pair("pair-r"), try_num=2)
+    state = StrategyState(
+        launched_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
+        strategy_id="strategy-repeat",
+        pairs={
+            "pair-r": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.CLOSED,
+                tail_mode=TailMode.FLYING,
+                played_quantity=Decimal("1"),
+                attempt_index=1,
+            ),
+        },
+    )
+    chronos = Chronos(state=state)
+    move = EggMove(
+        kind=EggMoveKind.PLAYED_AND_CANCELED,
+        occurred_at=datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc),
+        symbol="PI_XBTUSD",
+        pair_name="pair-r",
+        event_id="evt-repeat-1",
+        is_private=True,
+    )
+
+    commands = chronos.process_event(move)
+
+    assert commands
+    assert chronos.state.pairs["pair-r"].attempt_index == 2
+    assert chronos.state.pairs["pair-r"].head_state == HeadState.HOOKED
+    assert commands[0].pair_name == "pair-r"
+
+
+def test_chronos_delays_repeat_until_pause_has_elapsed() -> None:
+    pair = replace(sample_pair("pair-r"), try_num=2, dr_pause=1.0)
+    state = StrategyState(
+        launched_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
+        strategy_id="strategy-repeat",
+        pairs={
+            "pair-r": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.CLOSED,
+                tail_mode=TailMode.FLYING,
+                played_quantity=Decimal("1"),
+            ),
+        },
+    )
+    chronos = Chronos(state=state)
+    occurred_at = datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc)
+
+    commands = chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=occurred_at,
+            symbol="PI_XBTUSD",
+            pair_name="pair-r",
+            event_id="evt-repeat-delay",
+            is_private=True,
+        ),
+        now=occurred_at,
+    )
+    early = chronos.activate_ready_repeats(
+        symbol="PI_XBTUSD",
+        now=occurred_at + timedelta(seconds=30),
+    )
+    ready = chronos.activate_ready_repeats(
+        symbol="PI_XBTUSD",
+        now=occurred_at + timedelta(seconds=61),
+    )
+
+    assert commands == ()
+    assert early == ()
+    assert ready
+    assert chronos.state.pairs["pair-r"].attempt_index == 2

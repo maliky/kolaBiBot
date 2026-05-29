@@ -28,20 +28,28 @@ def _pair(name: str = "pair-a") -> OrderPairSpec:
 
 
 def test_head_client_order_id_is_readable_and_safe() -> None:
-    value = head_client_order_id(_pair(), at=datetime(2026, 5, 25, 18, 0, 0, tzinfo=timezone.utc))
+    value = head_client_order_id(
+        _pair(),
+        attempt_index=2,
+        at=datetime(2026, 5, 25, 18, 0, 0, tzinfo=timezone.utc),
+    )
 
-    assert value.startswith("h-")
+    assert value.startswith("H2")
     assert len(value) <= 64
-    assert re.fullmatch(r"[a-z0-9-]+", value) is not None
-    assert len(value.split("-")) == 3
+    assert re.fullmatch(r"[A-Za-z0-9-]+", value) is not None
+    assert len(value.split("-")) == 2
     assert value.split("-")[-1] == "260525180000"
 
 
 def test_tail_client_order_id_is_readable_and_safe() -> None:
-    value = tail_client_order_id(_pair(), at=datetime(2026, 5, 25, 18, 0, 0, tzinfo=timezone.utc))
+    value = tail_client_order_id(
+        _pair(),
+        attempt_index=3,
+        at=datetime(2026, 5, 25, 18, 0, 0, tzinfo=timezone.utc),
+    )
 
-    assert value.startswith("t-")
+    assert value.startswith("T3")
     assert len(value) <= 64
-    assert re.fullmatch(r"[a-z0-9-]+", value) is not None
-    assert len(value.split("-")) == 3
+    assert re.fullmatch(r"[A-Za-z0-9-]+", value) is not None
+    assert len(value.split("-")) == 2
     assert value.split("-")[-1] == "260525180000"

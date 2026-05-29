@@ -118,6 +118,7 @@ def step_pair(
             state.tail_trail,
             reference_price,
             move.occurred_at,
+            tick_size=tick_size_from_move(move),
             symbol=move.symbol,
         )
         next_state = replace(state, tail_trail=next_trail)
@@ -153,6 +154,7 @@ def step_pair(
                 tail_state=TailState.FAILED,
                 tail_identity=tail_identity_from_move(state, move),
                 tail_trail=tail_trail_confirmed_from_move(state, move),
+                completed_at=move.occurred_at,
             )
             return next_state, ()
         next_state = replace(
@@ -162,6 +164,7 @@ def step_pair(
             tail_state=TailState.LATENT,
             tail_mode=None,
             played_quantity=played_quantity_from_move(state, move),
+            completed_at=move.occurred_at,
         )
         return next_state, ()
 
@@ -200,6 +203,7 @@ def step_pair(
                 tail_mode=TailMode.FLYING,
                 tail_identity=tail_identity_from_move(state, move),
                 tail_trail=tail_trail_confirmed_from_move(state, move),
+                completed_at=move.occurred_at,
             )
             return next_state, ()
         played_quantity = played_quantity_from_move(state, move)
@@ -316,6 +320,18 @@ def reference_price_from_move(state: PairCycleState, move: EggMove) -> Decimal |
                 return to_decimal(value)
     if state.tail_trail is not None:
         return state.tail_trail.entry_reference_price
+    return None
+
+
+def tick_size_from_move(move: EggMove) -> Decimal | None:
+    for payload in (move.reply, move.order):
+        if payload is None:
+            continue
+        value = payload.get("tick_size")
+        if isinstance(value, (int, float, Decimal, str)):
+            tick = to_decimal(value)
+            if tick > 0:
+                return tick
     return None
 
 

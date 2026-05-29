@@ -4,15 +4,14 @@ Purpose: own persistent strategy cache, apply event ordering and deduplication,
 and forward typed runtime commands to the execution layer.
 Inputs: typed `EggMove` values from market/private/account listeners.
 Outputs: typed bot commands and supervisor notices.
-Side effects: async queue IO only.
+Side effects: none outside local supervisor state.
 Important types: `StrategyState`, `EggMove`, bot command union,
 `ChronosNotice`.
 Role: interpreter shell.
 """
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Iterable
@@ -44,27 +43,25 @@ class PendingEggMove:
     first_seen_at: datetime
 
 
+@dataclass(frozen=True)
+class PendingRepeat:
+    pair_name: str
+    ready_at: datetime
+    next_attempt: int
+
+
 @dataclass
 class Chronos:
     """Supervise typed strategy events and forward typed runtime commands."""
 
     state: StrategyState
     pending_timeout: timedelta = timedelta(seconds=30)
-    event_queue: asyncio.Queue[EggMove | None] = field(default_factory=asyncio.Queue)
-    command_queue: asyncio.Queue[DragonSong] = field(default_factory=asyncio.Queue)
     notices: list[ChronosNotice] = field(default_factory=list)
     pending: dict[str, PendingEggMove] = field(default_factory=dict)
+    pending_repeats: dict[str, PendingRepeat] = field(default_factory=dict)
     _seen_event_keys: set[tuple[str, str]] = field(default_factory=set)
     _seen_fallback_keys: set[tuple[str, str, int]] = field(default_factory=set)
     _seen_command_keys: set[tuple[str, str, str | None]] = field(default_factory=set)
-
-    async def run_once(self) -> tuple[DragonSong, ...]:
-        """Traite le lot courant d'evenements deja en file."""
-        batch = await self._drain_batch()
-        commands = self.process_events(batch)
-        for command in commands:
-            await self.command_queue.put(command)
-        return commands
 
     def process_events(
         self,
@@ -148,7 +145,8 @@ class Chronos:
             symbol=Symbol(event.symbol),
         )
         chained_commands = self._activate_dependent_pairs(event)
-        return tuple(commands) + chained_commands
+        repeated_commands = self._schedule_or_activate_repeat(pair_name, event, current_time)
+        return tuple(commands) + chained_commands + repeated_commands
 
     def expire_pending(
         self,
@@ -177,20 +175,31 @@ class Chronos:
         self.notices.extend(notices)
         return tuple(notices)
 
-    async def _drain_batch(self) -> list[EggMove]:
-        first = await self.event_queue.get()
-        if first is None:
-            return []
-        batch = [first]
-        while True:
-            try:
-                next_item = self.event_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            if next_item is None:
-                break
-            batch.append(next_item)
-        return batch
+    def activate_ready_repeats(
+        self,
+        *,
+        symbol: str,
+        now: datetime | None = None,
+    ) -> tuple[DragonSong, ...]:
+        """Hook pairs whose configured repeat pause has elapsed."""
+        current_time = now or datetime.now(timezone.utc)
+        ready = [
+            pending
+            for pending in self.pending_repeats.values()
+            if pending.ready_at <= current_time
+        ]
+        emitted: list[DragonSong] = []
+        for pending in ready:
+            self.pending_repeats.pop(pending.pair_name, None)
+            emitted.extend(
+                self._activate_repeat_pair(
+                    pending.pair_name,
+                    occurred_at=current_time,
+                    symbol=symbol,
+                    next_attempt=pending.next_attempt,
+                )
+            )
+        return self._dedupe_commands(emitted)
 
     def _record_duplicate(
         self,
@@ -241,7 +250,8 @@ class Chronos:
             pair_name = _command_pair_name(command)
             if pair_name is None:
                 continue
-            command_key = (pair_name, f"{command.kind}:{command.reason}", _command_dedupe_value(command))
+            attempt = _pair_attempt(self.state, pair_name)
+            command_key = (f"{pair_name}:{attempt}", f"{command.kind}:{command.reason}", _command_dedupe_value(command))
             if command_key in self._seen_command_keys:
                 continue
             self._seen_command_keys.add(command_key)
@@ -283,6 +293,88 @@ class Chronos:
             )
             emitted.extend(commands)
         return self._dedupe_commands(emitted)
+
+    def _schedule_or_activate_repeat(
+        self,
+        pair_name: str | None,
+        event: EggMove,
+        current_time: datetime,
+    ) -> tuple[DragonSong, ...]:
+        if pair_name is None:
+            return ()
+        pair_state = self.state.pairs.get(pair_name)
+        if pair_state is None or not _pair_terminal_for_repeat(pair_state):
+            return ()
+        next_attempt = pair_state.attempt_index + 1
+        if next_attempt > max(pair_state.pair.attempts, 1):
+            return ()
+        if pair_name in self.pending_repeats:
+            return ()
+        pause_minutes = pair_state.pair.pause_minutes or 0.0
+        ready_at = current_time + timedelta(minutes=max(pause_minutes, 0.0))
+        if ready_at > current_time:
+            self.pending_repeats[pair_name] = PendingRepeat(
+                pair_name=pair_name,
+                ready_at=ready_at,
+                next_attempt=next_attempt,
+            )
+            return ()
+        return self._dedupe_commands(
+            self._activate_repeat_pair(
+                pair_name,
+                occurred_at=event.occurred_at,
+                symbol=event.symbol,
+                next_attempt=next_attempt,
+            )
+        )
+
+    def _activate_repeat_pair(
+        self,
+        pair_name: str,
+        *,
+        occurred_at: datetime,
+        symbol: str,
+        next_attempt: int,
+    ) -> tuple[DragonSong, ...]:
+        pair_state = self.state.pairs.get(pair_name)
+        if pair_state is None:
+            return ()
+        reset_state = replace(
+            pair_state,
+            head_state=HeadState.LATENT,
+            tail_state=None,
+            tail_mode=None,
+            head_identity=None,
+            tail_identity=None,
+            tail_trail=None,
+            played_quantity=None,
+            latest_commands=None,
+            last_processed_private_event_id=None,
+            last_processed_private_event_ts=None,
+            last_emitted_command_id=None,
+            last_emitted_command_ts=None,
+            attempt_index=next_attempt,
+            completed_at=None,
+        )
+        self.state = replace(
+            self.state,
+            pairs={**self.state.pairs, pair_name: reset_state},
+        )
+        synthetic_event = EggMove(
+            kind=EggMoveKind.HEAD_HOOKED,
+            occurred_at=occurred_at,
+            symbol=symbol,
+            pair_name=pair_name,
+            event_id=f"repeat:{pair_name}:{next_attempt}",
+        )
+        self.state, intents = step_strategy(self.state, synthetic_event)
+        next_pair_state = self.state.pairs.get(pair_name)
+        commands = () if next_pair_state is None else plan_runtime_commands(
+            next_pair_state,
+            intents,
+            symbol=Symbol(symbol),
+        )
+        return commands
 
 
 def _with_target_pair(event: EggMove, pair_name: str | None) -> EggMove:
@@ -411,3 +503,19 @@ def _may_activate_dependency(
     if pair_state.tail_state == TailState.CLOSED:
         return True
     return pair_state.head_state == HeadState.CLOSED
+
+
+def _pair_attempt(state: StrategyState, pair_name: str) -> int:
+    pair_state = state.pairs.get(pair_name)
+    return 1 if pair_state is None else pair_state.attempt_index
+
+
+def _pair_terminal_for_repeat(pair_state) -> bool:
+    if pair_state.head_state == HeadState.FAILED:
+        return True
+    if pair_state.head_state != HeadState.CLOSED:
+        return False
+    played = pair_state.played_quantity is not None and pair_state.played_quantity > 0
+    if not played:
+        return True
+    return pair_state.tail_state in {TailState.CLOSED, TailState.FAILED}

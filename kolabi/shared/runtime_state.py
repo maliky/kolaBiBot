@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from time import sleep
 from typing import Any
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.shared.core.runtime_types import (
@@ -27,7 +27,12 @@ from kolabi.shared.core.runtime_types import (
     PublicBookRecord,
     PublicIndicatorRecord,
 )
-from kolabi.shared.persistence import AccountPosition, ExchangeFill, ExchangeOrder
+from kolabi.shared.persistence import (
+    AccountPosition,
+    ExchangeFill,
+    ExchangeInstrument,
+    ExchangeOrder,
+)
 from kolabi.tree.account import AccountStreamConfig, latest_connection
 from kolabi.tree.kraken import latest_indicator_values, latest_snapshot
 
@@ -43,6 +48,7 @@ class PublicMarketState:
     last_price: float | None
     mark_price: float | None
     index_price: float | None
+    tick_size: float | None
     spread: float | None
     imbalance: float | None
     avg_bid: float | None
@@ -161,6 +167,7 @@ class KrakenRuntimeStateClient:
                     last_price=None,
                     mark_price=None,
                     index_price=None,
+                    tick_size=None,
                     spread=None,
                     imbalance=None,
                     avg_bid=None,
@@ -181,6 +188,13 @@ class KrakenRuntimeStateClient:
                 self.market_type,
             )
             public_book = _public_book_record_from_snapshot(snapshot, target_symbol)
+            tick_size = _instrument_tick_size(
+                session,
+                symbol=target_symbol,
+                exchange=self.exchange,
+                environment=self.environment,
+                market_type=self.market_type,
+            )
             public_indicators = _public_indicator_records(indicators, target_symbol)
             freshest_local_time = _latest_public_timestamp(
                 snapshot.local_timestamp,
@@ -198,6 +212,7 @@ class KrakenRuntimeStateClient:
                 last_price=_indicator_value(indicators, "last_price"),
                 mark_price=_indicator_value(indicators, "mark_price"),
                 index_price=_indicator_value(indicators, "index_price"),
+                tick_size=tick_size,
                 spread=public_book.spread,
                 imbalance=public_book.imbalance,
                 avg_bid=public_book.avg_bid,
@@ -341,6 +356,76 @@ class KrakenRuntimeStateClient:
                     continue
             records.append(_private_order_record_from_fill(fill_row, order_row))
         return tuple(records)
+
+    def fetch_private_orders_for_identities(
+        self,
+        *,
+        client_order_ids: tuple[str, ...] = (),
+        exchange_order_ids: tuple[str, ...] = (),
+        symbol: str | None = None,
+        limit: int = 400,
+    ) -> tuple[PrivateOrderRecord, ...]:
+        """Return latest private order rows matching active order identities."""
+        if not client_order_ids and not exchange_order_ids:
+            return ()
+        target_symbol = symbol or self.symbol
+        with self._account_sessionmaker() as session:
+            predicates = []
+            if client_order_ids:
+                predicates.append(ExchangeOrder.client_order_id.in_(client_order_ids))
+            if exchange_order_ids:
+                predicates.append(ExchangeOrder.exchange_order_id.in_(exchange_order_ids))
+            statement = (
+                select(ExchangeOrder)
+                .where(
+                    ExchangeOrder.exchange == self.exchange,
+                    ExchangeOrder.environment == self.environment,
+                    ExchangeOrder.market_type == self.market_type,
+                    ExchangeOrder.symbol == target_symbol,
+                    or_(*predicates),
+                )
+                .order_by(ExchangeOrder.local_timestamp.desc(), ExchangeOrder.id.desc())
+                .limit(limit)
+            )
+            rows = session.execute(statement).scalars().all()
+        return tuple(_private_order_record(row) for row in rows)
+
+    def fetch_private_fills_for_identities(
+        self,
+        *,
+        client_order_ids: tuple[str, ...] = (),
+        exchange_order_ids: tuple[str, ...] = (),
+        symbol: str | None = None,
+        limit: int = 400,
+    ) -> tuple[PrivateOrderRecord, ...]:
+        """Return latest fill-derived records matching active order identities."""
+        if not client_order_ids and not exchange_order_ids:
+            return ()
+        target_symbol = symbol or self.symbol
+        with self._account_sessionmaker() as session:
+            predicates = []
+            if client_order_ids:
+                predicates.append(ExchangeOrder.client_order_id.in_(client_order_ids))
+            if exchange_order_ids:
+                predicates.append(ExchangeOrder.exchange_order_id.in_(exchange_order_ids))
+            statement = (
+                select(ExchangeFill, ExchangeOrder)
+                .join(ExchangeOrder, ExchangeFill.order_id == ExchangeOrder.id)
+                .where(
+                    ExchangeOrder.exchange == self.exchange,
+                    ExchangeOrder.environment == self.environment,
+                    ExchangeOrder.market_type == self.market_type,
+                    ExchangeOrder.symbol == target_symbol,
+                    or_(*predicates),
+                )
+                .order_by(ExchangeFill.local_timestamp.desc(), ExchangeFill.id.desc())
+                .limit(limit)
+            )
+            rows = session.execute(statement).all()
+        return tuple(
+            _private_order_record_from_fill(fill_row, order_row)
+            for fill_row, order_row in rows
+        )
 
     def wait_until_ready(
         self,
@@ -568,6 +653,31 @@ def _indicator_value(indicators: dict[str, Any], name: str) -> float | None:
         return None
     value = getattr(indicator, "value", None)
     if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _instrument_tick_size(
+    session: Session,
+    *,
+    symbol: str,
+    exchange: str,
+    environment: str,
+    market_type: str,
+) -> float | None:
+    stmt = (
+        select(ExchangeInstrument.tick_size)
+        .where(
+            ExchangeInstrument.exchange == exchange,
+            ExchangeInstrument.environment == environment,
+            ExchangeInstrument.market_type == market_type,
+            ExchangeInstrument.symbol == symbol,
+        )
+        .order_by(ExchangeInstrument.id.desc())
+        .limit(1)
+    )
+    value = session.execute(stmt).scalar_one_or_none()
+    if isinstance(value, (int, float)) and value > 0:
         return float(value)
     return None
 

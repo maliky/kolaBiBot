@@ -46,6 +46,7 @@ class MarketSnapshotFact:
     last_price: float | None = None
     mark_price: float | None = None
     index_price: float | None = None
+    tick_size: float | None = None
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,15 @@ def market_tick_from_market_snapshot(
         occurred_at=snapshot.occurred_at,
         symbol=snapshot.symbol,
         pair_name=pair.name,
-        reply={"reference_price": reference, "reference_source": source},
+        reply={
+            "reference_price": reference,
+            "reference_source": source,
+            **(
+                {}
+                if snapshot.tick_size is None
+                else {"tick_size": snapshot.tick_size}
+            ),
+        },
     )
 
 
@@ -159,8 +168,9 @@ def tail_submitted_from_ack(
     }
     if client_order_id is not None:
         reply["clOrdID"] = client_order_id
-    if stop_price is not None:
-        reply["stopPx"] = float(to_decimal(stop_price))
+    confirmed_stop = ack.price if ack.price is not None else stop_price
+    if confirmed_stop is not None:
+        reply["stopPx"] = float(to_decimal(confirmed_stop))
     return EggMove(
         kind=EggMoveKind.TAIL_SUBMITTED,
         occurred_at=occurred_at or datetime.now(timezone.utc),

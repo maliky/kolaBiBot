@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from typing import Protocol, cast
 
@@ -148,61 +148,49 @@ def test_private_order_poller_emits_head_confirmation_from_db(tmp_path) -> None:
     assert emitted[0].kind.value == "played_not_canceled"
 
 
-def test_private_order_poller_injects_side_aware_reference_price() -> None:
+def test_private_order_poller_waits_for_private_fill_reference_price() -> None:
     now = datetime.now(timezone.utc)
-    record = PrivateOrderRecord(
+    order_record = PrivateOrderRecord(
         symbol="PI_XBTUSD",
-        status="partially_filled",
+        status="filled",
         exchange_order_id="OID-H",
         client_order_id="CID-H",
-        quantity=2.0,
-        filled_quantity=1.0,
+        quantity=3.0,
+        filled_quantity=3.0,
         local_id=1,
         local_timestamp=now.isoformat(),
     )
-
-    class _Market:
-        best_bid = 99.0
-        best_ask = 101.0
-        mid_price = 100.0
-        recorded_at = now.isoformat()
+    fill_record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="filled",
+        exchange_order_id="OID-H",
+        client_order_id="CID-H",
+        price=75966.5,
+        quantity=3.0,
+        filled_quantity=3.0,
+        local_id=2,
+        local_timestamp=(now.replace(microsecond=0) + timedelta(seconds=1)).isoformat(),
+    )
 
     class _Client:
         def __init__(self) -> None:
-            self.sent = False
+            self.order_calls = 0
+            self.fill_calls = 0
 
         def fetch_private_orders_since(self, **_kwargs):
-            if self.sent:
+            self.order_calls += 1
+            if self.order_calls > 1:
                 return ()
-            self.sent = True
-            return (record,)
-
-        def fetch_market_state(self, symbol: str | None = None):
-            assert symbol == "PI_XBTUSD"
-            return _Market()
+            return (order_record,)
 
         def fetch_private_fills_since(self, **_kwargs):
-            return ()
+            self.fill_calls += 1
+            if self.fill_calls == 1:
+                return ()
+            return (fill_record,)
 
     class _Runtime:
         def __init__(self) -> None:
-            pair = sample_pair("pair-a")
-            pair = OrderPairSpec(
-                name=pair.name,
-                window=pair.window,
-                try_num=pair.try_num,
-                dr_pause=pair.dr_pause,
-                timeout=pair.timeout,
-                head=HeadSpec(side=Side.SELL, order_type="Market"),
-                head_price=pair.head_price,
-                head_price_type=pair.head_price_type,
-                head_quantity=pair.head_quantity,
-                head_quantity_type=pair.head_quantity_type,
-                tail=pair.tail,
-                tail_price_spec=0.5,
-                tail_price_spec_type="t%",
-                amount_type="qAt%p%",
-            )
             self.symbol = "PI_XBTUSD"
             self.running = True
             self.state = StrategyState(
@@ -210,7 +198,7 @@ def test_private_order_poller_injects_side_aware_reference_price() -> None:
                 strategy_id="demo",
                 pairs={
                     "pair-a": PairCycleState(
-                        pair=pair,
+                        pair=percent_tail_pair("pair-a"),
                         head_identity=OrderIdentity(
                             pair_name="pair-a",
                             role="head",
@@ -233,12 +221,15 @@ def test_private_order_poller_injects_side_aware_reference_price() -> None:
             return self.state.pairs["pair-a"], OrderRole.HEAD
 
     emitted: list[EggMove] = []
-    source = KrakenPrivateOrderPollingSource(_Client(), poll_seconds=0.0)
+    client = _Client()
+    source = KrakenPrivateOrderPollingSource(client, poll_seconds=0.0)
+    runtime = _Runtime()
 
-    asyncio.run(source.pump(_Runtime()))
+    asyncio.run(source.pump(runtime))
 
     assert emitted[0].reply is not None
-    assert emitted[0].reply["reference_price"] == 101.0
+    assert emitted[0].reply["reference_price"] == 75966.5
+    assert client.fill_calls >= 2
 
 
 def test_private_order_poller_prefers_fill_price_for_reference_price() -> None:
@@ -255,12 +246,6 @@ def test_private_order_poller_prefers_fill_price_for_reference_price() -> None:
         local_timestamp=now.isoformat(),
     )
 
-    class _Market:
-        best_bid = 75829.0
-        best_ask = 75830.0
-        mid_price = 75829.5
-        recorded_at = now.isoformat()
-
     class _Client:
         def __init__(self) -> None:
             self.sent = False
@@ -273,9 +258,6 @@ def test_private_order_poller_prefers_fill_price_for_reference_price() -> None:
 
         def fetch_private_fills_since(self, **_kwargs):
             return ()
-
-        def fetch_market_state(self, symbol: str | None = None):
-            return _Market()
 
     class _Runtime:
         def __init__(self) -> None:

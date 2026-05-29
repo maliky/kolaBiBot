@@ -731,3 +731,4 @@ python -m kolabi.bot run --strategy Orders/pi_xbtusd_sell_plus1_tail_0p5.tsv --e
  | =spot-margin-costs= | get Spot pair leverage/margin metadata, plus margin-fee warning |
  | =futures-costs=     | get Futures maker/taker schedule, funding, margin parameters    |
  | =costs=             | compare Spot and Futures for one logical asset pair             |
+

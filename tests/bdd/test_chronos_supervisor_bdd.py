@@ -201,11 +201,13 @@ def when_process_same_cycle_batch(payload: tuple[Chronos, list[EggMove]]) -> tup
 
 
 @when("the pending identity timeout expires", target_fixture="result")
-def when_pending_identity_timeout_expires(payload: tuple[Chronos, EggMove]) -> tuple[Chronos, tuple[ChronosNotice, ...]]:
+def when_pending_identity_timeout_expires(
+    payload: tuple[Chronos, EggMove]
+) -> tuple[Chronos, tuple[DragonSong, ...], tuple[ChronosNotice, ...]]:
     chronos, move = payload
-    chronos.process_event(move, now=move.occurred_at)
+    commands = chronos.process_event(move, now=move.occurred_at)
     notices = chronos.expire_pending(now=move.occurred_at + timedelta(seconds=31))
-    return chronos, notices
+    return chronos, commands, notices
 
 
 @when("Chronos processes the upstream private closing event", target_fixture="result")
@@ -255,16 +257,20 @@ def then_public_trigger_recorded_as_ignored(result: tuple[Chronos, tuple[DragonS
 
 
 @then("Chronos should emit a typed pending identity timeout notice")
-def then_pending_identity_timeout_notice(result: tuple[Chronos, tuple[ChronosNotice, ...]]) -> None:
-    _chronos, notices = result
+def then_pending_identity_timeout_notice(
+    result: tuple[Chronos, tuple[DragonSong, ...], tuple[ChronosNotice, ...]]
+) -> None:
+    _chronos, _commands, notices = result
     assert len(notices) == 1
     assert notices[0].kind == ChronosNoticeKind.PENDING_IDENTITY_TIMEOUT
 
 
 @then("no exchange command should be emitted")
-def then_no_exchange_command(result: tuple[Chronos, tuple[ChronosNotice, ...]]) -> None:
-    chronos, _notices = result
-    assert chronos.command_queue.empty()
+def then_no_exchange_command(
+    result: tuple[Chronos, tuple[DragonSong, ...], tuple[ChronosNotice, ...]]
+) -> None:
+    _chronos, commands, _notices = result
+    assert commands == ()
 
 
 @then("the dependent pair should become hooked")
