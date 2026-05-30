@@ -254,6 +254,53 @@ def test_closed_tail_can_hook_dependent_pair() -> None:
     assert chronos.state.pairs["pair-y"].head_state == HeadState.HOOKED
 
 
+def test_tail_closed_hook_does_not_activate_on_head_close_only() -> None:
+    pair_x = sample_pair("pair-x")
+    pair_y = replace(sample_pair("pair-y"), hook_name="pair-x-tail-closed")
+    state = StrategyState(
+        launched_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
+        strategy_id="strategy-chain",
+        pairs={
+            "pair-x": PairCycleState(
+                pair=pair_x,
+                head_state=HeadState.SUBMITTED,
+                head_identity=OrderIdentity(
+                    pair_name="pair-x",
+                    role="head",
+                    client_order_id="CID-X-H",
+                    exchange_order_id="OID-X-H",
+                ),
+            ),
+            "pair-y": PairCycleState(pair=pair_y),
+        },
+    )
+    chronos = Chronos(state=state)
+
+    commands = chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc),
+            symbol="PI_XBTUSD",
+            pair_name="pair-x",
+            role=None,
+            event_id="evt-chain-head-only",
+            reply={
+                "orderID": "OID-X-H",
+                "clOrdID": "CID-X-H",
+                "cumQty": 1.0,
+                "orderQty": 1.0,
+            },
+            is_private=True,
+        )
+    )
+
+    assert commands
+    assert {command.pair_name for command in commands} == {"pair-x"}
+    assert chronos.state.pairs["pair-x"].head_state == HeadState.CLOSED
+    assert chronos.state.pairs["pair-x"].tail_state == TailState.HOOKED
+    assert chronos.state.pairs["pair-y"].head_state == HeadState.LATENT
+
+
 def test_chronos_repeats_terminal_pair_with_fresh_attempt_key() -> None:
     pair = replace(sample_pair("pair-r"), try_num=2)
     state = StrategyState(

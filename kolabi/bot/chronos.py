@@ -265,7 +265,10 @@ class Chronos:
         origin_pair = resolve_pair_name(self.state, event) or event.pair_name
         if origin_pair is None:
             return ()
-        if not _may_activate_dependency(self.state, origin_pair, event):
+        if not event.is_private:
+            return ()
+        origin_state = self.state.pairs.get(origin_pair)
+        if origin_state is None:
             return ()
 
         emitted: list[DragonSong] = []
@@ -273,7 +276,13 @@ class Chronos:
             if pair_name == origin_pair:
                 continue
             hook_name = pair_state.pair.hook_name
-            if hook_name not in {f"{origin_pair}-tail-closed", f"{origin_pair}-closed"}:
+            if hook_name == f"{origin_pair}-tail-closed":
+                if origin_state.tail_state != TailState.CLOSED:
+                    continue
+            elif hook_name == f"{origin_pair}-closed":
+                if not _pair_terminal_for_repeat(origin_state):
+                    continue
+            else:
                 continue
             if pair_state.head_state != HeadState.LATENT:
                 continue
@@ -488,21 +497,6 @@ def _is_private_terminal(event: EggMove) -> bool:
         EggMoveKind.NOT_PLAYED_CANCELED,
         EggMoveKind.PLAYED_AND_CANCELED,
     }
-
-
-def _may_activate_dependency(
-    state: StrategyState,
-    origin_pair: str,
-    event: EggMove,
-) -> bool:
-    if not event.is_private:
-        return False
-    pair_state = state.pairs.get(origin_pair)
-    if pair_state is None:
-        return False
-    if pair_state.tail_state == TailState.CLOSED:
-        return True
-    return pair_state.head_state == HeadState.CLOSED
 
 
 def _pair_attempt(state: StrategyState, pair_name: str) -> int:

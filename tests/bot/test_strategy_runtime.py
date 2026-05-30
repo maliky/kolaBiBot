@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any
 
 from kolabi.bot.chronos import PendingRepeat
 from kolabi.bot.domain import (
@@ -24,22 +25,317 @@ from kolabi.bot.domain import (
 from kolabi.bot.horus import plan_runtime_commands
 from kolabi.bot.pair_cycle import step_pair
 from kolabi.bot.strategy_runtime import (
+    KrakenPrivateOrderPollingSource,
     KrakenPublicTriggerSource,
     SimulatedExecutor,
     StrategyRuntime,
+    _CommandSlot,
+    _TailAmendPending,
+    _TailVisibilityWindow,
     plan_strategy_once,
 )
 from kolabi.bot.tail_tracking import initial_tail_trail
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
+    AmendOrderCommandRequest,
     AmendTailCommand,
+    DragonSong,
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
     PlaceTailCommand,
     PrivateOrderRecord,
     RuntimeCommandKind,
     Symbol,
+    to_decimal,
 )
+from kolabi.shared.runtime_state import KrakenRuntimeStateClient
+from kolabi.tree.account import AccountStateStore, AccountStreamConfig
+
+
+class _RecordingLiveExecutor:
+    def __init__(self) -> None:
+        self.commands: list[DragonSong] = []
+        self.order_ids_by_client: dict[str, str] = {}
+        self.started = asyncio.Event()
+
+    async def execute(self, command: DragonSong) -> OrderAck:
+        self.commands.append(command)
+        client_order_id = getattr(command.request, "clOrdID", None) or f"NO-CID-{len(self.commands)}"
+        order_id = self.order_ids_by_client.setdefault(
+            str(client_order_id),
+            f"OID-{client_order_id}",
+        )
+        self.started.set()
+        await asyncio.sleep(0)
+        price = getattr(command.request, "newPrice", None)
+        if price is None:
+            price = getattr(command.request, "price", None)
+        if price is None:
+            price = getattr(command.request, "stopPx", None)
+        return OrderAck(
+            order_id=order_id,
+            status="New",
+            price=None if price is None else float(to_decimal(price)),
+            orig_qty=_command_quantity(command),
+            executed_qty=0.0,
+            side=getattr(command.request, "side", None),
+        )
+
+
+class _PrivateDbHarness:
+    def __init__(self, tmp_path) -> None:
+        self.critical_db_url = f"sqlite:///{tmp_path / 'critical-private.sqlite'}"
+        self.account_db_url = f"sqlite:///{tmp_path / 'account-private.sqlite'}"
+        self.market_db_url = f"sqlite:///{tmp_path / 'market.sqlite'}"
+        self.critical_store = AccountStateStore(
+            AccountStreamConfig(db_url=self.critical_db_url)
+        )
+        self.account_store = AccountStateStore(AccountStreamConfig(db_url=self.account_db_url))
+        self.reader = KrakenRuntimeStateClient(
+            market_db_url=self.market_db_url,
+            account_db_url=self.account_db_url,
+            critical_account_db_url=self.critical_db_url,
+            symbol="PI_XBTUSD",
+        )
+
+    def write_order(
+        self,
+        *,
+        order_id: str,
+        client_order_id: str,
+        side: str,
+        order_type: str,
+        quantity: Decimal | int | float | str,
+        price: Decimal | int | float | str | None,
+        status: str = "open",
+        filled: Decimal | int | float | str = "0",
+        reason: str | None = None,
+        is_cancel: bool = False,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        order: dict[str, Any] = {
+            "instrument": "PI_XBTUSD",
+            "order_id": order_id,
+            "cli_ord_id": client_order_id,
+            "side": side,
+            "type": order_type,
+            "status": status,
+            "qty": str(quantity),
+            "filled": str(filled),
+            "last_update_time": now.isoformat(),
+        }
+        if price is not None:
+            order["price"] = str(price)
+            if "stop" in order_type.lower():
+                order["stop_price"] = str(price)
+        if reason is not None:
+            order["reason"] = reason
+        if is_cancel:
+            order["is_cancel"] = True
+        self.critical_store.ingest_message(
+            {"feed": "open_orders", "order": order},
+            stream_kind="private_ws_critical",
+            is_critical=True,
+            received_at=now,
+        )
+
+    def write_fill(
+        self,
+        *,
+        order_id: str,
+        client_order_id: str,
+        side: str,
+        quantity: Decimal | int | float | str,
+        price: Decimal | int | float | str,
+        fill_id: str,
+        order_type: str = "market",
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        self.critical_store.ingest_message(
+            {
+                "feed": "fills",
+                "fill": {
+                    "instrument": "PI_XBTUSD",
+                    "order_id": order_id,
+                    "cli_ord_id": client_order_id,
+                    "side": side,
+                    "type": order_type,
+                    "qty": str(quantity),
+                    "price": str(price),
+                    "fill_id": fill_id,
+                    "time": now.isoformat(),
+                },
+            },
+            stream_kind="private_ws_critical",
+            is_critical=True,
+            received_at=now,
+        )
+
+
+class _DbBackedOneLifecycleSource:
+    def __init__(self, db: _PrivateDbHarness, executor: _RecordingLiveExecutor) -> None:
+        self.db = db
+        self.executor = executor
+
+    async def pump(self, runtime) -> None:
+        pair_name = "pair-a"
+        await runtime.enqueue(
+            EggMove(
+                kind=EggMoveKind.HEAD_HOOKED,
+                occurred_at=datetime.now(timezone.utc),
+                symbol=runtime.symbol,
+                pair_name=pair_name,
+                event_id="test:head-hooked",
+            )
+        )
+        head_command = await _wait_for_command(runtime, PlaceHeadCommand, pair_name)
+        head_client_id = _require_client_id(head_command)
+        head_order_id = await _wait_for_executor_order_id(self.executor, head_client_id)
+        self.db.write_fill(
+            order_id=head_order_id,
+            client_order_id=head_client_id,
+            side="buy",
+            quantity="1",
+            price="100",
+            fill_id="FID-HEAD-1",
+        )
+
+        tail_command = await _wait_for_command(runtime, PlaceTailCommand, pair_name)
+        tail_client_id = _require_client_id(tail_command)
+        tail_order_id = await _wait_for_executor_order_id(self.executor, tail_client_id)
+        tail_stop = tail_command.request.stopPx or Decimal("99")
+        self.db.write_order(
+            order_id=tail_order_id,
+            client_order_id=tail_client_id,
+            side="sell",
+            order_type="stop",
+            quantity="1",
+            price=tail_stop,
+        )
+        await _wait_for_pair(
+            runtime,
+            pair_name,
+            lambda pair: pair.tail_state == TailState.LIVING,
+        )
+
+        await runtime.enqueue(
+            EggMove(
+                kind=EggMoveKind.MARKET_TICK,
+                occurred_at=datetime.now(timezone.utc),
+                symbol=runtime.symbol,
+                pair_name=pair_name,
+                event_id="test:market-tick-amend",
+                reply={"reference_price": 103.0, "tick_size": 0.5},
+            )
+        )
+        amend_command = await _wait_for_command(runtime, AmendTailCommand, pair_name)
+        amended_stop = amend_command.request.newPrice
+        assert amended_stop is not None
+        self.db.write_order(
+            order_id=tail_order_id,
+            client_order_id=tail_client_id,
+            side="sell",
+            order_type="stop",
+            quantity="1",
+            price=amended_stop,
+        )
+        await _wait_for_pair(
+            runtime,
+            pair_name,
+            lambda pair: pair.tail_trail is not None
+            and pair.tail_trail.confirmed_stop_price == amended_stop,
+        )
+
+        self.db.write_fill(
+            order_id=tail_order_id,
+            client_order_id=tail_client_id,
+            side="sell",
+            quantity="1",
+            price=amended_stop,
+            fill_id="FID-TAIL-1",
+        )
+        self.db.write_order(
+            order_id=tail_order_id,
+            client_order_id=tail_client_id,
+            side="sell",
+            order_type="market",
+            quantity="1",
+            price=amended_stop,
+            status="canceled",
+            filled="1",
+            reason="stop_order_triggered",
+            is_cancel=True,
+        )
+        await _wait_for_pair(
+            runtime,
+            pair_name,
+            lambda pair: pair.tail_state == TailState.CLOSED,
+        )
+
+
+def _command_quantity(command: DragonSong) -> float | None:
+    quantity = getattr(command.request, "orderQty", None)
+    if quantity is None:
+        return None
+    return float(to_decimal(quantity))
+
+
+def _require_client_id(command: DragonSong) -> str:
+    client_id = getattr(command.request, "clOrdID", None)
+    assert isinstance(client_id, str) and client_id
+    return client_id
+
+
+async def _wait_for_executor_order_id(
+    executor: _RecordingLiveExecutor,
+    client_order_id: str,
+    *,
+    timeout: float = 1.0,
+) -> str:
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout)
+    while datetime.now(timezone.utc) < deadline:
+        order_id = executor.order_ids_by_client.get(client_order_id)
+        if order_id is not None:
+            return order_id
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"executor did not see client order id {client_order_id}")
+
+
+async def _wait_for_command(
+    runtime: StrategyRuntime,
+    command_type: type,
+    pair_name: str,
+    *,
+    seen: int = 0,
+    timeout: float = 1.0,
+):
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout)
+    while datetime.now(timezone.utc) < deadline:
+        matches = [
+            command
+            for command in runtime.commands
+            if isinstance(command, command_type) and command.pair_name == pair_name
+        ]
+        if len(matches) > seen:
+            return matches[-1]
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"did not see {command_type.__name__} for {pair_name}")
+
+
+async def _wait_for_pair(
+    runtime: StrategyRuntime,
+    pair_name: str,
+    predicate,
+    *,
+    timeout: float = 1.5,
+) -> None:
+    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout)
+    while datetime.now(timezone.utc) < deadline:
+        pair_state = runtime.state.pairs[pair_name]
+        if predicate(pair_state):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"pair {pair_name} did not reach expected state")
 
 
 async def _run_runtime_for(runtime: StrategyRuntime, *, seconds: float = 0.05):
@@ -100,6 +396,214 @@ def test_strategy_runtime_simulation_advances_to_tail_state() -> None:
         TailState.LIVING,
         TailState.SUBMITTED,
     }
+
+
+def test_db_backed_runtime_completes_one_lifecycle_with_amend_and_tail_fill(
+    tmp_path,
+    caplog,
+) -> None:
+    db = _PrivateDbHarness(tmp_path)
+    executor = _RecordingLiveExecutor()
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="db-lifecycle", pairs=sample_strategy()),
+        symbol="PI_XBTUSD",
+        executor=executor,
+        public_source=_DbBackedOneLifecycleSource(db, executor),
+        private_source=KrakenPrivateOrderPollingSource(
+            db.reader,
+            poll_seconds=0.01,
+            head_fill_reference_grace_seconds=0.5,
+        ),
+        simulate=False,
+        tail_visibility_timeout_seconds=0.5,
+    )
+
+    with caplog.at_level("INFO", logger="kola"):
+        result = asyncio.run(asyncio.wait_for(runtime.run(), timeout=4.0))
+
+    pair_state = result.state.pairs["pair-a"]
+    assert pair_state.head_state == HeadState.CLOSED
+    assert pair_state.tail_state == TailState.CLOSED
+    assert [type(command) for command in result.commands] == [
+        PlaceHeadCommand,
+        PlaceTailCommand,
+        AmendTailCommand,
+    ]
+    assert "UPDATE (pair-a#1): (closed--hooked)" in caplog.text
+    assert "HFP=100.00" in caplog.text
+    assert "UPDATE (pair-a#1): (closed--living)" in caplog.text
+    assert "AMEND_SENT (pair-a#1):" in caplog.text
+    assert "UPDATE (pair-a#1): (closed--closed)" in caplog.text
+    assert "TFP=" in caplog.text
+    assert "TAIL_PENDING" not in caplog.text
+
+
+def test_runtime_dispatches_different_pairs_concurrently() -> None:
+    class BlockingExecutor:
+        def __init__(self) -> None:
+            self.started: list[str] = []
+            self.release = asyncio.Event()
+
+        async def execute(self, command):
+            self.started.append(command.pair_name)
+            await self.release.wait()
+            return OrderAck(order_id=f"OID-{command.pair_name}", status="New")
+
+    pair_a = sample_strategy()[0]
+    pair_b = replace(pair_a, name="pair-b")
+    executor = BlockingExecutor()
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="multi", pairs=(pair_a, pair_b)),
+        symbol="PI_XBTUSD",
+        executor=executor,
+        simulate=False,
+    )
+    command_a = PlaceHeadCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="buy",
+            ordType="Market",
+            orderQty=Decimal("1"),
+            clOrdID="CID-A",
+        ),
+    )
+    command_b = PlaceHeadCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-b",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-b",
+            side="buy",
+            ordType="Market",
+            orderQty=Decimal("1"),
+            clOrdID="CID-B",
+        ),
+    )
+
+    async def _run() -> tuple[int, tuple[str, ...]]:
+        runtime.running = True
+        runtime._dispatch_commands((command_a, command_b))
+        await asyncio.sleep(0.01)
+        inflight_count = len(runtime._inflight_commands)
+        started = tuple(executor.started)
+        executor.release.set()
+        await asyncio.sleep(0.01)
+        await runtime.stop()
+        return inflight_count, started
+
+    inflight_count, started = asyncio.run(_run())
+
+    assert inflight_count == 2
+    assert set(started) == {"pair-a", "pair-b"}
+
+
+def test_runtime_serialises_tail_amends_per_pair_but_not_across_pairs() -> None:
+    class BlockingExecutor:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        async def execute(self, command):
+            await self.release.wait()
+            return OrderAck(order_id=f"OID-{command.pair_name}", status="New")
+
+    pair_a = sample_strategy()[0]
+    pair_b = replace(pair_a, name="pair-b")
+    now = datetime.now(timezone.utc)
+    trail_a = replace(
+        initial_tail_trail(pair_a, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99"),
+        current_stop_price=Decimal("99"),
+        last_confirmed_at=now,
+    )
+    trail_b = replace(
+        initial_tail_trail(pair_b, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99"),
+        current_stop_price=Decimal("99"),
+        last_confirmed_at=now,
+    )
+    executor = BlockingExecutor()
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="multi-amend", pairs=(pair_a, pair_b)),
+        symbol="PI_XBTUSD",
+        executor=executor,
+        simulate=False,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair_a,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.LIVING,
+                tail_identity=OrderIdentity(
+                    pair_name="pair-a",
+                    role="tail",
+                    client_order_id="CID-TA",
+                    exchange_order_id="OID-TA",
+                ),
+                tail_trail=trail_a,
+                played_quantity=Decimal("1"),
+            ),
+            "pair-b": PairCycleState(
+                pair=pair_b,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.LIVING,
+                tail_identity=OrderIdentity(
+                    pair_name="pair-b",
+                    role="tail",
+                    client_order_id="CID-TB",
+                    exchange_order_id="OID-TB",
+                ),
+                tail_trail=trail_b,
+                played_quantity=Decimal("1"),
+            ),
+        },
+    )
+
+    def amend(pair_name: str, client_id: str, order_id: str, price: str) -> AmendTailCommand:
+        return AmendTailCommand(
+            kind=RuntimeCommandKind.AMEND,
+            symbol=Symbol("PI_XBTUSD"),
+            pair_name=pair_name,
+            request=AmendOrderCommandRequest(
+                pair_name=pair_name,
+                side="sell",
+                ordType="Stop",
+                orderID=order_id,
+                clOrdID=client_id,
+                newPrice=Decimal(price),
+            ),
+        )
+
+    async def _run() -> tuple[int, int, Decimal | None]:
+        runtime.running = True
+        runtime._dispatch_commands(
+            (
+                amend("pair-a", "CID-TA", "OID-TA", "99.5"),
+                amend("pair-a", "CID-TA", "OID-TA", "100.0"),
+                amend("pair-b", "CID-TB", "OID-TB", "99.5"),
+            )
+        )
+        await asyncio.sleep(0.01)
+        pending = runtime._pending_commands[
+            _CommandSlot(pair_name="pair-a", attempt_index=1, role="tail")
+        ]
+        pending_price = pending[-1].request.newPrice
+        inflight_count = len(runtime._inflight_commands)
+        pending_count = len(pending)
+        executor.release.set()
+        await asyncio.sleep(0.01)
+        await runtime.stop()
+        return inflight_count, pending_count, pending_price
+
+    inflight_count, pending_count, pending_price = asyncio.run(_run())
+
+    assert inflight_count == 2
+    assert pending_count == 1
+    assert pending_price == Decimal("100.0")
 
 
 def test_strategy_runtime_simulation_initialises_relative_tail_reference() -> None:
@@ -244,6 +748,157 @@ def test_strategy_runtime_dispatches_exchange_commands_without_blocking_loop() -
     assert asyncio.run(_run()) is True
 
 
+def test_private_record_event_id_changes_for_in_place_row_updates() -> None:
+    open_record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="open",
+        exchange_order_id="OID-T",
+        client_order_id="CID-T",
+        stop_price=73820.5,
+        quantity=10.0,
+        filled_quantity=0.0,
+        local_timestamp="2026-05-29T18:08:24.085000+00:00",
+        local_id=42,
+    )
+    amend_record = replace(
+        open_record,
+        stop_price=73978.0,
+        local_timestamp="2026-05-29T18:10:03.971000+00:00",
+    )
+    closed_record = replace(
+        amend_record,
+        status="canceled",
+        reason="stop_order_triggered",
+        stop_price=None,
+        local_timestamp="2026-05-29T18:11:24.655000+00:00",
+    )
+
+    open_id = KrakenPrivateOrderPollingSource._private_record_event_id(
+        open_record,
+        is_fill=False,
+    )
+    amend_id = KrakenPrivateOrderPollingSource._private_record_event_id(
+        amend_record,
+        is_fill=False,
+    )
+    closed_id = KrakenPrivateOrderPollingSource._private_record_event_id(
+        closed_record,
+        is_fill=False,
+    )
+    fill_id = KrakenPrivateOrderPollingSource._private_record_event_id(
+        closed_record,
+        is_fill=True,
+    )
+
+    assert open_id is not None
+    assert amend_id is not None
+    assert closed_id is not None
+    assert len({open_id, amend_id, closed_id}) == 3
+    assert fill_id is not None
+    assert fill_id.startswith("private-fill:")
+
+
+def test_private_tail_fill_record_closes_living_tail() -> None:
+    class PrivateClient:
+        def fetch_private_orders_since(self, **kwargs):
+            return ()
+
+        def fetch_private_fills_since(self, **kwargs):
+            return ()
+
+        def fetch_private_orders_for_identities(self, **kwargs):
+            return ()
+
+        def fetch_private_fills_for_identities(self, **kwargs):
+            return (
+                PrivateOrderRecord(
+                    symbol="PI_XBTUSD",
+                    status="filled",
+                    exchange_order_id="OID-T",
+                    client_order_id="CID-T",
+                    reason="full_fill",
+                    side="sell",
+                    order_type="market",
+                    price=99.0,
+                    quantity=1.0,
+                    filled_quantity=1.0,
+                    source_timestamp="2026-05-29T20:43:43.720000+00:00",
+                    local_timestamp="2026-05-29T20:44:14.904805+00:00",
+                    local_id=106,
+                ),
+            )
+
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99.5"),
+        current_stop_price=Decimal("99.5"),
+        last_confirmed_at=now,
+    )
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        private_source=KrakenPrivateOrderPollingSource(PrivateClient(), poll_seconds=0.0),
+        simulate=False,
+    )
+    living = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.LIVING,
+        tail_mode=None,
+        head_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="head",
+            client_order_id="CID-H",
+            exchange_order_id="OID-H",
+        ),
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        tail_trail=trail,
+        played_quantity=Decimal("1"),
+    )
+    runtime.state = replace(runtime.state, pairs={"pair-a": living})
+    runtime.chronos.state = runtime.state
+
+    result = asyncio.run(asyncio.wait_for(runtime.run(), timeout=1.0))
+
+    assert result.state.pairs["pair-a"].tail_state == TailState.CLOSED
+
+
+def test_head_fill_reference_wait_is_not_required_after_tail_is_anchored() -> None:
+    pair = replace(
+        sample_strategy()[0],
+        tail_price_spec=1.5,
+        tail_price_spec_type="t%",
+        amount_type="qAt%p%",
+    )
+    now = datetime.now(timezone.utc)
+    anchored = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.LIVING,
+        tail_trail=initial_tail_trail(pair, Decimal("100"), now),
+        played_quantity=Decimal("1"),
+    )
+    move = EggMove(
+        kind=EggMoveKind.PLAYED_AND_CANCELED,
+        occurred_at=now,
+        symbol="PI_XBTUSD",
+        pair_name="pair-a",
+        role=OrderRole.HEAD,
+        reply={"cumQty": 1.0, "orderQty": 1.0},
+        is_private=True,
+    )
+    source = KrakenPrivateOrderPollingSource(object())
+
+    assert source._must_wait_for_private_fill_reference(move, anchored, OrderRole.HEAD) is False
+
+
 def test_strategy_runtime_waits_for_tail_after_filled_head() -> None:
     runtime = StrategyRuntime(
         strategy=StrategySpec(name="demo", pairs=sample_strategy()),
@@ -322,6 +977,114 @@ def test_strategy_runtime_does_not_exit_while_repeat_is_pending() -> None:
         still_running = not task.done()
         await runtime.stop()
         await task
+        return still_running
+
+    assert asyncio.run(_run()) is True
+
+
+def test_tail_terminal_event_schedules_and_activates_next_attempt() -> None:
+    pair = replace(sample_strategy()[0], try_num=2, dr_pause=1 / 60)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=None,
+        simulate=False,
+    )
+    now = datetime.now(timezone.utc)
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99"),
+    )
+    living = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.LIVING,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        tail_trail=trail,
+        played_quantity=Decimal("1"),
+    )
+    runtime.state = replace(runtime.state, pairs={"pair-a": living})
+    runtime.chronos.state = runtime.state
+
+    commands = runtime.chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=now,
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={
+                "orderID": "OID-T",
+                "clOrdID": "CID-T",
+                "cumQty": 1.0,
+                "orderQty": 1.0,
+            },
+            is_private=True,
+        ),
+        now=now,
+    )
+    runtime.state = runtime.chronos.state
+
+    assert commands == ()
+    assert "pair-a" in runtime.chronos.pending_repeats
+
+    repeat_commands = runtime.chronos.activate_ready_repeats(
+        symbol="PI_XBTUSD",
+        now=now + timedelta(seconds=1),
+    )
+
+    assert len(repeat_commands) == 1
+    assert isinstance(repeat_commands[0], PlaceHeadCommand)
+    assert runtime.chronos.state.pairs["pair-a"].attempt_index == 2
+    assert runtime.chronos.state.pairs["pair-a"].head_state == HeadState.HOOKED
+
+
+def test_private_polling_source_keeps_running_while_repeat_is_pending() -> None:
+    class PrivateClient:
+        def fetch_private_orders_since(self, **kwargs):
+            return ()
+
+        def fetch_private_fills_since(self, **kwargs):
+            return ()
+
+    class Runtime:
+        symbol = "PI_XBTUSD"
+        running = True
+
+        def __init__(self) -> None:
+            self.state = StrategyRuntime(
+                strategy=StrategySpec(name="demo", pairs=sample_strategy()),
+                symbol="PI_XBTUSD",
+                simulate=False,
+            ).state
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return True
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return True
+
+        async def enqueue(self, event: EggMove) -> None:
+            raise AssertionError(f"unexpected event: {event}")
+
+        def pair_state_for_record(self, record: object):
+            return None
+
+    async def _run() -> bool:
+        runtime = Runtime()
+        source = KrakenPrivateOrderPollingSource(PrivateClient(), poll_seconds=0.01)
+        task = asyncio.create_task(source.pump(runtime))
+        await asyncio.sleep(0.03)
+        still_running = not task.done()
+        runtime.running = False
+        await asyncio.wait_for(task, timeout=0.2)
         return still_running
 
     assert asyncio.run(_run()) is True
@@ -554,6 +1317,68 @@ def test_tail_telemetry_rows_include_distance_and_last_update() -> None:
     assert row.current_distance == float(Decimal("102.0") - Decimal("99.0"))
 
 
+def test_tail_telemetry_write_failure_does_not_stop_runtime_source(caplog) -> None:
+    class Market:
+        best_bid = 102.0
+        best_ask = 102.5
+        mid_price = 102.25
+        last_price = 102.0
+        mark_price = None
+        index_price = None
+        tick_size = 0.5
+        recorded_at = "tick-1"
+
+    class Reader:
+        def fetch_market_state(self, symbol=None):
+            return Market()
+
+    class Writer:
+        def record_rows(self, rows):
+            raise RuntimeError("database is locked")
+
+    pair = sample_strategy()[0]
+    confirmed_at = datetime.now(timezone.utc)
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), confirmed_at),
+        confirmed_stop_price=Decimal("99.0"),
+        last_confirmed_at=confirmed_at,
+    )
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+        public_state_reader=Reader(),
+        tail_telemetry_writer=Writer(),
+        tail_telemetry_interval_seconds=1.0,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.LIVING,
+                tail_trail=trail,
+                played_quantity=Decimal("1"),
+            )
+        },
+    )
+
+    async def _run() -> bool:
+        runtime.running = True
+        with caplog.at_level("WARNING", logger="kola"):
+            task = asyncio.create_task(runtime._pump_tail_telemetry())
+            await asyncio.sleep(0.05)
+            still_running = not task.done()
+            runtime.running = False
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            return still_running
+
+    assert asyncio.run(_run()) is True
+    assert "tail telemetry persistence failed" in caplog.text
+
+
 def test_update_log_closed_hooked_includes_head_fill_fields(caplog) -> None:
     pair = sample_strategy()[0]
     now = datetime.now(timezone.utc)
@@ -638,6 +1463,274 @@ def test_update_log_closed_submitted_omits_head_fill_fields(caplog) -> None:
     assert "TCID=CID-T" in caplog.text
     assert "TOID=OID-T" in caplog.text
     assert "HFS=" not in caplog.text
+
+
+def test_update_log_closed_tail_includes_tail_fill_fields(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=True,
+    )
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99.0"),
+        current_stop_price=Decimal("99.0"),
+        last_confirmed_at=now,
+    )
+    runtime._record_head_lifecycle(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=now,
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={"cumQty": 1.0, "price": 98.5},
+        )
+    )
+    previous = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.LIVING,
+        tail_trail=trail,
+        played_quantity=Decimal("1"),
+    )
+    current = replace(previous, tail_state=TailState.CLOSED)
+    runtime.state = replace(runtime.state, pairs={"pair-a": current})
+
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._log_living_updates({"pair-a": previous})
+
+    assert "UPDATE (pair-a#1): (closed--closed)" in caplog.text
+    assert "TFS=sell" in caplog.text
+    assert "TFQ=1.00" in caplog.text
+    assert "TFP=98.50" in caplog.text
+
+
+def test_update_log_emits_when_desired_stop_changes_only(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=True,
+    )
+    previous_trail = replace(
+        initial_tail_trail(pair, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99.0"),
+        current_stop_price=Decimal("99.0"),
+        last_confirmed_at=now,
+    )
+    current_trail = replace(previous_trail, current_stop_price=Decimal("98.0"))
+    previous = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.SUBMITTED,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        tail_trail=previous_trail,
+        played_quantity=Decimal("1"),
+    )
+    current = replace(previous, tail_trail=current_trail)
+    runtime.state = replace(runtime.state, pairs={"pair-a": current})
+
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._log_living_updates({"pair-a": previous})
+
+    assert "UPDATE (pair-a#1): (closed--submitted)" in caplog.text
+    assert "CS=99.00" in caplog.text
+    assert "DS=98.00" in caplog.text
+
+
+def test_amend_dispatch_logs_and_tracks_pending_confirmation(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99.0"),
+        current_stop_price=Decimal("99.0"),
+        last_confirmed_at=now,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.LIVING,
+                tail_identity=OrderIdentity(
+                    pair_name="pair-a",
+                    role="tail",
+                    client_order_id="CID-T",
+                    exchange_order_id="OID-T",
+                ),
+                tail_trail=trail,
+                played_quantity=Decimal("1"),
+            )
+        },
+    )
+    command = AmendTailCommand(
+        kind=RuntimeCommandKind.AMEND,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=AmendOrderCommandRequest(
+            pair_name="pair-a",
+            side="sell",
+            ordType="Stop",
+            orderID="OID-T",
+            clOrdID="CID-T",
+            newPrice=Decimal("98.5"),
+        ),
+    )
+    slot = _CommandSlot(pair_name="pair-a", attempt_index=1, role="tail")
+    identity = runtime._command_identity_from_command(command)
+
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._on_command_dispatched(slot, command, identity)
+
+    assert "AMEND_SENT (pair-a#1):" in caplog.text
+    assert "CS=99.00" in caplog.text
+    assert "DS=98.50" in caplog.text
+    assert slot in runtime._pending_tail_amends
+
+
+def test_pending_amend_warns_when_db_confirmation_is_late(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99.0"),
+        current_stop_price=Decimal("98.0"),
+        last_confirmed_at=now,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.LIVING,
+                tail_identity=OrderIdentity(
+                    pair_name="pair-a",
+                    role="tail",
+                    client_order_id="CID-T",
+                    exchange_order_id="OID-T",
+                ),
+                tail_trail=trail,
+                played_quantity=Decimal("1"),
+            )
+        },
+    )
+    slot = _CommandSlot(pair_name="pair-a", attempt_index=1, role="tail")
+    runtime._pending_tail_amends[slot] = _TailAmendPending(
+        pair_name="pair-a",
+        attempt_index=1,
+        desired_stop_price=Decimal("98.5"),
+        client_order_id="CID-T",
+        exchange_order_id="OID-T",
+        started_at=now - timedelta(seconds=25),
+        deadline_at=now - timedelta(seconds=1),
+    )
+
+    with caplog.at_level("WARNING", logger="kola"):
+        runtime._check_tail_amend_deadlines(now)
+
+    assert "AMEND_PENDING (pair-a#1):" in caplog.text
+    assert slot not in runtime._pending_tail_amends
+
+
+def test_tail_visibility_deadline_warns_without_stopping_runtime(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.HOOKED,
+                played_quantity=Decimal("1"),
+            )
+        },
+    )
+    slot = _CommandSlot(pair_name="pair-a", attempt_index=1, role="tail")
+    runtime._pending_tail_visibility[slot] = _TailVisibilityWindow(
+        pair_name="pair-a",
+        attempt_index=1,
+        client_order_id="CID-T",
+        exchange_order_id="OID-T",
+        started_at=now - timedelta(seconds=65),
+        deadline_at=now - timedelta(seconds=45),
+    )
+
+    with caplog.at_level("WARNING", logger="kola"):
+        runtime._check_tail_visibility_deadlines(now)
+
+    assert "TAIL_PENDING (pair-a#1):" in caplog.text
+    assert slot in runtime._pending_tail_visibility
+
+
+def test_late_tail_visibility_window_clears_after_private_identity(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.LIVING,
+                tail_identity=OrderIdentity(
+                    pair_name="pair-a",
+                    role="tail",
+                    client_order_id="CID-T",
+                    exchange_order_id="OID-T",
+                ),
+                played_quantity=Decimal("1"),
+            )
+        },
+    )
+    slot = _CommandSlot(pair_name="pair-a", attempt_index=1, role="tail")
+    runtime._pending_tail_visibility[slot] = _TailVisibilityWindow(
+        pair_name="pair-a",
+        attempt_index=1,
+        client_order_id="CID-T",
+        exchange_order_id="OID-T",
+        started_at=now - timedelta(seconds=65),
+        deadline_at=now - timedelta(seconds=45),
+        last_warned_at=now - timedelta(seconds=20),
+    )
+
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._check_tail_visibility_deadlines(now)
+
+    assert "TAIL_VISIBLE (pair-a#1):" in caplog.text
+    assert slot not in runtime._pending_tail_visibility
 
 
 def test_runtime_matches_private_record_to_tail_identity() -> None:
