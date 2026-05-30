@@ -11,7 +11,7 @@ Transitional: yes, extracted from `pair_cycle.py` while old runtime layers remai
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -44,7 +44,7 @@ def pair_window_is_open(
     now: datetime,
 ) -> bool:
     """Return true when current time is inside the pair launch-relative window."""
-    elapsed_minutes = (now - launched_at).total_seconds() / 60.0
+    elapsed_minutes = _elapsed_minutes(launched_at=launched_at, now=now)
     return pair.window.start_minutes <= elapsed_minutes <= pair.window.end_minutes
 
 
@@ -55,8 +55,18 @@ def pair_window_has_ended(
     now: datetime,
 ) -> bool:
     """Return true after the pair launch-relative window has ended."""
-    elapsed_minutes = (now - launched_at).total_seconds() / 60.0
+    elapsed_minutes = _elapsed_minutes(launched_at=launched_at, now=now)
     return elapsed_minutes > pair.window.end_minutes
+
+
+def _elapsed_minutes(*, launched_at: datetime, now: datetime) -> float:
+    return (_as_utc_aware(now) - _as_utc_aware(launched_at)).total_seconds() / 60.0
+
+
+def _as_utc_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def resolve_head_price(pair: OrderPairSpec, market: MarketLike) -> float | None:

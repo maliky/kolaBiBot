@@ -13,7 +13,11 @@ from kolabi.bot.domain import (
     TimeWindow,
 )
 from kolabi.bot.dragon import MarketSnapshotFact, head_hooked_from_market_snapshot
-from kolabi.bot.pricing import executable_head_reference_price
+from kolabi.bot.pricing import (
+    executable_head_reference_price,
+    pair_window_has_ended,
+    pair_window_is_open,
+)
 
 
 def _pair(order_type: str) -> OrderPairSpec:
@@ -133,3 +137,25 @@ def test_head_stop_hook_carries_materialised_stop_price() -> None:
     assert move is not None
     assert move.reply is not None
     assert move.reply["head_order_stop_price"] == 104.0
+
+
+def test_pair_window_accepts_mixed_naive_and_aware_datetimes() -> None:
+    launched_at = datetime(2026, 5, 30, 21, 0, tzinfo=timezone.utc)
+    naive_now = datetime(2026, 5, 30, 21, 30)
+
+    assert pair_window_is_open(
+        _pair("M"),
+        launched_at=launched_at,
+        now=naive_now,
+    )
+
+
+def test_pair_window_end_accepts_mixed_naive_and_aware_datetimes() -> None:
+    launched_at = datetime(2026, 5, 30, 21, 0, tzinfo=timezone.utc)
+    naive_now = datetime(2026, 5, 30, 22, 1)
+
+    assert pair_window_has_ended(
+        _pair("M"),
+        launched_at=launched_at,
+        now=naive_now,
+    )
