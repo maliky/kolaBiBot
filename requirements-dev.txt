@@ -31,4 +31,4 @@ psycopg[binary]
 
 # visu
 pydot
-pygraphviz
+# pygraphviz
