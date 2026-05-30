@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from time import sleep
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.shared.core.runtime_types import (
@@ -117,6 +117,7 @@ class KrakenRuntimeStateClient:
         *,
         market_db_url: str,
         account_db_url: str,
+        critical_account_db_url: str | None = None,
         symbol: str,
         exchange: str = "kraken",
         environment: str = "demo",
@@ -128,6 +129,7 @@ class KrakenRuntimeStateClient:
     ) -> None:
         self.market_db_url = market_db_url
         self.account_db_url = account_db_url
+        self.critical_account_db_url = critical_account_db_url or account_db_url
         self.symbol = symbol
         self.exchange = exchange
         self.environment = environment
@@ -143,6 +145,11 @@ class KrakenRuntimeStateClient:
         )
         self._account_sessionmaker = sessionmaker(
             bind=create_persistence_engine(self.account_db_url),
+            expire_on_commit=False,
+            class_=Session,
+        )
+        self._critical_account_sessionmaker = sessionmaker(
+            bind=create_persistence_engine(self.critical_account_db_url),
             expire_on_commit=False,
             class_=Session,
         )
@@ -231,26 +238,28 @@ class KrakenRuntimeStateClient:
         """Load the combined runtime state used by the Kraken TSV route."""
         target_symbol = symbol or self.symbol
         public = self.fetch_market_state(target_symbol)
-        with self._account_sessionmaker() as session:
+        with self._critical_account_sessionmaker() as session:
             private_ws = self._private_feed_state(
                 session,
                 "private_ws",
                 self.max_private_age_seconds,
+                db_url=self.critical_account_db_url,
             )
+            open_order_count = self._count_open_orders(session, target_symbol)
+            fill_count = self._count_fills(session, target_symbol)
+        with self._account_sessionmaker() as session:
             reconciler = self._private_feed_state(
                 session,
                 "rest_reconciler",
                 self.max_reconcile_age_seconds,
+                db_url=self.account_db_url,
             )
-            open_order_count = self._count_open_orders(session, target_symbol)
-            fill_count = self._count_fills(session, target_symbol)
             position = self._latest_position(session, target_symbol)
         reasons = tuple(
             reason
             for reason in (
                 public.reason,
                 private_ws.reason,
-                reconciler.reason,
             )
             if reason
         )
@@ -263,7 +272,7 @@ class KrakenRuntimeStateClient:
             fill_count=fill_count,
             position_size=None if position is None else position.size,
             position_entry_price=None if position is None else position.entry_price,
-            ready=public.ready and private_ws.ready and reconciler.ready,
+            ready=public.ready and private_ws.ready,
             reasons=reasons,
         )
 
@@ -277,40 +286,35 @@ class KrakenRuntimeStateClient:
     ) -> tuple[PrivateOrderRecord, ...]:
         """Return private order rows strictly newer than the supplied cursor."""
         target_symbol = symbol or self.symbol
-        with self._account_sessionmaker() as session:
+        with self._critical_account_sessionmaker() as session:
+            predicates = [
+                ExchangeOrder.exchange == self.exchange,
+                ExchangeOrder.environment == self.environment,
+                ExchangeOrder.market_type == self.market_type,
+                ExchangeOrder.symbol == target_symbol,
+            ]
+            if after_local_timestamp is not None:
+                cursor_timestamp = _sqlite_cursor_timestamp(after_local_timestamp)
+                if after_local_id is None:
+                    predicates.append(ExchangeOrder.local_timestamp >= cursor_timestamp)
+                else:
+                    predicates.append(
+                        or_(
+                            ExchangeOrder.local_timestamp > cursor_timestamp,
+                            and_(
+                                ExchangeOrder.local_timestamp == cursor_timestamp,
+                                ExchangeOrder.id > after_local_id,
+                            ),
+                        )
+                    )
             statement = (
                 select(ExchangeOrder)
-                .where(
-                    ExchangeOrder.exchange == self.exchange,
-                    ExchangeOrder.environment == self.environment,
-                    ExchangeOrder.market_type == self.market_type,
-                    ExchangeOrder.symbol == target_symbol,
-                )
+                .where(*predicates)
                 .order_by(ExchangeOrder.local_timestamp.asc(), ExchangeOrder.id.asc())
                 .limit(limit)
             )
             rows = session.execute(statement).scalars().all()
-        records: list[PrivateOrderRecord] = []
-        for row in rows:
-            if after_local_timestamp is not None:
-                row_timestamp = _normalise_cursor_timestamp(
-                    row.local_timestamp,
-                    after_local_timestamp,
-                )
-                cursor_timestamp = _normalise_cursor_timestamp(
-                    after_local_timestamp,
-                    row.local_timestamp,
-                )
-                if row_timestamp < cursor_timestamp:
-                    continue
-                if (
-                    row_timestamp == cursor_timestamp
-                    and after_local_id is not None
-                    and row.id <= after_local_id
-                ):
-                    continue
-            records.append(_private_order_record(row))
-        return tuple(records)
+        return tuple(_private_order_record(row) for row in rows)
 
     def fetch_private_fills_since(
         self,
@@ -322,41 +326,36 @@ class KrakenRuntimeStateClient:
     ) -> tuple[PrivateOrderRecord, ...]:
         """Return fill-derived private order records newer than the supplied cursor."""
         target_symbol = symbol or self.symbol
-        with self._account_sessionmaker() as session:
+        with self._critical_account_sessionmaker() as session:
+            predicates = [
+                ExchangeOrder.exchange == self.exchange,
+                ExchangeOrder.environment == self.environment,
+                ExchangeOrder.market_type == self.market_type,
+                ExchangeOrder.symbol == target_symbol,
+            ]
+            if after_local_timestamp is not None:
+                cursor_timestamp = _sqlite_cursor_timestamp(after_local_timestamp)
+                if after_local_id is None:
+                    predicates.append(ExchangeFill.local_timestamp >= cursor_timestamp)
+                else:
+                    predicates.append(
+                        or_(
+                            ExchangeFill.local_timestamp > cursor_timestamp,
+                            and_(
+                                ExchangeFill.local_timestamp == cursor_timestamp,
+                                ExchangeFill.id > after_local_id,
+                            ),
+                        )
+                    )
             statement = (
                 select(ExchangeFill, ExchangeOrder)
                 .join(ExchangeOrder, ExchangeFill.order_id == ExchangeOrder.id)
-                .where(
-                    ExchangeOrder.exchange == self.exchange,
-                    ExchangeOrder.environment == self.environment,
-                    ExchangeOrder.market_type == self.market_type,
-                    ExchangeOrder.symbol == target_symbol,
-                )
+                .where(*predicates)
                 .order_by(ExchangeFill.local_timestamp.asc(), ExchangeFill.id.asc())
                 .limit(limit)
             )
             rows = session.execute(statement).all()
-        records: list[PrivateOrderRecord] = []
-        for fill_row, order_row in rows:
-            if after_local_timestamp is not None:
-                row_timestamp = _normalise_cursor_timestamp(
-                    fill_row.local_timestamp,
-                    after_local_timestamp,
-                )
-                cursor_timestamp = _normalise_cursor_timestamp(
-                    after_local_timestamp,
-                    fill_row.local_timestamp,
-                )
-                if row_timestamp < cursor_timestamp:
-                    continue
-                if (
-                    row_timestamp == cursor_timestamp
-                    and after_local_id is not None
-                    and fill_row.id <= after_local_id
-                ):
-                    continue
-            records.append(_private_order_record_from_fill(fill_row, order_row))
-        return tuple(records)
+        return tuple(_private_order_record_from_fill(fill_row, order_row) for fill_row, order_row in rows)
 
     def fetch_private_orders_for_identities(
         self,
@@ -370,7 +369,7 @@ class KrakenRuntimeStateClient:
         if not client_order_ids and not exchange_order_ids:
             return ()
         target_symbol = symbol or self.symbol
-        with self._account_sessionmaker() as session:
+        with self._critical_account_sessionmaker() as session:
             predicates = []
             if client_order_ids:
                 predicates.append(ExchangeOrder.client_order_id.in_(client_order_ids))
@@ -403,7 +402,7 @@ class KrakenRuntimeStateClient:
         if not client_order_ids and not exchange_order_ids:
             return ()
         target_symbol = symbol or self.symbol
-        with self._account_sessionmaker() as session:
+        with self._critical_account_sessionmaker() as session:
             predicates = []
             if client_order_ids:
                 predicates.append(ExchangeOrder.client_order_id.in_(client_order_ids))
@@ -449,16 +448,21 @@ class KrakenRuntimeStateClient:
         session: Session,
         stream_kind: str,
         max_age_seconds: float,
+        *,
+        db_url: str,
     ) -> PrivateFeedState:
         """Read one private feed status with a strict freshness gate."""
         config = AccountStreamConfig(
-            db_url=self.account_db_url,
+            db_url=db_url,
             exchange=self.exchange,
             environment=self.environment,
             market_type=self.market_type,
             account_scope=self.account_scope,
         )
         connection = latest_connection(session, config, stream_kind)
+        if connection is None and stream_kind == "private_ws":
+            # Compatibility fallback: split-profile critical stream keeps alias health.
+            connection = latest_connection(session, config, "private_ws_critical")
         if connection is None:
             if stream_kind == "rest_reconciler":
                 return PrivateFeedState(
@@ -690,6 +694,13 @@ def _normalise_cursor_timestamp(value: datetime, peer: datetime) -> datetime:
     return value
 
 
+def _sqlite_cursor_timestamp(value: datetime) -> datetime:
+    """Normalise an aware runtime cursor for SQLite DATETIME comparisons."""
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
 def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
     reason, is_cancel = _order_reason_flags_from_payload(row.raw_payload)
     stop_price = _stop_price_from_payload(row.raw_payload)
@@ -702,7 +713,11 @@ def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
         is_cancel=is_cancel,
         side=row.side,
         order_type=row.order_type,
-        price=row.price,
+        price=(
+            row.price
+            if row.price is not None
+            else _execution_price_from_payload(row.raw_payload)
+        ),
         stop_price=stop_price if stop_price is not None else _stop_price_from_order_row(row),
         quantity=row.quantity,
         filled_quantity=row.filled_quantity,
@@ -740,6 +755,22 @@ def _stop_price_from_payload(payload: object) -> float | None:
     trigger = payload.get("orderTrigger")
     if isinstance(trigger, dict):
         return _stop_price_from_payload(trigger)
+    return None
+
+
+def _execution_price_from_payload(payload: object) -> float | None:
+    """Extract a fill/execution price from raw private payloads."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ("price", "fillPrice", "fill_price", "avgPx", "lastPx", "executed_price"):
+        value = payload.get(key)
+        if isinstance(value, (int, float, str)):
+            try:
+                parsed = float(value)
+            except ValueError:
+                continue
+            if parsed > 0:
+                return parsed
     return None
 
 

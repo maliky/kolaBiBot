@@ -450,6 +450,70 @@ def test_private_order_poller_matches_tail_identity_as_tail_role() -> None:
     assert emitted[0].role == OrderRole.TAIL
 
 
+def test_private_order_poller_emits_snapshot_tombstone_for_tail() -> None:
+    now = datetime.now(timezone.utc)
+    record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="canceled",
+        reason="absent_from_open_orders_snapshot",
+        exchange_order_id="OID-T",
+        client_order_id="CID-T",
+        quantity=3.0,
+        filled_quantity=0.0,
+        local_id=10,
+        local_timestamp=now.isoformat(),
+    )
+
+    class _Client:
+        def fetch_private_orders_since(self, **_kwargs):
+            return (record,)
+
+        def fetch_private_fills_since(self, **_kwargs):
+            return ()
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.symbol = "PI_XBTUSD"
+            self.running = True
+            self.state = StrategyState(
+                launched_at=now,
+                strategy_id="demo",
+                pairs={
+                    "pair-a": PairCycleState(
+                        pair=sample_pair("pair-a"),
+                        tail_identity=OrderIdentity(
+                            pair_name="pair-a",
+                            role="tail",
+                            client_order_id="CID-T",
+                            exchange_order_id="OID-T",
+                        ),
+                    )
+                },
+            )
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return False
+
+        async def enqueue(self, event) -> None:
+            emitted.append(cast(EggMove, event))
+            self.running = False
+
+        def pair_state_for_record(self, rec) -> tuple[PairCycleState, OrderRole] | None:
+            if rec.client_order_id == "CID-T":
+                return self.state.pairs["pair-a"], OrderRole.TAIL
+            return None
+
+    emitted: list[EggMove] = []
+    source = KrakenPrivateOrderPollingSource(_Client(), poll_seconds=0.0)
+
+    asyncio.run(source.pump(_Runtime()))
+
+    assert len(emitted) == 1
+    assert emitted[0].role == OrderRole.TAIL
+    assert emitted[0].kind.value == "not_played_canceled"
+
+
 def test_private_order_poller_emits_from_fill_stream_when_order_stream_empty() -> None:
     now = datetime.now(timezone.utc)
     fill_record = PrivateOrderRecord(

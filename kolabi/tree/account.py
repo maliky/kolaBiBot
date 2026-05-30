@@ -6,10 +6,13 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
+import queue as thread_queue
+import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Sequence, cast
 from urllib.parse import urlencode
@@ -43,6 +46,7 @@ class AccountStreamConfig:
     """Configuration de la memoire privee ordre/compte."""
 
     db_url: str = "sqlite:///prv-futures-demo.sqlite"
+    critical_db_url: str | None = None
     exchange: str = "kraken"
     environment: str = "demo"
     market_type: str = "futures"
@@ -70,10 +74,12 @@ class AccountStreamConfig:
     reconnect_seconds: int = 5
     ping_seconds: int = 50
     heartbeat_log_seconds: int = 60
+    health_write_seconds: float = 10.0
     maintenance_seconds: int = 60
     account_batch_max_rows: int = 64
     account_batch_max_wait_seconds: float = 0.35
     queue_maxsize: int = 5000
+    rest_reconcile_seconds: float = 10.0
     raw_retention_minutes: int = 1440
     raw_retention_limit: int = 100000
     log_level: str = "INFO"
@@ -188,6 +194,83 @@ class IngestMessage:
     received_at: datetime
 
 
+class PrivateIngestMirror:
+    """Best-effort background mirror for critical private messages."""
+
+    def __init__(
+        self,
+        store: "AccountStateStore",
+        logger: logging.Logger,
+        *,
+        stream_kind: str,
+        is_critical: bool,
+        maxsize: int = 5000,
+    ) -> None:
+        self.store = store
+        self.logger = logger
+        self.stream_kind = stream_kind
+        self.is_critical = is_critical
+        self._queue: thread_queue.Queue[IngestMessage | None] = thread_queue.Queue(
+            maxsize=max(1, maxsize)
+        )
+        self._thread: threading.Thread | None = None
+        self._dropped = 0
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"private-mirror-{self.stream_kind}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def submit(self, message: IngestMessage) -> None:
+        self.start()
+        try:
+            self._queue.put_nowait(message)
+        except thread_queue.Full:
+            self._dropped += 1
+            if self._dropped == 1 or self._dropped % 1000 == 0:
+                self.logger.warning(
+                    "kraken_account critical mirror dropped messages=%s stream=%s",
+                    self._dropped,
+                    self.stream_kind,
+                )
+
+    def stop(self, timeout: float = 2.0) -> None:
+        if self._thread is None:
+            return
+        try:
+            self._queue.put_nowait(None)
+        except thread_queue.Full:
+            pass
+        self._thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        while True:
+            message = self._queue.get()
+            if message is None:
+                return
+            feed = str(message.payload.get("feed", "unknown"))
+            try:
+                self.store.ingest_message(
+                    message.payload,
+                    stream_kind=self.stream_kind,
+                    is_critical=self.is_critical,
+                    received_at=message.received_at,
+                    prune_raw=False,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "kraken_account critical mirror failed feed=%s stream=%s error=%s",
+                    feed,
+                    self.stream_kind,
+                    exc,
+                )
+
+
 def upgrade_private_schema(engine: Any) -> None:
     """Apply additive SQLite schema upgrades for existing private DBs."""
     if getattr(engine.dialect, "name", "") != "sqlite":
@@ -224,7 +307,7 @@ def upgrade_private_schema(engine: Any) -> None:
         if "account_positions" in tables:
             ensure_columns(connection, "account_positions", {"raw_payload": "JSON"})
         if "raw_exchange_events" in tables:
-            ensure_columns(
+            added_raw_columns = ensure_columns(
                 connection,
                 "raw_exchange_events",
                 {
@@ -239,20 +322,22 @@ def upgrade_private_schema(engine: Any) -> None:
                     "received_at": "DATETIME",
                 },
             )
-            connection.execute(
-                text(
-                    "UPDATE raw_exchange_events "
-                    "SET duplicate_count = COALESCE(duplicate_count, 0) "
-                    "WHERE duplicate_count IS NULL"
+            if "duplicate_count" in added_raw_columns:
+                connection.execute(
+                    text(
+                        "UPDATE raw_exchange_events "
+                        "SET duplicate_count = COALESCE(duplicate_count, 0) "
+                        "WHERE duplicate_count IS NULL"
+                    )
                 )
-            )
-            connection.execute(
-                text(
-                    "UPDATE raw_exchange_events "
-                    "SET last_seen_at = COALESCE(last_seen_at, received_at) "
-                    "WHERE last_seen_at IS NULL"
+            if "last_seen_at" in added_raw_columns:
+                connection.execute(
+                    text(
+                        "UPDATE raw_exchange_events "
+                        "SET last_seen_at = COALESCE(last_seen_at, received_at) "
+                        "WHERE last_seen_at IS NULL"
+                    )
                 )
-            )
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_identity "
@@ -260,18 +345,28 @@ def upgrade_private_schema(engine: Any) -> None:
                     "(exchange, environment, stream_kind, event_type, correlation_id)"
                 )
             )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_event_latest "
+                    "ON raw_exchange_events "
+                    "(exchange, environment, stream_kind, event_type, received_at, id)"
+                )
+            )
 
 
-def ensure_columns(connection: Any, table_name: str, columns: dict[str, str]) -> None:
+def ensure_columns(connection: Any, table_name: str, columns: dict[str, str]) -> set[str]:
     existing = {
         str(row[1])
         for row in connection.execute(text(f"PRAGMA table_info({table_name})"))
     }
+    added: set[str] = set()
     for column_name, column_type in columns.items():
         if column_name not in existing:
             connection.execute(
                 text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
             )
+            added.add(column_name)
+    return added
 
 
 class AccountStateStore:
@@ -318,9 +413,19 @@ class AccountStateStore:
             fill_rows: list[tuple[FillEvent, ExchangeFill]] = []
             balance_rows: list[BalanceWrite] = []
             position_rows: list[PositionWrite] = []
+            source_row_count = 0
             if feed.startswith("open_orders"):
-                for order_payload in iter_order_payloads(payload):
-                    mapped = map_order(order_payload)
+                order_payloads = iter_order_payloads(payload)
+                source_row_count = len(order_payloads)
+                mapped_orders = [map_order(order_payload) for order_payload in order_payloads]
+                if feed.endswith("snapshot"):
+                    mapped_orders = self._with_absent_orders_for_snapshot(
+                        session,
+                        mapped_orders,
+                        raw_payload=payload,
+                        source_timestamp=raw_event_source_timestamp(payload),
+                    )
+                for mapped in mapped_orders:
                     row = self._ensure_order_in_session(
                         session,
                         mapped,
@@ -346,6 +451,13 @@ class AccountStateStore:
                 row_count += len(balances)
             elif feed.startswith("open_positions"):
                 positions = map_positions(payload)
+                if feed.endswith("snapshot"):
+                    positions = self._with_flat_positions_for_snapshot(
+                        session,
+                        positions,
+                        raw_payload=payload,
+                        source_timestamp=raw_event_source_timestamp(payload),
+                    )
                 for position in positions:
                     self._record_position_in_session(session, position, now=now)
                 position_rows = positions
@@ -373,6 +485,7 @@ class AccountStateStore:
             "balances": tuple(balance_rows),
             "positions": tuple(position_rows),
             "row_count": row_count,
+            "source_row_count": source_row_count,
         }
 
     def ingest_message_batch(
@@ -401,9 +514,21 @@ class AccountStateStore:
                 fill_rows: list[tuple[FillEvent, ExchangeFill]] = []
                 balance_rows: list[BalanceWrite] = []
                 position_rows: list[PositionWrite] = []
+                source_row_count = 0
                 if feed.startswith("open_orders"):
-                    for order_payload in iter_order_payloads(payload):
-                        mapped = map_order(order_payload)
+                    order_payloads = iter_order_payloads(payload)
+                    source_row_count = len(order_payloads)
+                    mapped_orders = [
+                        map_order(order_payload) for order_payload in order_payloads
+                    ]
+                    if feed.endswith("snapshot"):
+                        mapped_orders = self._with_absent_orders_for_snapshot(
+                            session,
+                            mapped_orders,
+                            raw_payload=payload,
+                            source_timestamp=raw_event_source_timestamp(payload),
+                        )
+                    for mapped in mapped_orders:
                         order_rows.append(
                             self._ensure_order_in_session(
                                 session,
@@ -438,6 +563,13 @@ class AccountStateStore:
                     row_count += len(balances)
                 elif feed.startswith("open_positions"):
                     positions = map_positions(payload)
+                    if feed.endswith("snapshot"):
+                        positions = self._with_flat_positions_for_snapshot(
+                            session,
+                            positions,
+                            raw_payload=payload,
+                            source_timestamp=raw_event_source_timestamp(payload),
+                        )
                     for position in positions:
                         self._record_position_in_session(
                             session,
@@ -469,6 +601,7 @@ class AccountStateStore:
                         "balances": tuple(balance_rows),
                         "positions": tuple(position_rows),
                         "row_count": row_count,
+                        "source_row_count": source_row_count,
                     }
                 )
             if prune_raw:
@@ -681,6 +814,147 @@ class AccountStateStore:
         session.add(row)
         return row
 
+    def _with_flat_positions_for_snapshot(
+        self,
+        session: Session,
+        positions: list[PositionWrite],
+        *,
+        raw_payload: JsonMapT,
+        source_timestamp: datetime | None,
+    ) -> list[PositionWrite]:
+        """Make an all-positions snapshot explicit when symbols disappeared."""
+        seen_symbols = {position.symbol for position in positions}
+        flat_positions = [
+            PositionWrite(
+                symbol=row.symbol,
+                side=row.side,
+                size=0.0,
+                raw_payload={
+                    "feed": raw_payload.get("feed", "open_positions_snapshot"),
+                    "reason": "absent_from_open_positions_snapshot",
+                    "previous_size": row.size,
+                    "previous_entry_price": row.entry_price,
+                },
+                source_timestamp=source_timestamp,
+            )
+            for row in self._latest_nonzero_positions_in_session(session)
+            if row.symbol not in seen_symbols
+        ]
+        return [*positions, *flat_positions]
+
+    def _latest_nonzero_positions_in_session(
+        self,
+        session: Session,
+    ) -> tuple[AccountPosition, ...]:
+        rows = (
+            session.execute(
+                select(AccountPosition)
+                .where(
+                    AccountPosition.exchange == self.config.exchange,
+                    AccountPosition.environment == self.config.environment,
+                    AccountPosition.market_type == self.config.market_type,
+                    AccountPosition.account_scope == self.config.account_scope,
+                )
+                .order_by(
+                    AccountPosition.local_timestamp.desc(),
+                    AccountPosition.id.desc(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        latest_by_symbol: dict[str, AccountPosition] = {}
+        for row in rows:
+            if row.symbol in latest_by_symbol:
+                continue
+            latest_by_symbol[row.symbol] = row
+        return tuple(
+            row
+            for row in latest_by_symbol.values()
+            if abs(float(row.size or 0.0)) > 0.0
+        )
+
+    def _with_absent_orders_for_snapshot(
+        self,
+        session: Session,
+        orders: list[OrderWrite],
+        *,
+        raw_payload: JsonMapT,
+        source_timestamp: datetime | None,
+    ) -> list[OrderWrite]:
+        """Make an all-open-orders snapshot explicit when orders disappeared."""
+        seen_exchange_ids = {
+            order.exchange_order_id for order in orders if order.exchange_order_id
+        }
+        seen_client_ids = {order.client_order_id for order in orders if order.client_order_id}
+        absent_orders = [
+            OrderWrite(
+                symbol=row.symbol,
+                side=row.side,
+                order_type=row.order_type,
+                status="canceled",
+                quantity=row.quantity,
+                exchange_order_id=row.exchange_order_id,
+                client_order_id=row.client_order_id,
+                price=row.price,
+                filled_quantity=row.filled_quantity,
+                reduce_only=row.reduce_only,
+                raw_payload={
+                    "feed": raw_payload.get("feed", "open_orders_snapshot"),
+                    "is_cancel": True,
+                    "reason": "absent_from_open_orders_snapshot",
+                    "instrument": row.symbol,
+                    "side": row.side,
+                    "type": row.order_type,
+                    "qty": row.quantity,
+                    "filled": row.filled_quantity,
+                    "price": row.price,
+                    "stop_price": row.price if "stop" in row.order_type.lower() else None,
+                    "order_id": row.exchange_order_id,
+                    "cli_ord_id": row.client_order_id,
+                    "previous_status": row.status,
+                    "previous_price": row.price,
+                    "previous_filled_quantity": row.filled_quantity,
+                },
+                source_timestamp=source_timestamp,
+            )
+            for row in self._latest_open_orders_in_session(session)
+            if not _order_seen_in_snapshot(row, seen_exchange_ids, seen_client_ids)
+        ]
+        return [*orders, *absent_orders]
+
+    def _latest_open_orders_in_session(
+        self,
+        session: Session,
+    ) -> tuple[ExchangeOrder, ...]:
+        rows = (
+            session.execute(
+                select(ExchangeOrder)
+                .where(
+                    ExchangeOrder.exchange == self.config.exchange,
+                    ExchangeOrder.environment == self.config.environment,
+                    ExchangeOrder.market_type == self.config.market_type,
+                    ExchangeOrder.account_scope == self.config.account_scope,
+                    ExchangeOrder.status.in_(
+                        ("new", "open", "partial_fill", "partially_filled", "living")
+                    ),
+                )
+                .order_by(
+                    ExchangeOrder.local_timestamp.desc(),
+                    ExchangeOrder.id.desc(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        latest_by_identity: dict[tuple[str, str], ExchangeOrder] = {}
+        for row in rows:
+            identity = _order_identity_key(row)
+            if identity is None or identity in latest_by_identity:
+                continue
+            latest_by_identity[identity] = row
+        return tuple(latest_by_identity.values())
+
     def _record_raw_event_in_session(
         self,
         session: Session,
@@ -800,6 +1074,7 @@ class AccountStateStore:
     ) -> ExchangeConnection:
         """Cree ou met a jour le statut d'un flux prive/public."""
         current_time = now or datetime.now(timezone.utc)
+        heartbeat_time = current_time if status.lower() == "healthy" else None
         with self.sessionmaker() as session:
             connection = latest_connection(session, self.config, stream_kind)
             if connection is None:
@@ -809,14 +1084,15 @@ class AccountStateStore:
                     market_type=self.config.market_type,
                     stream_kind=stream_kind,
                     status=status,
-                    last_heartbeat_at=current_time,
+                    last_heartbeat_at=heartbeat_time,
                     last_error=last_error,
                     updated_at=current_time,
                 )
                 session.add(connection)
             else:
                 connection.status = status
-                connection.last_heartbeat_at = current_time
+                if heartbeat_time is not None:
+                    connection.last_heartbeat_at = heartbeat_time
                 connection.last_error = last_error
                 connection.updated_at = current_time
             session.commit()
@@ -858,6 +1134,30 @@ class AccountStateStore:
             row = self._ensure_order_in_session(session, order, now=now)
             session.commit()
             return row
+
+    def record_order_snapshot(
+        self,
+        orders: Iterable[OrderWrite],
+        *,
+        raw_payload: JsonMapT | None = None,
+        source_timestamp: datetime | None = None,
+    ) -> tuple[ExchangeOrder, ...]:
+        """Persist a full open-order snapshot, including explicit absences."""
+        now = datetime.now(timezone.utc)
+        payload = raw_payload or {"feed": "open_orders_snapshot"}
+        with self.sessionmaker() as session:
+            normalized = self._with_absent_orders_for_snapshot(
+                session,
+                list(orders),
+                raw_payload=payload,
+                source_timestamp=source_timestamp,
+            )
+            rows = tuple(
+                self._ensure_order_in_session(session, order, now=now)
+                for order in normalized
+            )
+            session.commit()
+            return rows
 
     def record_fill(self, fill: FillWrite) -> ExchangeFill:
         """Persiste une execution normalisee."""
@@ -909,6 +1209,30 @@ class AccountStateStore:
             row = self._record_position_in_session(session, position, now=now)
             session.commit()
             return row
+
+    def record_position_snapshot(
+        self,
+        positions: Iterable[PositionWrite],
+        *,
+        raw_payload: JsonMapT | None = None,
+        source_timestamp: datetime | None = None,
+    ) -> tuple[AccountPosition, ...]:
+        """Persist a full open-position snapshot, including explicit flats."""
+        now = datetime.now(timezone.utc)
+        payload = raw_payload or {"feed": "open_positions_snapshot"}
+        with self.sessionmaker() as session:
+            normalized = self._with_flat_positions_for_snapshot(
+                session,
+                list(positions),
+                raw_payload=payload,
+                source_timestamp=source_timestamp,
+            )
+            rows = tuple(
+                self._record_position_in_session(session, position, now=now)
+                for position in normalized
+            )
+            session.commit()
+            return rows
 
     def record_raw_event(
         self,
@@ -962,6 +1286,7 @@ class KrakenFuturesPrivateStream:
         store: AccountStateStore,
         credentials: KrakenFuturesCredentials,
         profile: PrivateStreamProfile | None = None,
+        mirror_store: AccountStateStore | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -974,7 +1299,20 @@ class KrakenFuturesPrivateStream:
             is_critical=True,
             health_aliases=(),
         )
+        self._mirror = (
+            PrivateIngestMirror(
+                mirror_store,
+                self.logger,
+                stream_kind=self.profile.stream_kind,
+                is_critical=self.profile.is_critical,
+                maxsize=config.queue_maxsize,
+            )
+            if mirror_store is not None
+            else None
+        )
         self._running = True
+        self._liveness_enabled = False
+        self._last_health_write_monotonic: float | None = None
         self._maintenance_task: asyncio.Task[None] | None = None
         self._ingest_task: asyncio.Task[None] | None = None
         self._last_balances: dict[str, tuple[float, float, float]] = (
@@ -1032,6 +1370,8 @@ class KrakenFuturesPrivateStream:
 
     async def run_once(self) -> None:
         """Ouvre une session privee, challenge, subscribe, puis consomme."""
+        self._liveness_enabled = False
+        self._last_health_write_monotonic = None
         async with websockets.connect(self.config.ws_url) as ws:
             self._set_status("connecting")
             challenge = await request_challenge(ws, self.credentials.api_key)
@@ -1060,11 +1400,12 @@ class KrakenFuturesPrivateStream:
             last_heartbeat_log = time.monotonic()
             try:
                 while self._running:
-                    if time.monotonic() - last_ping >= self.config.ping_seconds:
+                    now_monotonic = time.monotonic()
+                    if now_monotonic - last_ping >= self.config.ping_seconds:
                         await ws.ping()
-                        last_ping = time.monotonic()
+                        last_ping = now_monotonic
                     if (
-                        time.monotonic() - last_heartbeat_log
+                        now_monotonic - last_heartbeat_log
                         >= self.config.heartbeat_log_seconds
                     ):
                         self.logger.info(
@@ -1073,7 +1414,8 @@ class KrakenFuturesPrivateStream:
                             self.config.db_url,
                             self.profile.stream_kind,
                         )
-                        last_heartbeat_log = time.monotonic()
+                        last_heartbeat_log = now_monotonic
+                    self._record_local_liveness_due(now_monotonic)
                     try:
                         raw_message = await asyncio.wait_for(ws.recv(), timeout=1.0)
                     except TimeoutError:
@@ -1082,6 +1424,7 @@ class KrakenFuturesPrivateStream:
                     event = payload.get("event")
                     if event == "heartbeat":
                         self._set_status("healthy")
+                        self._mark_stream_live()
                         continue
                     await queue.put(
                         IngestMessage(
@@ -1095,12 +1438,15 @@ class KrakenFuturesPrivateStream:
     def stop(self) -> None:
         """Demande l'arret apres le message courant."""
         self._running = False
+        if self._mirror is not None:
+            self._mirror.stop()
 
     def handle_message(self, message: JsonMapT) -> None:
         """Compatibility hook used by tests and single-message tooling."""
         payload = dict(message)
         if payload.get("event") == "heartbeat":
             self._set_status("healthy")
+            self._mark_stream_live()
             return
         self._process_message(
             IngestMessage(
@@ -1163,6 +1509,7 @@ class KrakenFuturesPrivateStream:
             ):
                 self._log_ingest_result(result)
             self._set_status("healthy")
+            self._mark_stream_live()
 
     def _process_message(self, item: IngestMessage) -> None:
         payload = item.payload
@@ -1194,11 +1541,14 @@ class KrakenFuturesPrivateStream:
                 received_at=item.received_at,
                 prune_raw=False,
             )
+            if self._mirror is not None:
+                self._mirror.submit(item)
             self._log_ingest_result(result)
         except Exception as exc:
             self._set_status("error", last_error=f"{feed}: {exc}")
             raise
         self._set_status("healthy")
+        self._mark_stream_live()
 
     def _set_status(
         self,
@@ -1216,15 +1566,37 @@ class KrakenFuturesPrivateStream:
                 last_error=last_error,
             )
 
+    def _mark_stream_live(self) -> None:
+        """Enable local liveness writes once private flow is confirmed active."""
+        self._liveness_enabled = True
+        self._last_health_write_monotonic = time.monotonic()
+
+    def _record_local_liveness_due(self, now_monotonic: float) -> None:
+        """Persist a periodic healthy heartbeat to keep runtime readiness fresh."""
+        if not self._liveness_enabled:
+            return
+        interval_seconds = max(1.0, float(self.config.health_write_seconds))
+        if (
+            self._last_health_write_monotonic is not None
+            and now_monotonic - self._last_health_write_monotonic < interval_seconds
+        ):
+            return
+        now = datetime.now(timezone.utc)
+        self._set_status("healthy", now=now)
+        self._last_health_write_monotonic = now_monotonic
+
     def _log_ingest_result(self, result: Mapping[str, object]) -> None:
         feed = str(result.get("feed", ""))
         if feed.startswith("open_orders"):
             orders = cast(tuple[ExchangeOrder, ...], result.get("orders", ()))
             if feed.endswith("snapshot"):
+                source_row_count = int(result.get("source_row_count", len(orders)))
+                tombstoned = max(0, len(orders) - source_row_count)
                 self.logger.info(
-                    "kraken_account private_snapshot feed=%s rows=%d",
+                    "kraken_account private_snapshot feed=%s rows=%d tombstoned=%d",
                     feed,
-                    len(orders),
+                    source_row_count,
+                    tombstoned,
                 )
             for persisted in orders:
                 if feed.endswith("snapshot"):
@@ -1306,7 +1678,7 @@ class KrakenFuturesPrivateStream:
                     len(positions),
                 )
             for position in positions:
-                if feed.endswith("snapshot"):
+                if feed.endswith("snapshot") and position.size != 0.0:
                     continue
                 if not self._position_changed(position):
                     continue
@@ -1410,17 +1782,186 @@ def stream_profiles_from_config(config: AccountStreamConfig) -> tuple[PrivateStr
     )
 
 
-async def run_private_stream_group(streams: tuple[KrakenFuturesPrivateStream, ...]) -> None:
-    tasks = [asyncio.create_task(stream.run()) for stream in streams]
+def critical_private_config(config: AccountStreamConfig) -> AccountStreamConfig:
+    """Return config targeting the small order/fill private DB."""
+    return replace(config, db_url=config.critical_db_url or config.db_url)
+
+
+def profile_uses_critical_db(profile: PrivateStreamProfile) -> bool:
+    """Critical feed profile owns order/fill truth."""
+    return profile.name == "critical"
+
+
+def stream_kind_uses_critical_db(stream_kind: str) -> bool:
+    """Runtime-facing private websocket health lives in the critical DB."""
+    return stream_kind in {"private_ws", "private_ws_critical"}
+
+
+async def run_private_stream_group(
+    streams: tuple[KrakenFuturesPrivateStream, ...],
+    *,
+    rest_reconciler: Any | None = None,
+    rest_reconcile_seconds: float = 0.0,
+) -> None:
+    async def _run_stream(stream: KrakenFuturesPrivateStream) -> BaseException | None:
+        try:
+            await stream.run()
+            return None
+        except BaseException as exc:
+            return exc
+
+    stream_tasks = [asyncio.create_task(_run_stream(stream)) for stream in streams]
+    logger = (
+        getattr(streams[0], "logger", setup_logging("INFO"))
+        if streams
+        else setup_logging("INFO")
+    )
+    interval = max(0.0, float(rest_reconcile_seconds))
+
+    async def _rest_reconcile_loop() -> BaseException | None:
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                stats = cast(dict[str, int], rest_reconciler.reconcile_once())
+                logger.info(
+                    "kraken_account rest_reconcile orders=%s positions=%s balances=%s interval=%ss",
+                    stats.get("orders", 0),
+                    stats.get("positions", 0),
+                    stats.get("balances", 0),
+                    f"{interval:.1f}",
+                )
+            except asyncio.CancelledError:
+                return None
+            except Exception as exc:
+                store = getattr(rest_reconciler, "store", None)
+                if store is not None:
+                    store.record_connection_status(
+                        "rest_reconciler",
+                        "error",
+                        last_error=str(exc),
+                    )
+                logger.warning(
+                    "kraken_account rest_reconcile failed interval=%ss error=%s",
+                    f"{interval:.1f}",
+                    exc,
+                )
+            except BaseException as exc:  # pragma: no cover - defensive shutdown.
+                return exc
+
+    reconcile_task: asyncio.Task[BaseException | None] | None = None
+    if rest_reconciler is not None and interval > 0.0:
+        reconcile_task = asyncio.create_task(_rest_reconcile_loop())
+
+    failure: BaseException | None = None
     try:
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*stream_tasks)
+        for result in results:
+            if result is not None:
+                failure = result
+                break
     finally:
         for stream in streams:
             stream.stop()
-        for task in tasks:
+        for task in stream_tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+        if stream_tasks:
+            await asyncio.gather(*stream_tasks, return_exceptions=True)
+        if reconcile_task is not None:
+            await asyncio.gather(reconcile_task, return_exceptions=True)
+    if failure is not None:
+        raise failure
+
+
+def run_private_stream_group_threaded(
+    streams: tuple[KrakenFuturesPrivateStream, ...],
+    *,
+    rest_reconciler: Any | None = None,
+    rest_reconcile_seconds: float = 0.0,
+) -> None:
+    """Run private WS profiles on separate event loops."""
+    logger = (
+        getattr(streams[0], "logger", setup_logging("INFO"))
+        if streams
+        else setup_logging("INFO")
+    )
+    stop_event = threading.Event()
+    failures: thread_queue.Queue[BaseException] = thread_queue.Queue()
+
+    def _run_stream(stream: KrakenFuturesPrivateStream) -> None:
+        try:
+            asyncio.run(stream.run())
+        except BaseException as exc:
+            failures.put(exc)
+
+    threads = [
+        threading.Thread(
+            target=_run_stream,
+            args=(stream,),
+            name=f"private-ws-{getattr(getattr(stream, 'profile', None), 'name', 'stream')}",
+            daemon=True,
+        )
+        for stream in streams
+    ]
+
+    interval = max(0.0, float(rest_reconcile_seconds))
+
+    def _run_reconciler() -> None:
+        if rest_reconciler is None or interval <= 0.0:
+            return
+        while not stop_event.wait(interval):
+            try:
+                stats = cast(dict[str, int], rest_reconciler.reconcile_once())
+                logger.info(
+                    "kraken_account rest_reconcile orders=%s positions=%s balances=%s interval=%ss",
+                    stats.get("orders", 0),
+                    stats.get("positions", 0),
+                    stats.get("balances", 0),
+                    f"{interval:.1f}",
+                )
+            except Exception as exc:
+                store = getattr(rest_reconciler, "store", None)
+                if store is not None:
+                    store.record_connection_status(
+                        "rest_reconciler",
+                        "error",
+                        last_error=str(exc),
+                    )
+                logger.warning(
+                    "kraken_account rest_reconcile failed interval=%ss error=%s",
+                    f"{interval:.1f}",
+                    exc,
+                )
+
+    reconcile_thread = threading.Thread(
+        target=_run_reconciler,
+        name="private-rest-reconciler",
+        daemon=True,
+    )
+    try:
+        for thread in threads:
+            thread.start()
+        if rest_reconciler is not None and interval > 0.0:
+            reconcile_thread.start()
+        while True:
+            try:
+                failure = failures.get_nowait()
+            except thread_queue.Empty:
+                failure = None
+            if failure is not None:
+                raise failure
+            if threads and not any(thread.is_alive() for thread in threads):
+                return
+            time.sleep(0.2)
+    finally:
+        stop_event.set()
+        for stream in streams:
+            stream.stop()
+        for thread in threads:
+            thread.join(timeout=3.0)
+        if reconcile_thread.is_alive():
+            reconcile_thread.join(timeout=3.0)
 
 
 class KrakenFuturesRestReconciler:
@@ -1432,21 +1973,40 @@ class KrakenFuturesRestReconciler:
         store: AccountStateStore,
         credentials: KrakenFuturesCredentials,
         session: requests.Session | None = None,
+        critical_store: AccountStateStore | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.credentials = credentials
         self.session = session or requests.Session()
+        self.critical_store = critical_store
 
     def reconcile_once(self) -> dict[str, int]:
         """Execute un reconcile REST ponctuel, jamais en boucle serree."""
         stats = {"orders": 0, "positions": 0, "balances": 0}
-        for order in self.get_json("/openorders").get("openOrders", []):
-            self.store.ensure_order(map_order(order))
-            stats["orders"] += 1
-        for position in extract_list(self.get_json("/openpositions"), "openPositions"):
-            self.store.record_position(map_position(position))
-            stats["positions"] += 1
+        open_orders_payload = self.get_json("/openorders")
+        open_orders = [
+            map_order(order)
+            for order in extract_list(open_orders_payload, "openOrders")
+        ]
+        snapshot_payload = {"feed": "open_orders_snapshot", **open_orders_payload}
+        self.store.record_order_snapshot(open_orders, raw_payload=snapshot_payload)
+        if self.critical_store is not None:
+            self.critical_store.record_order_snapshot(
+                open_orders,
+                raw_payload=snapshot_payload,
+            )
+        stats["orders"] += len(open_orders)
+        positions_payload = self.get_json("/openpositions")
+        positions = [
+            map_position(position)
+            for position in extract_list(positions_payload, "openPositions")
+        ]
+        position_rows = self.store.record_position_snapshot(
+            positions,
+            raw_payload={"feed": "open_positions_snapshot", **positions_payload},
+        )
+        stats["positions"] += len(position_rows)
         accounts = self.get_json("/accounts")
         for balance in map_rest_balances(accounts):
             self.store.record_balance(balance)
@@ -2094,6 +2654,24 @@ def _prefer_known(new_value: str, old_value: str) -> str:
     return old_value
 
 
+def _order_identity_key(row: ExchangeOrder) -> tuple[str, str] | None:
+    if row.exchange_order_id:
+        return ("exchange", row.exchange_order_id)
+    if row.client_order_id:
+        return ("client", row.client_order_id)
+    return None
+
+
+def _order_seen_in_snapshot(
+    row: ExchangeOrder,
+    seen_exchange_ids: set[str],
+    seen_client_ids: set[str],
+) -> bool:
+    if row.exchange_order_id and row.exchange_order_id in seen_exchange_ids:
+        return True
+    return bool(row.client_order_id and row.client_order_id in seen_client_ids)
+
+
 def _merge_raw_payload(
     old_payload: dict[str, Any] | None,
     new_payload: dict[str, Any] | None,
@@ -2224,6 +2802,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         cmd.add_argument("--db-url", help="Private SQLite database URL.")
         cmd.add_argument(
+            "--critical-db-url",
+            help=(
+                "Critical private SQLite database URL for open_orders/fills. "
+                "Defaults from Kraken Futures environment."
+            ),
+        )
+        cmd.add_argument(
             "--exchange",
             default=AccountStreamConfig.exchange,
             help="Exchange label stored with rows.",
@@ -2265,6 +2850,12 @@ def build_parser() -> argparse.ArgumentParser:
             help="Logging verbosity.",
         )
         cmd.add_argument(
+            "--health-write-seconds",
+            type=float,
+            default=AccountStreamConfig.health_write_seconds,
+            help="Cadence for local private stream liveness writes.",
+        )
+        cmd.add_argument(
             "--raw-retention-minutes",
             type=int,
             default=AccountStreamConfig.raw_retention_minutes,
@@ -2276,6 +2867,12 @@ def build_parser() -> argparse.ArgumentParser:
             default=AccountStreamConfig.raw_retention_limit,
             help="Maximum raw private events kept per stream identity; 0 disables count cleanup.",
         )
+        cmd.add_argument(
+            "--rest-reconcile-seconds",
+            type=float,
+            default=AccountStreamConfig.rest_reconcile_seconds,
+            help="Cadence for private REST reconcile writes during run; 0 disables loop.",
+        )
     return parser
 
 
@@ -2284,6 +2881,7 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
     env_cfg = kraken_futures_environment(args.environment)
     return AccountStreamConfig(
         db_url=args.db_url or env_cfg.private_db_url,
+        critical_db_url=args.critical_db_url or env_cfg.critical_private_db_url,
         exchange=args.exchange,
         environment=args.environment,
         market_type=args.market_type,
@@ -2293,6 +2891,8 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
         api_key_env=args.api_key_env or env_cfg.api_key_env,
         api_secret_env=args.api_secret_env or env_cfg.api_secret_env,
         ingest_profile=args.ingest_profile,
+        health_write_seconds=args.health_write_seconds,
+        rest_reconcile_seconds=max(0.0, args.rest_reconcile_seconds),
         raw_retention_minutes=args.raw_retention_minutes,
         raw_retention_limit=args.raw_retention_limit,
         log_level=args.log_level,
@@ -2304,32 +2904,84 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     config = config_from_args(args)
-    store = AccountStateStore(config)
+    account_store = AccountStateStore(config)
+    critical_store = AccountStateStore(critical_private_config(config))
     if args.command == "status":
-        print(json.dumps(store.latest_status(args.stream_kind), sort_keys=True))
+        status_store = (
+            critical_store
+            if stream_kind_uses_critical_db(args.stream_kind)
+            else account_store
+        )
+        print(json.dumps(status_store.latest_status(args.stream_kind), sort_keys=True))
         return 0
     credentials = credentials_from_env(config)
     if args.command == "reconcile":
-        stats = KrakenFuturesRestReconciler(config, store, credentials).reconcile_once()
+        stats = KrakenFuturesRestReconciler(
+            config,
+            account_store,
+            credentials,
+            critical_store=critical_store,
+        ).reconcile_once()
         print(json.dumps(stats, sort_keys=True))
         return 0
     profiles = stream_profiles_from_config(config)
-    streams = tuple(
-        KrakenFuturesPrivateStream(config, store, credentials, profile=profile)
-        for profile in profiles
+    streams = []
+    for profile in profiles:
+        use_critical = profile_uses_critical_db(profile)
+        streams.append(
+            KrakenFuturesPrivateStream(
+                critical_private_config(config) if use_critical else config,
+                critical_store if use_critical else account_store,
+                credentials,
+                profile=profile,
+                mirror_store=account_store if use_critical else None,
+            )
+        )
+    streams_tuple = tuple(streams)
+    reconciler = (
+        KrakenFuturesRestReconciler(
+            config,
+            account_store,
+            credentials,
+            critical_store=critical_store,
+        )
+        if config.rest_reconcile_seconds > 0
+        else None
     )
     try:
-        asyncio.run(run_private_stream_group(streams))
+        if config.ingest_profile == "split" and len(streams_tuple) > 1:
+            run_private_stream_group_threaded(
+                streams_tuple,
+                rest_reconciler=reconciler,
+                rest_reconcile_seconds=config.rest_reconcile_seconds,
+            )
+        else:
+            asyncio.run(
+                run_private_stream_group(
+                    streams_tuple,
+                    rest_reconciler=reconciler,
+                    rest_reconcile_seconds=config.rest_reconcile_seconds,
+                )
+            )
     except KeyboardInterrupt:
-        for stream in streams:
+        for stream in streams_tuple:
             stream.stop()
         for profile in profiles:
+            status_store = (
+                critical_store if profile_uses_critical_db(profile) else account_store
+            )
             for stream_kind in (profile.stream_kind,) + profile.health_aliases:
-                store.record_connection_status(
+                status_store.record_connection_status(
                     stream_kind,
                     "stopped",
                     last_error="stopped by operator",
                 )
+        if reconciler is not None:
+            account_store.record_connection_status(
+                "rest_reconciler",
+                "stopped",
+                last_error="stopped by operator",
+            )
         print("private account stream stopped by operator")
         return 0
     return 0

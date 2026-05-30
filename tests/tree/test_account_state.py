@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from kolabi.shared.persistence import (
@@ -16,7 +17,12 @@ from kolabi.tree.account import (
     AccountStreamConfig,
     BalanceWrite,
     FillWrite,
+    KrakenFuturesCredentials,
+    KrakenFuturesPrivateStream,
+    KrakenFuturesRestReconciler,
     OrderWrite,
+    PrivateStreamProfile,
+    critical_private_config,
     map_balances,
     map_fill_event,
     map_order,
@@ -25,6 +31,7 @@ from kolabi.tree.account import (
     prune_raw_events,
     sign_challenge,
     sign_rest_auth,
+    stream_kind_uses_critical_db,
     subscribe_messages,
     upgrade_private_schema,
 )
@@ -54,6 +61,169 @@ def test_record_connection_status_updates_existing_row(tmp_path):
     assert first.id == second.id
     assert second.status == "healthy"
     assert second.last_heartbeat_at == second_time.replace(tzinfo=None)
+
+
+def test_reconnecting_status_does_not_refresh_connection_heartbeat(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    healthy_time = datetime(2026, 5, 6, 1, 0, tzinfo=timezone.utc)
+    reconnect_time = datetime(2026, 5, 6, 1, 1, tzinfo=timezone.utc)
+
+    healthy = store.record_connection_status("private_ws", "healthy", healthy_time)
+    reconnecting = store.record_connection_status(
+        "private_ws",
+        "reconnecting",
+        reconnect_time,
+        last_error="server rejected WebSocket connection: HTTP 503",
+    )
+
+    assert healthy.id == reconnecting.id
+    assert reconnecting.status == "reconnecting"
+    assert reconnecting.updated_at == reconnect_time.replace(tzinfo=None)
+    assert reconnecting.last_heartbeat_at == healthy_time.replace(tzinfo=None)
+    assert reconnecting.last_error == "server rejected WebSocket connection: HTTP 503"
+
+
+def test_critical_liveness_refresh_updates_private_ws_alias(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    config = AccountStreamConfig(db_url=db_url, health_write_seconds=1.0)
+    store = AccountStateStore(config)
+    profile = PrivateStreamProfile(
+        name="critical",
+        stream_kind="private_ws_critical",
+        feeds=config.critical_feeds,
+        is_critical=True,
+        health_aliases=("private_ws",),
+    )
+    stream = KrakenFuturesPrivateStream(
+        config,
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+        profile=profile,
+    )
+    baseline = datetime(2026, 5, 6, 1, 0, tzinfo=timezone.utc)
+    store.record_connection_status("private_ws_critical", "healthy", baseline)
+    store.record_connection_status("private_ws", "healthy", baseline)
+
+    stream._liveness_enabled = True
+    stream._last_health_write_monotonic = time.monotonic() - 5.0
+    stream._record_local_liveness_due(time.monotonic())
+
+    baseline_naive = baseline.replace(tzinfo=None)
+    status_alias = store.latest_status("private_ws")
+    status_critical = store.latest_status("private_ws_critical")
+    assert datetime.fromisoformat(str(status_alias["updated_at"])) > baseline_naive
+    assert datetime.fromisoformat(str(status_critical["updated_at"])) > baseline_naive
+
+
+def test_account_liveness_refresh_does_not_touch_private_ws_alias(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    config = AccountStreamConfig(db_url=db_url, health_write_seconds=1.0)
+    store = AccountStateStore(config)
+    profile = PrivateStreamProfile(
+        name="account",
+        stream_kind="private_ws_account",
+        feeds=config.account_feeds,
+        is_critical=False,
+    )
+    stream = KrakenFuturesPrivateStream(
+        config,
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+        profile=profile,
+    )
+    baseline = datetime(2026, 5, 6, 1, 0, tzinfo=timezone.utc)
+    store.record_connection_status("private_ws", "healthy", baseline)
+    store.record_connection_status("private_ws_account", "healthy", baseline)
+
+    stream._liveness_enabled = True
+    stream._last_health_write_monotonic = time.monotonic() - 5.0
+    stream._record_local_liveness_due(time.monotonic())
+
+    baseline_naive = baseline.replace(tzinfo=None)
+    status_alias = store.latest_status("private_ws")
+    status_account = store.latest_status("private_ws_account")
+    assert datetime.fromisoformat(str(status_alias["updated_at"])) == baseline_naive
+    assert datetime.fromisoformat(str(status_account["updated_at"])) > baseline_naive
+
+
+def test_private_ws_status_uses_critical_db_selector() -> None:
+    assert stream_kind_uses_critical_db("private_ws") is True
+    assert stream_kind_uses_critical_db("private_ws_critical") is True
+    assert stream_kind_uses_critical_db("private_ws_account") is False
+    assert stream_kind_uses_critical_db("rest_reconciler") is False
+
+
+def test_critical_stream_writes_critical_db_and_mirrors_account_db(tmp_path):
+    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    critical_db = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+    config = AccountStreamConfig(db_url=account_db, critical_db_url=critical_db)
+    account_store = AccountStateStore(config)
+    critical_config = critical_private_config(config)
+    critical_store = AccountStateStore(critical_config)
+    profile = PrivateStreamProfile(
+        name="critical",
+        stream_kind="private_ws_critical",
+        feeds=config.critical_feeds,
+        is_critical=True,
+        health_aliases=("private_ws",),
+    )
+    stream = KrakenFuturesPrivateStream(
+        critical_config,
+        critical_store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+        profile=profile,
+        mirror_store=account_store,
+    )
+    message = {
+        "feed": "open_orders",
+        "order": {
+            "instrument": "PI_XBTUSD",
+            "direction": 1,
+            "type": "stop",
+            "qty": 4,
+            "filled": 0,
+            "stop_price": 73361.5,
+            "order_id": "OID-CRIT",
+            "cli_ord_id": "CID-CRIT",
+            "status": "open",
+            "reduce_only": True,
+        },
+    }
+
+    stream.handle_message(message)
+    try:
+        with Session(critical_store.engine) as session:
+            critical_order = (
+                session.execute(
+                    select(ExchangeOrder).where(
+                        ExchangeOrder.client_order_id == "CID-CRIT"
+                    )
+                )
+                .scalars()
+                .one()
+            )
+            assert critical_order.exchange_order_id == "OID-CRIT"
+
+        mirrored_order = None
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and mirrored_order is None:
+            with Session(account_store.engine) as session:
+                mirrored_order = (
+                    session.execute(
+                        select(ExchangeOrder).where(
+                            ExchangeOrder.client_order_id == "CID-CRIT"
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+            if mirrored_order is None:
+                time.sleep(0.02)
+        assert mirrored_order is not None
+        assert mirrored_order.exchange_order_id == "OID-CRIT"
+    finally:
+        stream.stop()
 
 
 def test_record_order_and_fill(tmp_path):
@@ -542,6 +712,96 @@ def test_handle_message_logs_snapshot_summary_only(tmp_path, caplog):
     assert "order_event feed=open_orders_snapshot" not in caplog.text
 
 
+def test_open_orders_snapshot_tombstones_missing_open_order(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    stream.handle_message(
+        {
+            "feed": "open_orders",
+            "order": {
+                "instrument": "PI_XBTUSD",
+                "direction": 1,
+                "type": "stop",
+                "qty": 6,
+                "filled": 0,
+                "stop_price": 73448.0,
+                "order_id": "OID-T",
+                "cli_ord_id": "CID-T",
+                "status": "open",
+            },
+        }
+    )
+
+    with caplog.at_level(logging.INFO):
+        stream.handle_message({"feed": "open_orders_snapshot", "orders": []})
+
+    with Session(store.engine) as session:
+        row = session.execute(
+            select(ExchangeOrder).where(ExchangeOrder.exchange_order_id == "OID-T")
+        ).scalar_one()
+
+    assert row.status == "canceled"
+    assert row.raw_payload["reason"] == "absent_from_open_orders_snapshot"
+    assert row.raw_payload["previous_status"] == "open"
+    assert "private_snapshot feed=open_orders_snapshot rows=0 tombstoned=1" in caplog.text
+
+
+def test_rest_reconcile_tombstones_missing_open_order_in_critical_db(tmp_path):
+    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    critical_db = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+    config = AccountStreamConfig(db_url=account_db, critical_db_url=critical_db)
+    account_store = AccountStateStore(config)
+    critical_store = AccountStateStore(critical_private_config(config))
+    open_order = OrderWrite(
+        symbol="PI_XBTUSD",
+        side="buy",
+        order_type="stop",
+        status="open",
+        quantity=6.0,
+        exchange_order_id="OID-REST",
+        client_order_id="CID-REST",
+        price=73448.0,
+    )
+    account_store.record_order_snapshot([open_order])
+    critical_store.record_order_snapshot([open_order])
+
+    class _Reconciler(KrakenFuturesRestReconciler):
+        def get_json(self, endpoint_path, params=None):
+            del params
+            if endpoint_path == "/openorders":
+                return {"openOrders": []}
+            if endpoint_path == "/openpositions":
+                return {"openPositions": []}
+            if endpoint_path == "/accounts":
+                return {"accounts": {}}
+            raise AssertionError(endpoint_path)
+
+    reconciler = _Reconciler(
+        config,
+        account_store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+        critical_store=critical_store,
+    )
+
+    stats = reconciler.reconcile_once()
+
+    assert stats["orders"] == 0
+    for store in (account_store, critical_store):
+        with Session(store.engine) as session:
+            row = session.execute(
+                select(ExchangeOrder).where(
+                    ExchangeOrder.exchange_order_id == "OID-REST"
+                )
+            ).scalar_one()
+        assert row.status == "canceled"
+        assert row.raw_payload["reason"] == "absent_from_open_orders_snapshot"
+
+
 def test_handle_message_logs_balance_delta_event(tmp_path, caplog):
     db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
@@ -688,6 +948,55 @@ def test_handle_message_suppresses_unchanged_position_event(tmp_path, caplog):
         stream.handle_message(message)
         stream.handle_message(message)
     assert caplog.text.count("position_event feed=open_positions symbol=PI_XBTUSD") == 1
+
+
+def test_empty_open_positions_snapshot_records_flat_position(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
+
+    stream = KrakenFuturesPrivateStream(
+        AccountStreamConfig(db_url=db_url),
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    open_message = {
+        "feed": "open_positions",
+        "positions": [
+            {
+                "instrument": "PI_XBTUSD",
+                "side": "short",
+                "size": -11.0,
+                "entry_price": 73356.0,
+            }
+        ],
+    }
+    flat_snapshot = {
+        "feed": "open_positions_snapshot",
+        "positions": [],
+        "timestamp": 1778025600000,
+    }
+
+    with caplog.at_level(logging.INFO):
+        stream.handle_message(open_message)
+        stream.handle_message(flat_snapshot)
+
+    with Session(store.engine) as session:
+        latest = (
+            session.execute(
+                select(AccountPosition)
+                .where(AccountPosition.symbol == "PI_XBTUSD")
+                .order_by(AccountPosition.local_timestamp.desc(), AccountPosition.id.desc())
+            )
+            .scalars()
+            .first()
+        )
+
+    assert latest is not None
+    assert latest.size == 0.0
+    assert latest.side == "short"
+    assert "position_event feed=open_positions_snapshot symbol=PI_XBTUSD" in caplog.text
+    assert "size=0.00000000" in caplog.text
 
 
 def test_handle_message_logs_private_notice_delta_event(tmp_path, caplog):
@@ -901,8 +1210,24 @@ def test_schema_upgrade_skips_non_sqlite_engines(monkeypatch):
     upgrade_private_schema(Engine())
 
 
+def test_private_schema_adds_raw_event_latest_lookup_index(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+
+    with store.engine.connect() as connection:
+        indexes = {
+            str(row[1])
+            for row in connection.exec_driver_sql(
+                "PRAGMA index_list(raw_exchange_events)"
+            )
+        }
+
+    assert "ix_raw_exchange_events_event_latest" in indexes
+
+
 def test_main_handles_ctrl_c_as_clean_stop(tmp_path, monkeypatch, capsys):
     db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    critical_db_url = f"sqlite:///{tmp_path / 'critical.sqlite'}"
     monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_KEY", "key")
     monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_SECRET", "secret")
 
@@ -922,11 +1247,15 @@ def test_main_handles_ctrl_c_as_clean_stop(tmp_path, monkeypatch, capsys):
         InterruptingStream,
     )
 
-    result = account_module.main(["run", "--db-url", db_url])
+    result = account_module.main(
+        ["run", "--db-url", db_url, "--critical-db-url", critical_db_url]
+    )
 
     assert result == 0
     assert "stopped by operator" in capsys.readouterr().out
-    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    store = AccountStateStore(
+        AccountStreamConfig(db_url=critical_db_url, critical_db_url=critical_db_url)
+    )
     status = store.latest_status("private_ws")
     assert status["status"] == "stopped"
 

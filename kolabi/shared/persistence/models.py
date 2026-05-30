@@ -387,6 +387,15 @@ class RawExchangeEvent(Base):
             "event_type",
             "correlation_id",
         ),
+        Index(
+            "ix_raw_exchange_events_event_latest",
+            "exchange",
+            "environment",
+            "stream_kind",
+            "event_type",
+            "received_at",
+            "id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
