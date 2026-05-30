@@ -12,7 +12,8 @@ from kolabi.bot.indicators import (
     IndicatorClient,
     KrakenDbIndicatorClient,
 )
-from kolabi.bot.ogun_executor import OgunExecutor
+from kolabi.bot.ogun_executor import OgunExecutor, RestFlightPolicy
+from kolabi.bot.order_codes import parse_order_code
 from kolabi.bot.persistence import (
     OrderRecorder,
     PersistenceConfig,
@@ -107,6 +108,9 @@ class BotConfig:
     tail_verify_timeout_seconds: float = 11.0
     tail_verify_poll_seconds: float = 0.5
     tail_visibility_timeout_seconds: float = 20.0
+    max_active_pairs: int = 4
+    rest_min_interval_seconds: float = 0.1
+    rest_max_inflight: int = 1
 
 
 class BotService:
@@ -282,6 +286,7 @@ class BotService:
             market_type="futures",
             account_scope="default",
             tail_visibility_timeout_seconds=self.config.tail_visibility_timeout_seconds,
+            max_active_pairs=self.config.max_active_pairs,
             simulate=simulate,
         )
         if dry_run:
@@ -360,7 +365,13 @@ class BotService:
             run_blocking_calls_in_thread=True,
             verify_tail_on_place=False,
         )
-        return OgunExecutor(port)
+        return OgunExecutor(
+            port,
+            flight_policy=RestFlightPolicy(
+                min_interval_seconds=self.config.rest_min_interval_seconds,
+                max_inflight=self.config.rest_max_inflight,
+            ),
+        )
 
     def _build_public_source(self, *, simulate: bool):
         if simulate:
@@ -587,10 +598,28 @@ class AdapterExchangePort(ExchangePort):
         if request.orderQty is None:
             raise ValueError(f"Missing orderQty for place request on pair '{request.pair_name}'")
         params: dict[str, Any] = {}
-        if request.price is not None:
-            params["price"] = request.price
         if request.stopPx is not None:
             params["stopPx"] = request.stopPx
+        price = request.price
+        if (
+            price is None
+            and request.stopPx is not None
+            and request.oDelta is not None
+            and _order_type_uses_limit_offset(request.ordType)
+        ):
+            price = _limit_price_from_stop_offset(
+                side=request.side,
+                stop_px=request.stopPx,
+                offset=request.oDelta,
+            )
+        _validate_order_prices(
+            pair_name=request.pair_name,
+            order_type=request.ordType,
+            price=price,
+            stop_px=request.stopPx,
+        )
+        if price is not None:
+            params["price"] = price
         if request.clOrdID is not None:
             params["clOrdID"] = request.clOrdID
         if request.execInst is not None:
@@ -808,6 +837,39 @@ def _extract_cancelable_order_id(order: dict[str, object]) -> str | None:
         if value:
             return str(value)
     return None
+
+
+def _limit_price_from_stop_offset(
+    *,
+    side: str,
+    stop_px: object,
+    offset: object,
+) -> Decimal:
+    stop = Decimal(str(stop_px))
+    distance = abs(Decimal(str(offset)))
+    if side.lower() == "buy":
+        return stop + distance
+    return stop - distance
+
+
+def _order_type_uses_limit_offset(order_type: str) -> bool:
+    return parse_order_code(order_type).base_key in {"SL", "LT"}
+
+
+def _validate_order_prices(
+    *,
+    pair_name: str,
+    order_type: str,
+    price: object | None,
+    stop_px: object | None,
+) -> None:
+    base = parse_order_code(order_type).base_key
+    if base == "L" and price is None:
+        raise ValueError(f"Order pair '{pair_name}' limit order needs a price")
+    if base in {"S", "SL", "MT", "LT"} and stop_px is None:
+        raise ValueError(f"Order pair '{pair_name}' trigger order needs a stopPx")
+    if base in {"SL", "LT"} and price is None:
+        raise ValueError(f"Order pair '{pair_name}' trigger-limit order needs a limit price")
 
 
 @dataclass(frozen=True)

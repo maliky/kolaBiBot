@@ -501,6 +501,127 @@ def test_runtime_dispatches_different_pairs_concurrently() -> None:
     assert set(started) == {"pair-a", "pair-b"}
 
 
+def test_runtime_defers_head_when_active_pair_capacity_is_full() -> None:
+    class BlockingExecutor:
+        def __init__(self) -> None:
+            self.started: list[str] = []
+            self.release = asyncio.Event()
+
+        async def execute(self, command):
+            self.started.append(command.pair_name)
+            await self.release.wait()
+            return OrderAck(order_id=f"OID-{command.pair_name}", status="New")
+
+    pair_a = sample_strategy()[0]
+    pair_b = replace(pair_a, name="pair-b")
+    executor = BlockingExecutor()
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="multi", pairs=(pair_a, pair_b)),
+        symbol="PI_XBTUSD",
+        executor=executor,
+        max_active_pairs=1,
+        simulate=False,
+    )
+    command_a = PlaceHeadCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="buy",
+            ordType="Market",
+            orderQty=Decimal("1"),
+            clOrdID="CID-A",
+        ),
+    )
+    command_b = PlaceHeadCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-b",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-b",
+            side="buy",
+            ordType="Market",
+            orderQty=Decimal("1"),
+            clOrdID="CID-B",
+        ),
+    )
+
+    async def _run() -> tuple[int, int, tuple[str, ...]]:
+        runtime.running = True
+        runtime._dispatch_commands((command_a, command_b))
+        await asyncio.sleep(0.01)
+        inflight_count = len(runtime._inflight_commands)
+        pending_count = len(runtime._pending_head_commands)
+        started = tuple(executor.started)
+        executor.release.set()
+        await asyncio.sleep(0.01)
+        await runtime.stop()
+        return inflight_count, pending_count, started
+
+    inflight_count, pending_count, started = asyncio.run(_run())
+
+    assert inflight_count == 1
+    assert pending_count == 1
+    assert started == ("pair-a",)
+
+
+def test_tail_place_failure_marks_only_that_pair_failed() -> None:
+    class FailingTailExecutor:
+        async def execute(self, command):
+            raise RuntimeError("Kraken HTTP 503 on /sendorder")
+
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    state = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.HOOKED,
+        tail_trail=trail,
+        played_quantity=Decimal("1"),
+    )
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="one", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=FailingTailExecutor(),
+        simulate=False,
+    )
+    runtime.state = replace(runtime.state, pairs={"pair-a": state})
+    runtime.chronos.state = runtime.state
+    command = PlaceTailCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="sell",
+            ordType="Stop",
+            orderQty=Decimal("1"),
+            stopPx=Decimal("99"),
+            clOrdID="TAIL-A",
+        ),
+    )
+
+    async def _run() -> PairCycleState:
+        runtime.running = True
+        runtime._dispatch_commands((command,))
+        await asyncio.sleep(0.01)
+        runtime._reap_command_tasks()
+        event = await asyncio.wait_for(runtime.event_queue.get(), timeout=0.5)
+        runtime.chronos.process_event(event)
+        runtime.state = runtime.chronos.state
+        await runtime.stop()
+        return runtime.state.pairs["pair-a"]
+
+    final_state = asyncio.run(_run())
+
+    assert not runtime._command_errors
+    assert final_state.head_state == HeadState.CLOSED
+    assert final_state.tail_state == TailState.FAILED
+    assert final_state.completed_at is not None
+
+
 def test_runtime_serialises_tail_amends_per_pair_but_not_across_pairs() -> None:
     class BlockingExecutor:
         def __init__(self) -> None:
@@ -649,6 +770,39 @@ def test_strategy_runtime_live_mode_does_not_emit_state_followups_from_ack() -> 
 
     followups = runtime._followup_events(prepared, ack)
     assert followups == ()
+
+
+def test_strategy_runtime_live_mode_emits_rejected_tail_amend_followup() -> None:
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=sample_strategy()),
+        symbol="PI_XBTUSD",
+        executor=SimulatedExecutor(),
+        simulate=False,
+    )
+    command = AmendTailCommand(
+        kind=RuntimeCommandKind.AMEND,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=AmendOrderCommandRequest(
+            pair_name="pair-a",
+            side="sell",
+            ordType="Stop",
+            orderID="OID-T",
+            clOrdID="CID-T",
+            newPrice=Decimal("98.5"),
+        ),
+    )
+
+    followups = runtime._followup_events(
+        command,
+        OrderAck(order_id="OID-T", status="Rejected", price=98.5),
+    )
+
+    assert len(followups) == 1
+    assert followups[0].kind == EggMoveKind.TAIL_AMEND_REJECTED
+    assert followups[0].role == OrderRole.TAIL
+    assert followups[0].reply is not None
+    assert followups[0].reply["clOrdID"] == "CID-T"
 
 
 def test_tail_submitted_followup_uses_exchange_rounded_ack_price_in_simulation() -> None:
@@ -1942,6 +2096,69 @@ def test_amend_dispatch_logs_and_tracks_pending_confirmation(caplog) -> None:
     assert "CS=99.00" in caplog.text
     assert "DS=98.50" in caplog.text
     assert slot in runtime._pending_tail_amends
+
+
+def test_rejected_live_tail_amend_clears_pending_confirmation(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), now),
+        confirmed_stop_price=Decimal("99.0"),
+        current_stop_price=Decimal("99.0"),
+        last_confirmed_at=now,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.LIVING,
+                tail_identity=OrderIdentity(
+                    pair_name="pair-a",
+                    role="tail",
+                    client_order_id="CID-T",
+                    exchange_order_id="OID-T",
+                ),
+                tail_trail=trail,
+                played_quantity=Decimal("1"),
+            )
+        },
+    )
+    command = AmendTailCommand(
+        kind=RuntimeCommandKind.AMEND,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=AmendOrderCommandRequest(
+            pair_name="pair-a",
+            side="sell",
+            ordType="Stop",
+            orderID="OID-T",
+            clOrdID="CID-T",
+            newPrice=Decimal("98.5"),
+        ),
+    )
+    slot = _CommandSlot(pair_name="pair-a", attempt_index=1, role="tail")
+    runtime._pending_tail_amends[slot] = _TailAmendPending(
+        pair_name="pair-a",
+        attempt_index=1,
+        desired_stop_price=Decimal("98.5"),
+        client_order_id="CID-T",
+        exchange_order_id="OID-T",
+        started_at=now,
+        deadline_at=now + timedelta(seconds=20),
+    )
+
+    with caplog.at_level("WARNING", logger="kola"):
+        runtime._record_live_ack(command, OrderAck(order_id="OID-T", status="Rejected"))
+
+    assert slot not in runtime._pending_tail_amends
+    assert "AMEND_REJECTED (pair-a#1):" in caplog.text
 
 
 def test_pending_amend_warns_when_db_confirmation_is_late(caplog) -> None:

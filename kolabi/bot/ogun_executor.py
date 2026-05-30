@@ -10,7 +10,9 @@ Role: async interpreter shell.
 from __future__ import annotations
 
 import asyncio
+import heapq
 from dataclasses import dataclass
+from typing import Awaitable, Callable, TypeVar
 
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
@@ -23,11 +25,123 @@ from kolabi.shared.core.runtime_types import (
     PlaceTailCommand,
 )
 
+_T = TypeVar("_T")
+
 
 @dataclass(frozen=True)
 class RetryPolicy:
     attempts: int = 3
     base_delay_seconds: float = 0.25
+
+
+@dataclass(frozen=True)
+class RestFlightPolicy:
+    min_interval_seconds: float = 0.0
+    max_inflight: int = 0
+
+
+@dataclass(frozen=True)
+class _FlightTicket:
+    priority: int
+    sequence: int
+    command: DragonSong
+
+
+class RestFlightGate:
+    """Async platform-call gate for the effect boundary.
+
+    The pure reducers produce immutable commands immediately. This gate only
+    controls when Ogun lets those commands touch the exchange.
+    """
+
+    def __init__(self, policy: RestFlightPolicy | None = None) -> None:
+        self.policy = policy or RestFlightPolicy()
+        self._condition = asyncio.Condition()
+        self._queue: list[tuple[int, int, _FlightTicket]] = []
+        self._sequence = 0
+        self._inflight = 0
+        self._next_launch_at = 0.0
+
+    async def fly(
+        self,
+        command: DragonSong,
+        dispatch: Callable[[], Awaitable[_T]],
+    ) -> _T:
+        if not self.enabled:
+            return await dispatch()
+        ticket = await self._enqueue(command)
+        await self._await_turn(ticket)
+        try:
+            return await dispatch()
+        finally:
+            await self._release()
+
+    @property
+    def enabled(self) -> bool:
+        return self.policy.min_interval_seconds > 0 or self.policy.max_inflight > 0
+
+    async def _enqueue(self, command: DragonSong) -> _FlightTicket:
+        async with self._condition:
+            self._sequence += 1
+            ticket = _FlightTicket(
+                priority=_flight_priority(command),
+                sequence=self._sequence,
+                command=command,
+            )
+            heapq.heappush(self._queue, (ticket.priority, ticket.sequence, ticket))
+            self._condition.notify_all()
+            return ticket
+
+    async def _await_turn(self, ticket: _FlightTicket) -> None:
+        claimed = False
+        try:
+            while True:
+                async with self._condition:
+                    delay = self._launch_delay_for(ticket)
+                    if delay is None:
+                        await self._condition.wait()
+                        continue
+                    if delay <= 0:
+                        self._claim(ticket)
+                        claimed = True
+                        return
+                    try:
+                        await asyncio.wait_for(self._condition.wait(), timeout=delay)
+                    except TimeoutError:
+                        pass
+        except asyncio.CancelledError:
+            if claimed:
+                await self._release()
+            else:
+                await self._remove_ticket(ticket)
+            raise
+
+    def _launch_delay_for(self, ticket: _FlightTicket) -> float | None:
+        if not self._queue or self._queue[0][2] is not ticket:
+            return None
+        if self.policy.max_inflight > 0 and self._inflight >= self.policy.max_inflight:
+            return None
+        loop_time = asyncio.get_running_loop().time()
+        return max(0.0, self._next_launch_at - loop_time)
+
+    def _claim(self, ticket: _FlightTicket) -> None:
+        popped = heapq.heappop(self._queue)[2]
+        if popped is not ticket:
+            raise RuntimeError("REST flight gate queue corruption")
+        self._inflight += 1
+        interval = max(0.0, self.policy.min_interval_seconds)
+        self._next_launch_at = asyncio.get_running_loop().time() + interval
+
+    async def _release(self) -> None:
+        async with self._condition:
+            self._inflight = max(0, self._inflight - 1)
+            self._condition.notify_all()
+
+    async def _remove_ticket(self, ticket: _FlightTicket) -> None:
+        async with self._condition:
+            self._queue = [entry for entry in self._queue if entry[2] is not ticket]
+            heapq.heapify(self._queue)
+            self._condition.notify_all()
 
 
 class OgunExecutor:
@@ -38,11 +152,17 @@ class OgunExecutor:
         port: ExchangePort,
         *,
         retry_policy: RetryPolicy | None = None,
+        flight_policy: RestFlightPolicy | None = None,
+        flight_gate: RestFlightGate | None = None,
     ) -> None:
         self.port = port
         self.retry_policy = retry_policy or RetryPolicy()
+        self.flight_gate = flight_gate or RestFlightGate(flight_policy)
 
     async def execute(self, command: DragonSong) -> OrderAck:
+        return await self.flight_gate.fly(command, lambda: self._execute_with_retries(command))
+
+    async def _execute_with_retries(self, command: DragonSong) -> OrderAck:
         attempts = self._attempts_for(command)
         delay = max(0.0, self.retry_policy.base_delay_seconds)
         for attempt in range(1, attempts + 1):
@@ -73,3 +193,15 @@ class OgunExecutor:
         if isinstance(command, CancelCommand):
             return await self.port.cancel(command)
         raise TypeError(f"Unsupported DragonSong type: {type(command)!r}")
+
+
+def _flight_priority(command: DragonSong) -> int:
+    if isinstance(command, CancelCommand):
+        return 0
+    if isinstance(command, (PlaceTailCommand, AmendTailCommand)):
+        return 1
+    if isinstance(command, AmendHeadCommand):
+        return 2
+    if isinstance(command, PlaceHeadCommand):
+        return 3
+    return 9

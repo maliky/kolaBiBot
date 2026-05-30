@@ -50,7 +50,6 @@ from kolabi.bot.dragon import (
     tail_submitted_from_ack,
 )
 from kolabi.bot.ids import head_client_order_id, tail_client_order_id
-from kolabi.bot.order_building import head_order_dict
 from kolabi.bot.pricing import pair_window_has_ended, tail_reference_price
 from kolabi.bot.telemetry import TailTelemetryRow
 from kolabi.shared.core.models import OrderAck
@@ -578,6 +577,7 @@ class StrategyRuntime:
         market_type: str = "futures",
         account_scope: str = "default",
         tail_visibility_timeout_seconds: float = 20.0,
+        max_active_pairs: int = 4,
         simulate: bool = False,
     ) -> None:
         self.strategy = strategy
@@ -593,6 +593,7 @@ class StrategyRuntime:
         self.market_type = market_type
         self.account_scope = account_scope
         self.tail_visibility_timeout_seconds = max(0.1, float(tail_visibility_timeout_seconds))
+        self.max_active_pairs = max(0, int(max_active_pairs))
         self.simulate = simulate
         launched_at = datetime.now(timezone.utc)
         self.state = StrategyState(
@@ -607,6 +608,7 @@ class StrategyRuntime:
         self._tasks: list[asyncio.Task[None]] = []
         self._inflight_commands: dict[_CommandSlot, _InFlightCommand] = {}
         self._pending_commands: dict[_CommandSlot, deque[DragonSong]] = {}
+        self._pending_head_commands: deque[DragonSong] = deque()
         self._command_errors: list[BaseException] = []
         self._legend_logged = False
         self._last_pair_updates: dict[str, tuple[str, ...]] = {}
@@ -678,6 +680,7 @@ class StrategyRuntime:
         self._tasks.clear()
         self._inflight_commands.clear()
         self._pending_commands.clear()
+        self._pending_head_commands.clear()
         self._pending_tail_visibility.clear()
         self._pending_tail_amends.clear()
 
@@ -707,11 +710,13 @@ class StrategyRuntime:
                     self._log_repeat_start(repeat_commands)
                     self._dispatch_commands(repeat_commands)
                     self._log_living_updates(previous_pairs)
+                    self._drain_pending_head_commands()
                 if (
                     self.all_pairs_terminal
                     and self.event_queue.empty()
                     and not self._inflight_commands
                     and not self._pending_commands
+                    and not self._pending_head_commands
                     and not self.chronos.pending_repeats
                 ):
                     break
@@ -728,6 +733,7 @@ class StrategyRuntime:
                 self._log_chain_releases(previous_pairs)
                 self._dispatch_commands(commands)
                 self._log_living_updates(previous_pairs)
+                self._drain_pending_head_commands()
         finally:
             await self.stop()
         return StrategyRunResult(
@@ -743,6 +749,16 @@ class StrategyRuntime:
             if self.executor is None:
                 continue
             slot = self._command_slot(prepared)
+            if isinstance(prepared, PlaceHeadCommand) and not self._head_capacity_available(prepared):
+                self._pending_head_commands.append(prepared)
+                _LOGGER.info(
+                    "HEAD_WAIT (%s#%s): active_pairs=%s max_active_pairs=%s",
+                    prepared.pair_name,
+                    slot.attempt_index,
+                    self._active_pair_count(),
+                    self.max_active_pairs,
+                )
+                continue
             if slot not in self._inflight_commands:
                 self._launch_command(slot, prepared)
                 continue
@@ -770,7 +786,28 @@ class StrategyRuntime:
     async def _execute_and_enqueue(self, prepared: DragonSong) -> None:
         if self.executor is None:
             return
-        ack = await self.executor.execute(prepared)
+        try:
+            ack = await self.executor.execute(prepared)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            failure = _command_failure_event(
+                prepared,
+                symbol=self.symbol,
+                occurred_at=datetime.now(timezone.utc),
+                error=exc,
+            )
+            if failure is None:
+                raise
+            _LOGGER.warning(
+                "COMMAND_FAILED (%s#%s %s): %s",
+                prepared.pair_name,
+                self._command_slot(prepared).attempt_index,
+                prepared.reason,
+                _compact_error(exc),
+            )
+            await self.enqueue(failure)
+            return
         self._record_live_ack(prepared, ack)
         for followup in self._followup_events(prepared, ack):
             await self.enqueue(followup)
@@ -825,6 +862,53 @@ class StrategyRuntime:
                 self._pending_commands.pop(slot, None)
             return
         self._pending_commands.pop(slot, None)
+
+    def _drain_pending_head_commands(self) -> None:
+        if not self._pending_head_commands:
+            return
+        deferred: deque[DragonSong] = deque()
+        while self._pending_head_commands:
+            command = self._pending_head_commands.popleft()
+            if not isinstance(command, PlaceHeadCommand):
+                deferred.append(command)
+                continue
+            slot = self._command_slot(command)
+            if not self._command_slot_still_live(slot):
+                continue
+            if not self._head_capacity_available(command):
+                deferred.append(command)
+                continue
+            self._launch_command(slot, command)
+        self._pending_head_commands = deferred
+
+    def _head_capacity_available(self, command: PlaceHeadCommand) -> bool:
+        if self.max_active_pairs <= 0:
+            return True
+        active_pairs = self._active_pair_names()
+        if command.pair_name in active_pairs:
+            return True
+        return len(active_pairs) < self.max_active_pairs
+
+    def _active_pair_count(self) -> int:
+        return len(self._active_pair_names())
+
+    def _active_pair_names(self) -> set[str]:
+        now = datetime.now(timezone.utc)
+        active: set[str] = set()
+        for pair_name, pair_state in self.state.pairs.items():
+            if pair_state.head_state == HeadState.LATENT:
+                continue
+            if _pair_runtime_complete(
+                pair_state,
+                launched_at=self.state.launched_at,
+                now=now,
+            ):
+                continue
+            active.add(pair_name)
+        for slot, entry in self._inflight_commands.items():
+            if isinstance(entry.command, (PlaceHeadCommand, PlaceTailCommand, AmendTailCommand)):
+                active.add(slot.pair_name)
+        return active
 
     def _command_slot(self, command: DragonSong) -> _CommandSlot:
         pair_name = command.pair_name
@@ -1273,10 +1357,12 @@ class StrategyRuntime:
                 at=datetime.now(timezone.utc),
             )
             request = replace(command.request, clOrdID=clordid)
+            legacy_order = dict(command.legacy_order or {})
+            legacy_order["clOrdID"] = clordid
             return replace(
                 command,
                 request=request,
-                legacy_order=head_order_dict(pair, client_order_id=clordid),
+                legacy_order=cast(OrderDict, legacy_order),
             )
         if isinstance(command, PlaceTailCommand) and command.request.clOrdID is None:
             pair_state = self.state.pairs[command.request.pair_name]
@@ -1308,6 +1394,23 @@ class StrategyRuntime:
             exchange_order_id=str(ack.order_id) if ack.order_id else identity.exchange_order_id,
         )
         self._live_command_identities[_identity_key(merged)] = merged
+        if isinstance(command, AmendTailCommand) and _ack_is_rejected(ack):
+            pair_state = self.state.pairs.get(command.pair_name)
+            attempt_index = 1 if pair_state is None else pair_state.attempt_index
+            slot = _CommandSlot(
+                pair_name=command.pair_name,
+                attempt_index=attempt_index,
+                role="tail",
+            )
+            self._pending_tail_amends.pop(slot, None)
+            _LOGGER.warning(
+                "AMEND_REJECTED (%s#%s): status=%s TCID=%s TOID=%s",
+                command.pair_name,
+                attempt_index,
+                ack.status,
+                merged.client_order_id or "-",
+                merged.exchange_order_id or "-",
+            )
         if not isinstance(command, PlaceTailCommand):
             return
         pair_state = self.state.pairs.get(command.pair_name)
@@ -1527,6 +1630,15 @@ class StrategyRuntime:
             )
 
     def _followup_events(self, command: DragonSong, ack: OrderAck) -> tuple[EggMove, ...]:
+        if isinstance(command, AmendTailCommand) and _ack_is_rejected(ack):
+            return (
+                _tail_amend_event_from_ack(
+                    command,
+                    ack,
+                    symbol=self.symbol,
+                    kind=EggMoveKind.TAIL_AMEND_REJECTED,
+                ),
+            )
         if not self.simulate:
             # Live/demo lifecycle is DB-grounded; adapter ACKs are correlation only.
             return ()
@@ -1541,38 +1653,13 @@ class StrategyRuntime:
             )
             return (submitted_tail,)
         if isinstance(command, AmendTailCommand):
-            now = datetime.now(timezone.utc)
-            status = str(ack.status or "")
-            kind = (
-                EggMoveKind.TAIL_AMEND_REJECTED
-                if status.replace(" ", "").replace("_", "").replace("-", "").lower()
-                in {"rejected", "reject", "failed", "invalidprice"}
-                else EggMoveKind.TAIL_AMENDED
-            )
-            reply: dict[str, object] = {
-                "orderID": str(ack.order_id),
-                "ordStatus": status,
-            }
-            if command.request.clOrdID is not None:
-                reply["clOrdID"] = command.request.clOrdID
-            confirmed_price = ack.price if ack.price is not None else command.request.newPrice
-            if confirmed_price is not None:
-                reply["stopPx"] = float(to_decimal(confirmed_price))
-            if ack.orig_qty is not None:
-                reply["orderQty"] = float(to_decimal(ack.orig_qty))
-            if ack.executed_qty is not None:
-                reply["cumQty"] = float(to_decimal(ack.executed_qty))
-            if ack.side is not None:
-                reply["side"] = ack.side
+            kind = EggMoveKind.TAIL_AMENDED
             return (
-                EggMove(
-                    kind=kind,
-                    occurred_at=now,
+                _tail_amend_event_from_ack(
+                    command,
+                    ack,
                     symbol=self.symbol,
-                    pair_name=command.pair_name,
-                    role=OrderRole.TAIL,
-                    reply=reply,
-                    is_private=False,
+                    kind=kind,
                 ),
             )
         if not isinstance(command, PlaceHeadCommand):
@@ -1652,6 +1739,111 @@ def _pair_runtime_complete(
     return pair_state.tail_state in {TailState.CLOSED, TailState.FAILED}
 
 
+def _command_failure_event(
+    command: DragonSong,
+    *,
+    symbol: str,
+    occurred_at: datetime,
+    error: BaseException,
+) -> EggMove | None:
+    reply: dict[str, object] = {
+        "ordStatus": HeadState.FAILED.value,
+        "execType": "command_failed",
+        "error": _compact_error(error),
+    }
+    client_order_id = getattr(command.request, "clOrdID", None)
+    if client_order_id is not None:
+        reply["clOrdID"] = client_order_id
+    order_id = getattr(command.request, "orderID", None)
+    if order_id is not None:
+        reply["orderID"] = order_id
+    price = getattr(command.request, "newPrice", None)
+    if price is None:
+        price = getattr(command.request, "price", None)
+    if price is None:
+        price = getattr(command.request, "stopPx", None)
+    if price is not None:
+        reply["price"] = float(to_decimal(price))
+        reply["stopPx"] = float(to_decimal(price))
+    quantity = _command_request_quantity(command)
+    if quantity is not None:
+        reply["orderQty"] = float(quantity)
+        reply["cumQty"] = 0.0
+    if isinstance(command, PlaceHeadCommand):
+        return EggMove(
+            kind=EggMoveKind.NOT_PLAYED_CANCELED,
+            occurred_at=occurred_at,
+            symbol=symbol,
+            pair_name=command.pair_name,
+            role=OrderRole.HEAD,
+            reply=reply,
+        )
+    if isinstance(command, PlaceTailCommand):
+        return EggMove(
+            kind=EggMoveKind.NOT_PLAYED_CANCELED,
+            occurred_at=occurred_at,
+            symbol=symbol,
+            pair_name=command.pair_name,
+            role=OrderRole.TAIL,
+            reply=reply,
+        )
+    if isinstance(command, AmendTailCommand):
+        return EggMove(
+            kind=EggMoveKind.TAIL_AMEND_REJECTED,
+            occurred_at=occurred_at,
+            symbol=symbol,
+            pair_name=command.pair_name,
+            role=OrderRole.TAIL,
+            reply=reply,
+        )
+    return None
+
+
+def _tail_amend_event_from_ack(
+    command: AmendTailCommand,
+    ack: OrderAck,
+    *,
+    symbol: str,
+    kind: EggMoveKind,
+) -> EggMove:
+    status = str(ack.status or "")
+    reply: dict[str, object] = {
+        "orderID": str(ack.order_id),
+        "ordStatus": status,
+    }
+    if command.request.clOrdID is not None:
+        reply["clOrdID"] = command.request.clOrdID
+    confirmed_price = ack.price if ack.price is not None else command.request.newPrice
+    if confirmed_price is not None:
+        reply["stopPx"] = float(to_decimal(confirmed_price))
+    if ack.orig_qty is not None:
+        reply["orderQty"] = float(to_decimal(ack.orig_qty))
+    if ack.executed_qty is not None:
+        reply["cumQty"] = float(to_decimal(ack.executed_qty))
+    if ack.side is not None:
+        reply["side"] = ack.side
+    return EggMove(
+        kind=kind,
+        occurred_at=datetime.now(timezone.utc),
+        symbol=symbol,
+        pair_name=command.pair_name,
+        role=OrderRole.TAIL,
+        reply=reply,
+        is_private=False,
+    )
+
+
+def _command_request_quantity(command: DragonSong) -> Decimal | None:
+    quantity = getattr(command.request, "orderQty", None)
+    if quantity is None:
+        quantity = getattr(command.request, "newQty", None)
+    if isinstance(quantity, (int, float, Decimal, str)):
+        parsed = to_decimal(quantity)
+        if parsed >= 0:
+            return parsed
+    return None
+
+
 def _with_simulated_reference_price(
     submitted: EggMove,
     command: PlaceHeadCommand,
@@ -1686,6 +1878,15 @@ def _ack_is_terminal(ack: OrderAck) -> bool:
         "closed",
         "fully_filled",
         "full_fill",
+    }
+
+
+def _ack_is_rejected(ack: OrderAck) -> bool:
+    return ack.status.replace(" ", "").replace("_", "").replace("-", "").lower() in {
+        "rejected",
+        "reject",
+        "failed",
+        "invalidprice",
     }
 
 

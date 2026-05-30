@@ -96,6 +96,24 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Run the async supervisor path with simulated execution and confirmations",
     )
+    parser.add_argument(
+        "--max-active-pairs",
+        type=int,
+        default=4,
+        help="Maximum live/demo pair attempts allowed to be active at once; use 0 for unlimited.",
+    )
+    parser.add_argument(
+        "--rest-min-interval",
+        type=float,
+        default=0.1,
+        help="Minimum seconds between live REST command launches; use 0 to disable pacing.",
+    )
+    parser.add_argument(
+        "--rest-max-inflight",
+        type=int,
+        default=1,
+        help="Maximum live REST commands concurrently waiting on the platform; use 0 for unlimited.",
+    )
 
 
 def add_single_order_options(parser: argparse.ArgumentParser) -> None:
@@ -203,8 +221,9 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         default="Si-",
         help=(
             "Tail order type in the compatibility vocabulary. "
-            "Examples: S- = reduce-only Stop on lastMidPrice, "
-            "Sf- = reduce-only Stop on fairPrice, "
+            "Examples: S- = reduce-only Stop on last price, "
+            "Sm- = reduce-only Stop on mark price, "
+            "Si- = reduce-only Stop on index price, "
             "SL- = reduce-only StopLimit."
         ),
     )
@@ -255,6 +274,9 @@ def build_service(args: argparse.Namespace) -> BotService:
             max_public_age_seconds=args.max_public_age_seconds,
             max_private_age_seconds=args.max_private_age_seconds,
             max_reconcile_age_seconds=args.max_reconcile_age_seconds,
+            max_active_pairs=getattr(args, "max_active_pairs", 4),
+            rest_min_interval_seconds=getattr(args, "rest_min_interval", 0.1),
+            rest_max_inflight=getattr(args, "rest_max_inflight", 1),
         )
     )
 

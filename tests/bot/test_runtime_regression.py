@@ -15,6 +15,7 @@ from kolabi.shared.core.models import OrderAck, Position
 from kolabi.shared.core.runtime_types import (
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
+    PlaceTailCommand,
     RuntimeCommandKind,
     Symbol,
 )
@@ -128,6 +129,69 @@ def test_adapter_exchange_port_forwards_execinst_once(monkeypatch) -> None:
             "type_": "Limit",
             "clOrdID": "CID-1",
             "execInst": "ParticipateDoNotInitiate",
+        }
+    ]
+
+
+def test_adapter_exchange_port_derives_stop_limit_price_from_tail_offset(monkeypatch) -> None:
+    class FakeAdapter:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.calls: list[dict[str, object]] = []
+
+        def place_order(self, side: str, orderQty: object, **params: object) -> OrderAck:
+            self.calls.append({"side": side, "orderQty": orderQty, **params})
+            return OrderAck(order_id="OID-1", status="New")
+
+        def live_trigger_orders(self) -> list[dict[str, object]]:
+            return []
+
+    adapter_holder: dict[str, FakeAdapter] = {}
+
+    def build_adapter(**kwargs) -> FakeAdapter:
+        adapter = FakeAdapter(**kwargs)
+        adapter_holder["adapter"] = adapter
+        return adapter
+
+    monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _: build_adapter)
+    port = AdapterExchangePort(
+        exchange="kraken",
+        exchange_config=ExchangeConfig(
+            api_key="k",
+            api_secret="s",
+            base_url="https://demo-futures.kraken.com",
+            symbol="PI_XBTUSD",
+            adapter_kwargs={},
+        ),
+        verify_tail_on_place=False,
+    )
+    command = PlaceTailCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="sell",
+            ordType="SL",
+            orderQty=11,
+            stopPx=Decimal("100"),
+            oDelta=Decimal("0.5"),
+            clOrdID="CID-T",
+        ),
+    )
+
+    ack = asyncio.run(port.place_tail(command))
+
+    assert ack.order_id == "OID-1"
+    assert adapter_holder["adapter"].calls == [
+        {
+            "side": "sell",
+            "orderQty": 11,
+            "price": Decimal("99.5"),
+            "stopPx": Decimal("100"),
+            "type_": "SL",
+            "clOrdID": "CID-T",
+            "oDelta": Decimal("0.5"),
         }
     ]
 
