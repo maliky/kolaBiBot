@@ -21,7 +21,12 @@ from decimal import Decimal
 from itertools import count
 from typing import Mapping, Protocol, assert_never, cast
 
-from kolabi.bot.chronos import Chronos, ChronosNotice, resolve_pair_name
+from kolabi.bot.chronos import (
+    Chronos,
+    ChronosNotice,
+    pair_dependency_satisfied,
+    resolve_pair_name,
+)
 from kolabi.bot.domain import (
     EggMove,
     EggMoveKind,
@@ -46,7 +51,7 @@ from kolabi.bot.dragon import (
 )
 from kolabi.bot.ids import head_client_order_id, tail_client_order_id
 from kolabi.bot.order_building import head_order_dict
-from kolabi.bot.pricing import tail_reference_price
+from kolabi.bot.pricing import pair_window_has_ended, tail_reference_price
 from kolabi.bot.telemetry import TailTelemetryRow
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
@@ -269,8 +274,10 @@ class KrakenPublicTriggerSource:
             )
             for pair_name, pair_state in runtime.state.pairs.items():
                 if pair_state.head_state == HeadState.LATENT:
+                    if not pair_dependency_satisfied(runtime.state, pair_state):
+                        continue
                     move = head_hooked_from_market_snapshot(
-                        pair=pair_state.pair,
+                        pair_state=pair_state,
                         launched_at=runtime.state.launched_at,
                         snapshot=snapshot,
                     )
@@ -290,10 +297,10 @@ class KrakenPublicTriggerSource:
                 if move is None:
                     continue
                 reference_key = ""
-                if event_prefix == "public-market" and move.reply is not None:
+                if move.reply is not None:
                     reference_key = f":{move.reply.get('reference_source', '')}:{move.reply.get('reference_price', '')}"
                 event_id = (
-                    f"{event_prefix}:{pair_name}:"
+                    f"{event_prefix}:{pair_name}:{pair_state.attempt_index}:"
                     f"{market.recorded_at or snapshot.occurred_at.isoformat()}{reference_key}"
                 )
                 if event_id in self._seen_event_ids:
@@ -617,7 +624,15 @@ class StrategyRuntime:
 
     @property
     def all_pairs_terminal(self) -> bool:
-        return all(_pair_runtime_complete(pair_state) for pair_state in self.state.pairs.values())
+        now = datetime.now(timezone.utc)
+        return all(
+            _pair_runtime_complete(
+                pair_state,
+                launched_at=self.state.launched_at,
+                now=now,
+            )
+            for pair_state in self.state.pairs.values()
+        )
 
     @property
     def should_keep_sources_alive(self) -> bool:
@@ -683,9 +698,12 @@ class StrategyRuntime:
                     symbol=self.symbol,
                     now=current_time,
                 )
-                if repeat_commands:
+                if repeat_commands or self.chronos.state is not self.state:
                     previous_pairs = dict(self.state.pairs)
+                    previous_state = self.state
                     self.state = self.chronos.state
+                    self._log_repeat_attempts(previous_state.pairs)
+                if repeat_commands:
                     self._log_repeat_start(repeat_commands)
                     self._dispatch_commands(repeat_commands)
                     self._log_living_updates(previous_pairs)
@@ -707,6 +725,7 @@ class StrategyRuntime:
                 commands = self.chronos.process_event(event)
                 self.state = self.chronos.state
                 self._log_new_pending_repeats(previous_repeats)
+                self._log_chain_releases(previous_pairs)
                 self._dispatch_commands(commands)
                 self._log_living_updates(previous_pairs)
         finally:
@@ -1458,6 +1477,38 @@ class StrategyRuntime:
                 pending.ready_at.isoformat(),
             )
 
+    def _log_chain_releases(self, previous_pairs: Mapping[str, PairCycleState]) -> None:
+        for pair_name, current in self.state.pairs.items():
+            previous = previous_pairs.get(pair_name)
+            if previous is None:
+                continue
+            token = current.dependency_token
+            if token is None or previous.dependency_token == token:
+                continue
+            _LOGGER.info(
+                "CHAIN_READY (%s#%s <- %s#%s): waiting_for_price_gate closed_at=%s",
+                pair_name,
+                current.attempt_index,
+                token.origin_pair_name,
+                token.origin_attempt_index,
+                token.closed_at.isoformat(),
+            )
+
+    def _log_repeat_attempts(self, previous_pairs: Mapping[str, PairCycleState]) -> None:
+        for pair_name, current in self.state.pairs.items():
+            previous = previous_pairs.get(pair_name)
+            if previous is None:
+                continue
+            if current.attempt_index <= previous.attempt_index:
+                continue
+            _LOGGER.info(
+                "REPEAT_READY (%s#%s): waiting_for_price_gate window=%s..%s baseline=-",
+                pair_name,
+                current.attempt_index,
+                current.pair.window.start_minutes,
+                current.pair.window.end_minutes,
+            )
+
     def _log_repeat_start(self, commands: tuple[DragonSong, ...]) -> None:
         started: set[tuple[str, int]] = set()
         for command in commands:
@@ -1578,8 +1629,19 @@ def _pair_state_from_spec(pair):
     return PairCycleState(pair=pair)
 
 
-def _pair_runtime_complete(pair_state: PairCycleState) -> bool:
+def _pair_runtime_complete(
+    pair_state: PairCycleState,
+    *,
+    launched_at: datetime,
+    now: datetime,
+) -> bool:
     """Return true only when head and required tail work have completed."""
+    if pair_state.head_state == HeadState.LATENT and pair_window_has_ended(
+        pair_state.pair,
+        launched_at=launched_at,
+        now=now,
+    ):
+        return True
     if pair_state.head_state == HeadState.FAILED:
         return True
     if pair_state.head_state != HeadState.CLOSED:

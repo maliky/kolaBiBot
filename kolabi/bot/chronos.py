@@ -16,9 +16,18 @@ from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Iterable
 
-from kolabi.bot.domain import EggMove, EggMoveKind, HeadState, StrategyState, TailState
+from kolabi.bot.domain import (
+    ChainDependencyToken,
+    EggMove,
+    EggMoveKind,
+    HeadState,
+    PairCycleState,
+    StrategyState,
+    TailState,
+)
 from kolabi.bot.horus import plan_runtime_commands
 from kolabi.bot.isis import step_strategy
+from kolabi.bot.pricing import pair_window_is_open
 from kolabi.shared.core.runtime_types import DragonSong, RuntimeCommandKind, Symbol
 
 
@@ -181,7 +190,7 @@ class Chronos:
         symbol: str,
         now: datetime | None = None,
     ) -> tuple[DragonSong, ...]:
-        """Hook pairs whose configured repeat pause has elapsed."""
+        """Reset pairs whose configured repeat pause has elapsed."""
         current_time = now or datetime.now(timezone.utc)
         ready = [
             pending
@@ -194,8 +203,6 @@ class Chronos:
             emitted.extend(
                 self._activate_repeat_pair(
                     pending.pair_name,
-                    occurred_at=current_time,
-                    symbol=symbol,
                     next_attempt=pending.next_attempt,
                 )
             )
@@ -261,47 +268,45 @@ class Chronos:
         return tuple(per_pair.values())
 
     def _activate_dependent_pairs(self, event: EggMove) -> tuple[DragonSong, ...]:
-        """Active les paires dependantes apres une fermeture significative."""
+        """Release dependent pairs after a fresh successful origin close."""
         origin_pair = resolve_pair_name(self.state, event) or event.pair_name
         if origin_pair is None:
             return ()
-        if not event.is_private:
+        if not _is_private_terminal(event):
             return ()
         origin_state = self.state.pairs.get(origin_pair)
-        if origin_state is None:
+        if origin_state is None or not _pair_closed_successfully(origin_state):
             return ()
-
-        emitted: list[DragonSong] = []
+        replacements: dict[str, PairCycleState] = {}
         for pair_name, pair_state in self.state.pairs.items():
             if pair_name == origin_pair:
                 continue
-            hook_name = pair_state.pair.hook_name
-            if hook_name == f"{origin_pair}-tail-closed":
-                if origin_state.tail_state != TailState.CLOSED:
-                    continue
-            elif hook_name == f"{origin_pair}-closed":
-                if not _pair_terminal_for_repeat(origin_state):
-                    continue
-            else:
-                continue
             if pair_state.head_state != HeadState.LATENT:
                 continue
-            synthetic_event = EggMove(
-                kind=EggMoveKind.HEAD_HOOKED,
-                occurred_at=event.occurred_at,
-                symbol=event.symbol,
-                event_id=None if event.event_id is None else f"{event.event_id}:hook:{pair_name}",
-                pair_name=pair_name,
+            if pair_state.dependency_token is not None:
+                continue
+            if _hook_origin_pair_name(pair_state.pair.hook_name or "") != origin_pair:
+                continue
+            if not pair_window_is_open(
+                pair_state.pair,
+                launched_at=self.state.launched_at,
+                now=event.occurred_at,
+            ):
+                continue
+            replacements[pair_name] = replace(
+                pair_state,
+                dependency_token=ChainDependencyToken(
+                    origin_pair_name=origin_pair,
+                    origin_attempt_index=origin_state.attempt_index,
+                    closed_at=event.occurred_at,
+                ),
             )
-            self.state, intents = step_strategy(self.state, synthetic_event)
-            next_pair_state = self.state.pairs.get(pair_name)
-            commands = () if next_pair_state is None else plan_runtime_commands(
-                next_pair_state,
-                intents,
-                symbol=Symbol(event.symbol),
+        if replacements:
+            self.state = replace(
+                self.state,
+                pairs={**self.state.pairs, **replacements},
             )
-            emitted.extend(commands)
-        return self._dedupe_commands(emitted)
+        return ()
 
     def _schedule_or_activate_repeat(
         self,
@@ -321,6 +326,12 @@ class Chronos:
             return ()
         pause_minutes = pair_state.pair.pause_minutes or 0.0
         ready_at = current_time + timedelta(minutes=max(pause_minutes, 0.0))
+        if not pair_window_is_open(
+            pair_state.pair,
+            launched_at=self.state.launched_at,
+            now=ready_at,
+        ):
+            return ()
         if ready_at > current_time:
             self.pending_repeats[pair_name] = PendingRepeat(
                 pair_name=pair_name,
@@ -328,21 +339,16 @@ class Chronos:
                 next_attempt=next_attempt,
             )
             return ()
-        return self._dedupe_commands(
-            self._activate_repeat_pair(
-                pair_name,
-                occurred_at=event.occurred_at,
-                symbol=event.symbol,
-                next_attempt=next_attempt,
-            )
+        self._activate_repeat_pair(
+            pair_name,
+            next_attempt=next_attempt,
         )
+        return ()
 
     def _activate_repeat_pair(
         self,
         pair_name: str,
         *,
-        occurred_at: datetime,
-        symbol: str,
         next_attempt: int,
     ) -> tuple[DragonSong, ...]:
         pair_state = self.state.pairs.get(pair_name)
@@ -356,6 +362,10 @@ class Chronos:
             head_identity=None,
             tail_identity=None,
             tail_trail=None,
+            head_trigger_reference_price=None,
+            head_trigger_reference_source=None,
+            head_trigger_reference_at=None,
+            dependency_token=None,
             played_quantity=None,
             latest_commands=None,
             last_processed_private_event_id=None,
@@ -369,21 +379,7 @@ class Chronos:
             self.state,
             pairs={**self.state.pairs, pair_name: reset_state},
         )
-        synthetic_event = EggMove(
-            kind=EggMoveKind.HEAD_HOOKED,
-            occurred_at=occurred_at,
-            symbol=symbol,
-            pair_name=pair_name,
-            event_id=f"repeat:{pair_name}:{next_attempt}",
-        )
-        self.state, intents = step_strategy(self.state, synthetic_event)
-        next_pair_state = self.state.pairs.get(pair_name)
-        commands = () if next_pair_state is None else plan_runtime_commands(
-            next_pair_state,
-            intents,
-            symbol=Symbol(symbol),
-        )
-        return commands
+        return ()
 
 
 def _with_target_pair(event: EggMove, pair_name: str | None) -> EggMove:
@@ -513,3 +509,29 @@ def _pair_terminal_for_repeat(pair_state) -> bool:
     if not played:
         return True
     return pair_state.tail_state in {TailState.CLOSED, TailState.FAILED}
+
+
+def pair_dependency_satisfied(state: StrategyState, pair_state: PairCycleState) -> bool:
+    """Return true when a pair has no hook or has consumed a fresh close token."""
+    hook_name = (pair_state.pair.hook_name or "").strip()
+    if not hook_name:
+        return True
+    del state
+    return pair_state.dependency_token is not None
+
+
+def _hook_origin_pair_name(hook_name: str) -> str | None:
+    for suffix in ("-tail-closed", "-closed"):
+        if hook_name.endswith(suffix):
+            origin_name = hook_name[: -len(suffix)]
+            return origin_name or None
+    return hook_name or None
+
+
+def _pair_closed_successfully(pair_state: PairCycleState) -> bool:
+    if pair_state.head_state != HeadState.CLOSED:
+        return False
+    played = pair_state.played_quantity is not None and pair_state.played_quantity > 0
+    if not played:
+        return True
+    return pair_state.tail_state == TailState.CLOSED
