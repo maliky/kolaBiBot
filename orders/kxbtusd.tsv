@@ -1,22 +1,26 @@
 name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	prix	hook
+
 # buy
 # #### vvvv
 
 # ####  vv
-#XBlH1	0 5440	1000	4	1	sell	LTm		Sm		qAtDpD	150000	9	- -11	XBlx1-S_F
-buyM	1 2	1	4	1	sell	M		S	15	qAtDpD	7	15	5 +
+
 # ####  ^^
 
 # ################ ################  market price  ####################  ################
-# In 1 minutes to 5 minutes get ready to buy at market if the best bid price drop by sevent units or more,. place a sell stop 15 units below best ask.
-buyM	1 5	1			buy	M		S	15	qAtDpD	8	15	- 7
-# Get ready for action between now and 1 minutes. then terminated all orders. 
-buyM	1 2	1			buy	M		S	15	qAtDpD	8	15	10 +
-# #### vv
-repS-lk	0 5440	1	1	1	buy	M		S	15	qAtDpD	6	15	- -5	repS
-# XBrH1	0 5440	1000	4	1	buy	LTm		Sm		qAtDpD	5050	10	10 +
-# #### ^^
 
+# Get ready in one 1 minutes for 4 minutes to buy at market if the best ask price drop by 7 units or more and then place a sell stop 14 units below best bid.  nor repeatition
+BM	1 5	1			buy	M		S		qAtDpD	4	14	- 7
+
+# Get ready for action between now and 2 minutes. place a buy at market, then place a sell stop 14 $ below best bid. repeat only if the previous order terminated before the 2 minutes elapse
+BM2	0 2	1			buy	M		S		qAtDpD	6	14	- +
+
+# Be ready for action now for 10 minutes to place buy at market, followed by sell stop $14 below best bid. Repeat 3 times until time elapse
+BM3	0 10	3			buy	M		S		qAtDpD	8	14	- + 
+
+# #### vv
+
+# #### ^^
 
 # #### ^^^^
 
