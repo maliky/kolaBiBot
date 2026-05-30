@@ -8,6 +8,7 @@ from typing import Any
 
 from kolabi.bot.chronos import PendingRepeat
 from kolabi.bot.domain import (
+    ChainDependencyToken,
     EggMove,
     EggMoveKind,
     HeadSpec,
@@ -1038,10 +1039,10 @@ def test_tail_terminal_event_schedules_and_activates_next_attempt() -> None:
         now=now + timedelta(seconds=1),
     )
 
-    assert len(repeat_commands) == 1
-    assert isinstance(repeat_commands[0], PlaceHeadCommand)
+    assert repeat_commands == ()
     assert runtime.chronos.state.pairs["pair-a"].attempt_index == 2
-    assert runtime.chronos.state.pairs["pair-a"].head_state == HeadState.HOOKED
+    assert runtime.chronos.state.pairs["pair-a"].head_state == HeadState.LATENT
+    assert runtime.chronos.state.pairs["pair-a"].head_trigger_reference_price is None
 
 
 def test_private_polling_source_keeps_running_while_repeat_is_pending() -> None:
@@ -1224,6 +1225,345 @@ def test_public_polling_does_not_deduplicate_changed_tail_reference() -> None:
         102.0,
         103.0,
     ]
+
+
+def test_public_polling_records_head_baseline_before_market_head_hook() -> None:
+    pair = replace(
+        sample_strategy()[0],
+        head=HeadSpec(side=Side.SELL, order_type="M"),
+        head_price=(5.0, 50.0),
+        head_price_type="pD",
+        amount_type="qAtDpD",
+    )
+
+    class Market:
+        best_ask = 110.0
+        mid_price = 100.0
+        last_price = None
+        mark_price = None
+        index_price = None
+        tick_size = 0.5
+
+        def __init__(self, best_bid: float, recorded_at: str) -> None:
+            self.best_bid = best_bid
+            self.recorded_at = recorded_at
+
+    class Client:
+        def __init__(self) -> None:
+            self.markets = [
+                Market(100.0, "baseline"),
+                Market(104.5, "not-yet"),
+                Market(105.0, "ready"),
+            ]
+
+        def fetch_market_state(self, symbol=None):
+            return self.markets.pop(0) if self.markets else Market(105.0, "ready")
+
+    class Runtime:
+        symbol = "PI_XBTUSD"
+        running = True
+
+        def __init__(self) -> None:
+            self.state = StrategyRuntime(
+                strategy=StrategySpec(name="demo", pairs=(pair,)),
+                symbol="PI_XBTUSD",
+                simulate=False,
+            ).state
+            self.events: list[EggMove] = []
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return bool(self.events) and self.events[-1].kind == EggMoveKind.HEAD_HOOKED
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
+        async def enqueue(self, event: EggMove) -> None:
+            self.events.append(event)
+            if event.kind == EggMoveKind.HEAD_TRIGGER_BASELINED:
+                pair_state = self.state.pairs["pair-a"]
+                self.state = replace(
+                    self.state,
+                    pairs={
+                        "pair-a": replace(
+                            pair_state,
+                            head_trigger_reference_price=Decimal("100.0"),
+                            head_trigger_reference_source="bid",
+                            head_trigger_reference_at=event.occurred_at,
+                        )
+                    },
+                )
+
+        def pair_state_for_record(
+            self, record: object
+        ) -> tuple[PairCycleState, OrderRole] | None:
+            return None
+
+    runtime = Runtime()
+    source = KrakenPublicTriggerSource(Client(), poll_seconds=0.0)
+
+    asyncio.run(source.pump(runtime))
+
+    assert [event.kind for event in runtime.events] == [
+        EggMoveKind.HEAD_TRIGGER_BASELINED,
+        EggMoveKind.HEAD_HOOKED,
+    ]
+    assert runtime.events[0].reply is not None
+    assert runtime.events[0].reply["reference_source"] == "bid"
+    assert runtime.events[1].reply is not None
+    assert runtime.events[1].reply["reference_price"] == 105.0
+
+
+def test_repeat_activation_waits_for_fresh_head_price_baseline() -> None:
+    pair = replace(
+        sample_strategy()[0],
+        head=HeadSpec(side=Side.SELL, order_type="M"),
+        head_price=(5.0, 50.0),
+        head_price_type="pD",
+        amount_type="qAtDpD",
+        try_num=2,
+    )
+    strategy_state = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    ).state
+    now = strategy_state.launched_at + timedelta(seconds=1)
+    terminal = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.CLOSED,
+        played_quantity=Decimal("1"),
+        attempt_index=1,
+        head_trigger_reference_price=Decimal("100"),
+        head_trigger_reference_source="bid",
+        head_trigger_reference_at=now - timedelta(seconds=30),
+    )
+    chronos = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    ).chronos
+    chronos.state = replace(strategy_state, pairs={"pair-a": terminal})
+
+    repeat_commands = chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=now,
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={"cumQty": 1.0, "orderQty": 1.0},
+            is_private=True,
+        ),
+        now=now,
+    )
+
+    assert repeat_commands == ()
+    repeated = chronos.state.pairs["pair-a"]
+    assert repeated.attempt_index == 2
+    assert repeated.head_state == HeadState.LATENT
+    assert repeated.head_trigger_reference_price is None
+
+    class Market:
+        best_ask = 210.0
+        mid_price = 200.0
+        last_price = None
+        mark_price = None
+        index_price = None
+        tick_size = 0.5
+
+        def __init__(self, best_bid: float, recorded_at: str) -> None:
+            self.best_bid = best_bid
+            self.recorded_at = recorded_at
+
+    class Client:
+        def __init__(self) -> None:
+            self.markets = [
+                Market(200.0, "repeat-baseline"),
+                Market(204.5, "repeat-not-yet"),
+                Market(205.0, "repeat-ready"),
+            ]
+
+        def fetch_market_state(self, symbol=None):
+            return self.markets.pop(0) if self.markets else Market(205.0, "repeat-ready")
+
+    class Runtime:
+        symbol = "PI_XBTUSD"
+        running = True
+
+        def __init__(self, state) -> None:
+            self.state = state
+            self.events: list[EggMove] = []
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return bool(self.events) and self.events[-1].kind == EggMoveKind.HEAD_HOOKED
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
+        async def enqueue(self, event: EggMove) -> None:
+            self.events.append(event)
+            if event.kind == EggMoveKind.HEAD_TRIGGER_BASELINED:
+                pair_state = self.state.pairs["pair-a"]
+                reply = event.reply or {}
+                self.state = replace(
+                    self.state,
+                    pairs={
+                        "pair-a": replace(
+                            pair_state,
+                            head_trigger_reference_price=to_decimal(
+                                reply["reference_price"]
+                            ),
+                            head_trigger_reference_source=str(
+                                reply["reference_source"]
+                            ),
+                            head_trigger_reference_at=event.occurred_at,
+                        )
+                    },
+                )
+
+        def pair_state_for_record(
+            self, record: object
+        ) -> tuple[PairCycleState, OrderRole] | None:
+            return None
+
+    runtime = Runtime(chronos.state)
+    source = KrakenPublicTriggerSource(Client(), poll_seconds=0.0)
+
+    asyncio.run(source.pump(runtime))
+
+    assert [event.kind for event in runtime.events] == [
+        EggMoveKind.HEAD_TRIGGER_BASELINED,
+        EggMoveKind.HEAD_HOOKED,
+    ]
+    assert runtime.events[0].reply is not None
+    assert runtime.events[0].reply["reference_price"] == 200.0
+    assert runtime.events[1].reply is not None
+    assert runtime.events[1].reply["reference_price"] == 205.0
+
+
+def test_public_polling_waits_for_bare_hook_dependency_before_baseline() -> None:
+    origin = replace(
+        sample_strategy()[0],
+        name="repS",
+        head=HeadSpec(side=Side.SELL, order_type="M"),
+        head_price=(5.0, 50.0),
+        head_price_type="pD",
+        amount_type="qAtDpD",
+    )
+    dependent = replace(
+        sample_strategy()[0],
+        name="repS-lk",
+        head=HeadSpec(side=Side.BUY, order_type="M"),
+        head_price=(-50.0, -5.0),
+        head_price_type="pD",
+        amount_type="qAtDpD",
+        hook_name="repS",
+    )
+
+    class Market:
+        best_bid = 99.0
+        best_ask = 100.0
+        mid_price = 99.5
+        last_price = None
+        mark_price = None
+        index_price = None
+        tick_size = 0.5
+
+        def __init__(self, recorded_at: str) -> None:
+            self.recorded_at = recorded_at
+
+    class Client:
+        def __init__(self, runtime=None) -> None:
+            self.count = 0
+            self.runtime = runtime
+
+        def fetch_market_state(self, symbol=None):
+            self.count += 1
+            if self.runtime is not None:
+                self.runtime.running = False
+            return Market(f"tick-{self.count}")
+
+    class Runtime:
+        symbol = "PI_XBTUSD"
+        running = True
+
+        def __init__(self) -> None:
+            self.state = StrategyRuntime(
+                strategy=StrategySpec(name="demo", pairs=(origin, dependent)),
+                symbol="PI_XBTUSD",
+                simulate=False,
+            ).state
+            self.events: list[EggMove] = []
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return len(self.events) >= 1
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
+        async def enqueue(self, event: EggMove) -> None:
+            self.events.append(event)
+
+        def pair_state_for_record(
+            self, record: object
+        ) -> tuple[PairCycleState, OrderRole] | None:
+            return None
+
+    runtime = Runtime()
+    source = KrakenPublicTriggerSource(Client(runtime), poll_seconds=0.0)
+    asyncio.run(source.pump(runtime))
+
+    assert {event.pair_name for event in runtime.events} == {"repS"}
+
+    runtime = Runtime()
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "repS": replace(
+                runtime.state.pairs["repS"],
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.CLOSED,
+                played_quantity=Decimal("1"),
+            ),
+            "repS-lk": runtime.state.pairs["repS-lk"],
+        },
+    )
+    source = KrakenPublicTriggerSource(Client(runtime), poll_seconds=0.0)
+    asyncio.run(source.pump(runtime))
+
+    assert runtime.events == []
+
+    runtime = Runtime()
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "repS": replace(
+                runtime.state.pairs["repS"],
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.CLOSED,
+                played_quantity=Decimal("1"),
+            ),
+            "repS-lk": replace(
+                runtime.state.pairs["repS-lk"],
+                dependency_token=ChainDependencyToken(
+                    origin_pair_name="repS",
+                    origin_attempt_index=1,
+                    closed_at=datetime.now(timezone.utc),
+                ),
+            ),
+        },
+    )
+    source = KrakenPublicTriggerSource(Client(runtime), poll_seconds=0.0)
+    asyncio.run(source.pump(runtime))
+
+    assert any(event.pair_name == "repS-lk" for event in runtime.events)
 
 
 def test_market_tick_reaches_horus_as_tail_amend_command() -> None:

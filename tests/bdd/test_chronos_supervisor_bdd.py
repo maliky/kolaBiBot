@@ -3,7 +3,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from kolabi.bot.chronos import Chronos, ChronosNotice, ChronosNoticeKind
+from kolabi.bot.chronos import (
+    Chronos,
+    ChronosNotice,
+    ChronosNoticeKind,
+    pair_dependency_satisfied,
+)
 from kolabi.bot.domain import (
     EggMove,
     EggMoveKind,
@@ -43,7 +48,7 @@ def test_rest_ack_without_private_confirmation_times_out() -> None:
     pass
 
 
-@scenario("features/chronos_supervisor.feature", "Tail chaining activates a dependent pair")
+@scenario("features/chronos_supervisor.feature", "Tail chaining makes a dependent pair eligible")
 def test_tail_chaining_activates_a_dependent_pair() -> None:
     pass
 
@@ -266,16 +271,21 @@ def then_pending_identity_timeout_notice(
 
 @then("no exchange command should be emitted")
 def then_no_exchange_command(
-    result: tuple[Chronos, tuple[DragonSong, ...], tuple[ChronosNotice, ...]]
+    result: tuple[Chronos, tuple[DragonSong, ...]]
+    | tuple[Chronos, tuple[DragonSong, ...], tuple[ChronosNotice, ...]]
 ) -> None:
-    _chronos, commands, _notices = result
+    commands = result[1]
     assert commands == ()
 
 
-@then("the dependent pair should become hooked")
-def then_dependent_pair_hooked(result: tuple[Chronos, tuple[DragonSong, ...]]) -> None:
+@then("the dependent pair should remain latent but eligible")
+def then_dependent_pair_latent_but_eligible(
+    result: tuple[Chronos, tuple[DragonSong, ...]]
+) -> None:
     chronos, _commands = result
-    assert chronos.state.pairs["pair-y"].head_state == HeadState.HOOKED
+    pair_state = chronos.state.pairs["pair-y"]
+    assert pair_state.head_state == HeadState.LATENT
+    assert pair_dependency_satisfied(chronos.state, pair_state) is True
 
 
 @then("Chronos should forward the next typed runtime command")

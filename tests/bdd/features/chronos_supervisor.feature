@@ -25,8 +25,8 @@ Feature: Chronos supervisor
     Then Chronos should emit a typed pending identity timeout notice
     And no exchange command should be emitted
 
-  Scenario: Tail chaining activates a dependent pair
+  Scenario: Tail chaining makes a dependent pair eligible
     Given a closed tail and a dependent latent pair
     When Chronos processes the upstream private closing event
-    Then the dependent pair should become hooked
-    And Chronos should forward the next typed runtime command
+    Then the dependent pair should remain latent but eligible
+    And no exchange command should be emitted
