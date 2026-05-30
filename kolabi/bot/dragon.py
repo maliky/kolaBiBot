@@ -24,9 +24,16 @@ from kolabi.bot.domain import (
     OrderIdentity,
     OrderPairSpec,
     OrderReason,
+    PairCycleState,
     classify_confirmed_move,
 )
-from kolabi.bot.pricing import pair_window_is_open, tail_reference_price
+from kolabi.bot.pricing import (
+    executable_head_reference_price,
+    head_price_condition_needs_baseline,
+    head_price_condition_satisfied,
+    pair_window_is_open,
+    tail_reference_price,
+)
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     BrokerReply,
@@ -65,18 +72,57 @@ class PrivateOrderFact:
 
 def head_hooked_from_market_snapshot(
     *,
-    pair: OrderPairSpec,
+    pair_state: PairCycleState,
     launched_at: datetime,
     snapshot: MarketSnapshotFact,
 ) -> EggMove | None:
+    pair = pair_state.pair
     if not pair_window_is_open(pair, launched_at=launched_at, now=snapshot.occurred_at):
         return None
     if snapshot.mid_price is None and snapshot.best_bid is None and snapshot.best_ask is None:
+        return None
+    source, reference = executable_head_reference_price(pair, snapshot)
+    if reference <= 0:
+        return None
+    if (
+        pair_state.head_trigger_reference_price is None
+        and head_price_condition_needs_baseline(pair)
+    ):
+        return head_trigger_baselined_event(
+            pair_name=pair.name,
+            symbol=snapshot.symbol,
+            occurred_at=snapshot.occurred_at,
+            reference_price=reference,
+            reference_source=source,
+        )
+    if not head_price_condition_satisfied(pair_state, reference):
         return None
     return head_hooked_event(
         pair_name=pair.name,
         symbol=snapshot.symbol,
         occurred_at=snapshot.occurred_at,
+        reference_price=reference,
+        reference_source=source,
+    )
+
+
+def head_trigger_baselined_event(
+    *,
+    pair_name: str,
+    symbol: str,
+    reference_price: Decimal | int | float | str,
+    reference_source: str,
+    occurred_at: datetime | None = None,
+) -> EggMove:
+    return EggMove(
+        kind=EggMoveKind.HEAD_TRIGGER_BASELINED,
+        occurred_at=occurred_at or datetime.now(timezone.utc),
+        symbol=symbol,
+        pair_name=pair_name,
+        reply={
+            "reference_price": float(to_decimal(reference_price)),
+            "reference_source": reference_source,
+        },
     )
 
 
@@ -111,12 +157,21 @@ def head_hooked_event(
     pair_name: str,
     symbol: str,
     occurred_at: datetime | None = None,
+    reference_price: Decimal | int | float | str | None = None,
+    reference_source: str | None = None,
 ) -> EggMove:
+    reply = None
+    if reference_price is not None:
+        reply = {
+            "reference_price": float(to_decimal(reference_price)),
+            "reference_source": reference_source or "unknown",
+        }
     return EggMove(
         kind=EggMoveKind.HEAD_HOOKED,
         occurred_at=occurred_at or datetime.now(timezone.utc),
         symbol=symbol,
         pair_name=pair_name,
+        reply=reply,
     )
 
 

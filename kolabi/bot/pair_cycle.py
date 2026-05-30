@@ -88,10 +88,31 @@ def step_pair(
     ):
         return state, ()
 
+    if move.kind == EggMoveKind.HEAD_TRIGGER_BASELINED:
+        if state.head_state != HeadState.LATENT:
+            return state, ()
+        reference_price = reference_price_from_move(state, move)
+        if reference_price is None or reference_price <= 0:
+            return state, ()
+        reply = move.reply or {}
+        source = reply.get("reference_source")
+        return replace(
+            state,
+            head_trigger_reference_price=reference_price,
+            head_trigger_reference_source=(
+                str(source) if isinstance(source, str) and source else None
+            ),
+            head_trigger_reference_at=move.occurred_at,
+        ), ()
+
     if move.kind == EggMoveKind.HEAD_HOOKED:
         if state.head_state != HeadState.LATENT:
             return state, ()
-        next_state = replace(state, head_state=HeadState.HOOKED)
+        next_state = replace(
+            state,
+            head_state=HeadState.HOOKED,
+            head_trigger_reference_at=move.occurred_at,
+        )
         return next_state, (PairIntent(PairIntentKind.PLACE_HEAD),)
 
     if move.kind == EggMoveKind.HEAD_SUBMITTED:

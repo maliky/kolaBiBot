@@ -124,6 +124,7 @@ class ExecutionOutcome(StrEnum):
 
 
 class EggMoveKind(StrEnum):
+    HEAD_TRIGGER_BASELINED = "head_trigger_baselined"
     HEAD_HOOKED = "head_hooked"
     HEAD_SUBMITTED = "head_submitted"
     TAIL_SUBMITTED = "tail_submitted"
@@ -268,6 +269,15 @@ class TailTrailState:
 
 
 @dataclass(frozen=True)
+class ChainDependencyToken:
+    """Fresh origin-close edge consumed by one chained pair attempt."""
+
+    origin_pair_name: str
+    origin_attempt_index: int
+    closed_at: datetime
+
+
+@dataclass(frozen=True)
 class PairCycleState:
     pair: OrderPairSpec
     head_state: HeadState = HeadState.LATENT
@@ -276,6 +286,10 @@ class PairCycleState:
     head_identity: OrderIdentity | None = None
     tail_identity: OrderIdentity | None = None
     tail_trail: TailTrailState | None = None
+    head_trigger_reference_price: Decimal | None = None
+    head_trigger_reference_source: str | None = None
+    head_trigger_reference_at: datetime | None = None
+    dependency_token: ChainDependencyToken | None = None
     played_quantity: Decimal | None = None
     latest_commands: Mapping[str, tuple[str, ...]] | None = None
     pair_id: str | None = None

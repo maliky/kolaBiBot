@@ -15,7 +15,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
-from kolabi.bot.domain import OrderPairSpec, Side
+from kolabi.bot.domain import OrderPairSpec, PairCycleState, Side
 from kolabi.shared.core.runtime_types import decimal_to_float, to_decimal
 
 
@@ -47,6 +47,17 @@ def pair_window_is_open(
     return pair.window.start_minutes <= elapsed_minutes <= pair.window.end_minutes
 
 
+def pair_window_has_ended(
+    pair: OrderPairSpec,
+    *,
+    launched_at: datetime,
+    now: datetime,
+) -> bool:
+    """Return true after the pair launch-relative window has ended."""
+    elapsed_minutes = (now - launched_at).total_seconds() / 60.0
+    return elapsed_minutes > pair.window.end_minutes
+
+
 def resolve_head_price(pair: OrderPairSpec, market: MarketLike) -> float | None:
     """Resolve the head order price from pair configuration and live market state."""
     order_type = pair.head.order_type.replace("_", "").replace("-", "").lower()
@@ -68,6 +79,45 @@ def reference_price(side: Side, market: MarketLike) -> float:
     if side == Side.BUY:
         return market.best_bid or market.mid_price or 0.0
     return market.best_ask or market.mid_price or 0.0
+
+
+def executable_head_reference_price(
+    pair: OrderPairSpec,
+    market: MarketLike,
+) -> tuple[str, float]:
+    """Return the executable public reference for head placement conditions."""
+    if pair.head.side == Side.BUY:
+        return "ask", _price_or_fallback(market.best_ask, market.mid_price)
+    return "bid", _price_or_fallback(market.best_bid, market.mid_price)
+
+
+def head_price_condition_satisfied(
+    pair_state: PairCycleState,
+    reference_price: Decimal | int | float | str,
+) -> bool:
+    """Evaluate the head prix interval against current and baseline reference."""
+    pair = pair_state.pair
+    current = to_decimal(reference_price)
+    low, high = (to_decimal(pair.head_price[0]), to_decimal(pair.head_price[1]))
+    price_type = (pair.head_price_type or "").lower()
+    amount_type = pair.amount_type.lower()
+    if "pa" in price_type or "pa" in amount_type:
+        return low <= current <= high
+
+    baseline = pair_state.head_trigger_reference_price
+    if baseline is None or baseline <= 0:
+        return False
+    if "p%" in price_type or "p%" in amount_type:
+        value = (current - baseline) * Decimal("100") / baseline
+    else:
+        value = current - baseline
+    return low <= value <= high
+
+
+def head_price_condition_needs_baseline(pair: OrderPairSpec) -> bool:
+    price_type = (pair.head_price_type or "").lower()
+    amount_type = pair.amount_type.lower()
+    return not ("pa" in price_type or "pa" in amount_type)
 
 
 def tail_trigger_source(order_type: str) -> str:
