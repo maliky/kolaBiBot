@@ -4,15 +4,17 @@ name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	
 
 # ####  vv
 #XBlH1	0 5440	1000	4	1	sell	LTm		Sm		qAtDpD	150000	9	- -11	XBlx1-S_F
-repS	0 5440	1000	4	1	buy	SLm		Sm		qAtDpD	5000	2	5 +
+buyM	1 2	1	4	1	sell	M		S	15	qAtDpD	7	15	5 +
 # ####  ^^
 
 # ################ ################  market price  ####################  ################
-
+# In 1 minutes to 5 minutes get ready to buy at market if the best bid price drop by sevent units or more,. place a sell stop 15 units below best ask.
+buyM	1 5	1			buy	M		S	15	qAtDpD	8	15	- 7
+# Get ready for action between now and 1 minutes. then terminated all orders. 
+buyM	1 2	1			buy	M		S	15	qAtDpD	8	15	10 +
 # #### vv
-# XBrx1	0 5440	1000	4	1	sell	SLm		Sm		qAtDpD	5050	3	- -6
-#XBrH1	0 5440	1000	4	1	buy	LTm		Sm		qAtDpD	5050	10	10 +	
-XBrx1-S_F
+repS-lk	0 5440	1	1	1	buy	M		S	15	qAtDpD	6	15	- -5	repS
+# XBrH1	0 5440	1000	4	1	buy	LTm		Sm		qAtDpD	5050	10	10 +
 # #### ^^
 
 
@@ -28,7 +30,7 @@ XBrx1-S_F
 
 # M, L, S, MT, SL, LT: Market, Limit, Stop, MarketIfTouched, StopLimit, LimitIfTouched orders
 # L toucher par rapport à LastPrice ?
-# 
+#
 # !, - ParticipateDoNotInitiate et ReduceOnly, incompatible avec Market orders
 # utiliser les SL et LT avec des limites juste à côte du trigger par défaut et dans le même sens
 # tOut et pause sont en minutes
