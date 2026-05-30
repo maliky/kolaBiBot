@@ -479,6 +479,28 @@ def test_closed_head_with_active_tail_still_trails_on_market_tick() -> None:
     assert intents[0].kind == PairIntentKind.AMEND_TAIL
 
 
+def test_closed_head_hooked_tail_does_not_trail_before_private_confirmation() -> None:
+    closed, first_intents = step_pair(
+        submitted_state(),
+        egg_move(EggMoveKind.PLAYED_AND_CANCELED, played_quantity=1.0),
+    )
+
+    next_state, intents = step_pair(
+        closed,
+        EggMove(
+            kind=EggMoveKind.MARKET_TICK,
+            occurred_at=datetime.now(timezone.utc),
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            reply={"reference_price": 102.0},
+        ),
+    )
+
+    assert len(first_intents) == 1
+    assert next_state == closed
+    assert intents == ()
+
+
 def test_closed_pair_accepts_tail_submission_identity() -> None:
     closed = PairCycleState(
         pair=sample_pair(),
@@ -505,6 +527,187 @@ def test_closed_pair_accepts_tail_submission_identity() -> None:
         client_order_id="CID-T",
         exchange_order_id="OID-T",
     )
+    assert intents == ()
+
+
+def test_closed_pair_marks_tail_living_on_private_open_confirmation() -> None:
+    closed = PairCycleState(
+        pair=sample_pair(),
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.SUBMITTED,
+        tail_mode=TailMode.FLYING,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+    )
+
+    next_state, intents = step_pair(
+        closed,
+        EggMove(
+            kind=EggMoveKind.NOT_PLAYED_NOR_CANCELED,
+            occurred_at=datetime.now(timezone.utc),
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={"orderID": "OID-T", "clOrdID": "CID-T"},
+            is_private=True,
+        ),
+    )
+
+    assert next_state.tail_state == TailState.LIVING
+    assert intents == ()
+
+
+def test_stale_sell_tail_open_confirmation_does_not_roll_back_desired_stop() -> None:
+    now = datetime.now(timezone.utc)
+    trail = replace(
+        initial_tail_trail(sample_pair(), Decimal("100"), now),
+        confirmed_stop_price=Decimal("99"),
+        current_stop_price=Decimal("105"),
+        previous_stop_price=Decimal("99"),
+        last_amended_at=now,
+        last_confirmed_at=now,
+    )
+    state = PairCycleState(
+        pair=sample_pair(),
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.LIVING,
+        tail_mode=TailMode.FLYING,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        tail_trail=trail,
+        played_quantity=Decimal("2"),
+    )
+
+    next_state, intents = step_pair(
+        state,
+        EggMove(
+            kind=EggMoveKind.NOT_PLAYED_NOR_CANCELED,
+            occurred_at=now,
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={
+                "orderID": "OID-T",
+                "clOrdID": "CID-T",
+                "stopPx": 99.0,
+            },
+            is_private=True,
+        ),
+    )
+
+    assert next_state.tail_trail is not None
+    assert next_state.tail_trail.confirmed_stop_price == Decimal("99.0")
+    assert next_state.tail_trail.current_stop_price == Decimal("105")
+    assert intents == ()
+
+
+def test_sell_tail_amend_confirmation_advances_confirmed_and_desired_stop() -> None:
+    now = datetime.now(timezone.utc)
+    trail = replace(
+        initial_tail_trail(sample_pair(), Decimal("100"), now),
+        confirmed_stop_price=Decimal("99"),
+        current_stop_price=Decimal("105"),
+        previous_stop_price=Decimal("99"),
+        last_amended_at=now,
+        last_confirmed_at=now,
+    )
+    state = PairCycleState(
+        pair=sample_pair(),
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.LIVING,
+        tail_mode=TailMode.FLYING,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        tail_trail=trail,
+        played_quantity=Decimal("2"),
+    )
+
+    next_state, intents = step_pair(
+        state,
+        EggMove(
+            kind=EggMoveKind.NOT_PLAYED_NOR_CANCELED,
+            occurred_at=now,
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={
+                "orderID": "OID-T",
+                "clOrdID": "CID-T",
+                "stopPx": 105.0,
+            },
+            is_private=True,
+        ),
+    )
+
+    assert next_state.tail_trail is not None
+    assert next_state.tail_trail.confirmed_stop_price == Decimal("105.0")
+    assert next_state.tail_trail.current_stop_price == Decimal("105.0")
+    assert intents == ()
+
+
+def test_stale_buy_tail_open_confirmation_does_not_roll_back_desired_stop() -> None:
+    pair = replace(
+        sample_pair(),
+        head=HeadSpec(side=Side.SELL, order_type="Market", delta=None),
+        tail=TailSpec(side=Side.BUY, order_type="Stop", delta=None),
+        tail_price_spec=101.0,
+    )
+    now = datetime.now(timezone.utc)
+    trail = replace(
+        initial_tail_trail(pair, Decimal("100"), now),
+        confirmed_stop_price=Decimal("101"),
+        current_stop_price=Decimal("95"),
+        previous_stop_price=Decimal("101"),
+        last_amended_at=now,
+        last_confirmed_at=now,
+    )
+    state = PairCycleState(
+        pair=pair,
+        head_state=HeadState.CLOSED,
+        tail_state=TailState.LIVING,
+        tail_mode=TailMode.FLYING,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        tail_trail=trail,
+        played_quantity=Decimal("2"),
+    )
+
+    next_state, intents = step_pair(
+        state,
+        EggMove(
+            kind=EggMoveKind.NOT_PLAYED_NOR_CANCELED,
+            occurred_at=now,
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={
+                "orderID": "OID-T",
+                "clOrdID": "CID-T",
+                "stopPx": 101.0,
+            },
+            is_private=True,
+        ),
+    )
+
+    assert next_state.tail_trail is not None
+    assert next_state.tail_trail.confirmed_stop_price == Decimal("101.0")
+    assert next_state.tail_trail.current_stop_price == Decimal("95")
     assert intents == ()
 
 

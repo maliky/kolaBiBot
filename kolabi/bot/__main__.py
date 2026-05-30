@@ -37,6 +37,13 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
         help="Optional private account DB URL. Defaults from Kraken Futures environment.",
     )
     parser.add_argument(
+        "--critical-account-db-url",
+        help=(
+            "Optional critical private DB URL for order/fill lifecycle. "
+            "Defaults from Kraken Futures environment."
+        ),
+    )
+    parser.add_argument(
         "--ready-timeout-seconds",
         type=float,
         default=45.0,
@@ -241,6 +248,7 @@ def build_service(args: argparse.Namespace) -> BotService:
             db_url=args.db_url,
             market_db_url=args.market_db_url,
             account_db_url=args.account_db_url,
+            critical_account_db_url=getattr(args, "critical_account_db_url", None),
             require_ready=not args.skip_ready_check,
             ready_timeout_seconds=args.ready_timeout_seconds,
             ready_poll_seconds=args.ready_poll_seconds,
@@ -433,6 +441,7 @@ def preflight_command(args: argparse.Namespace) -> int:
             environment=args.environment,
             market_db_url=args.market_db_url,
             account_db_url=args.account_db_url,
+            critical_account_db_url=getattr(args, "critical_account_db_url", None),
             require_ready=True,
             ready_timeout_seconds=args.ready_timeout_seconds,
             ready_poll_seconds=args.ready_poll_seconds,

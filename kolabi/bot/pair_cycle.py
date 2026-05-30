@@ -26,6 +26,7 @@ from kolabi.bot.domain import (
     PairCycleState,
     PairIntent,
     PairIntentKind,
+    Side,
     TailMode,
     TailState,
     classify_confirmed_move,
@@ -105,6 +106,7 @@ def step_pair(
         if state.tail_trail is None or state.tail_state in {
             None,
             TailState.LATENT,
+            TailState.HOOKED,
             TailState.CLOSED,
             TailState.FAILED,
         }:
@@ -133,7 +135,8 @@ def step_pair(
         if move.role == OrderRole.TAIL:
             next_state = replace(
                 state,
-                tail_state=TailState.SUBMITTED,
+                # Private open-order confirmation means the tail is now live.
+                tail_state=TailState.LIVING,
                 tail_identity=tail_identity_from_move(state, move),
                 tail_trail=tail_trail_confirmed_from_move(state, move),
             )
@@ -350,13 +353,38 @@ def tail_trail_confirmed_from_move(state: PairCycleState, move: EggMove):
     stop_price = _stop_price_from_move(move)
     if stop_price is None:
         return trail
+    current_stop_price = stop_price
+    previous_stop_price = trail.current_stop_price
+    if _should_preserve_tail_desired_stop(state, move, stop_price):
+        current_stop_price = trail.current_stop_price
+        previous_stop_price = trail.previous_stop_price
     return replace(
         trail,
-        current_stop_price=stop_price,
-        previous_stop_price=trail.current_stop_price,
+        current_stop_price=current_stop_price,
+        previous_stop_price=previous_stop_price,
         confirmed_stop_price=stop_price,
         last_confirmed_at=move.occurred_at,
     )
+
+
+def _should_preserve_tail_desired_stop(
+    state: PairCycleState,
+    move: EggMove,
+    confirmed_stop: Decimal,
+) -> bool:
+    trail = state.tail_trail
+    if trail is None or trail.confirmed_stop_price is None:
+        return False
+    if move.kind != EggMoveKind.NOT_PLAYED_NOR_CANCELED or move.role != OrderRole.TAIL:
+        return False
+    if not _has_full_tail_identity(state):
+        return False
+    if state.tail_state not in {TailState.SUBMITTED, TailState.LIVING}:
+        return False
+    desired_stop = trail.current_stop_price
+    if state.pair.tail.side == Side.SELL:
+        return desired_stop > confirmed_stop
+    return desired_stop < confirmed_stop
 
 
 def _stop_price_from_move(move: EggMove) -> Decimal | None:

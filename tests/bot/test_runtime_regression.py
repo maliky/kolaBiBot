@@ -18,6 +18,11 @@ from kolabi.shared.core.runtime_types import (
     RuntimeCommandKind,
     Symbol,
 )
+from kolabi.shared.runtime_state import (
+    PrivateFeedState,
+    PublicMarketState,
+    StrategyRuntimeState,
+)
 
 
 def test_demo_ada_strategy_parsed_and_planned_on_active_runtime() -> None:
@@ -283,3 +288,65 @@ def test_interrupt_cleanup_resolves_tail_exchange_id_from_client_id(monkeypatch)
     assert summary["close_orders"] == 1
     assert summary["position_before_qty"] == initial_position
     assert summary["position_after_qty"] == 0.0
+
+
+def test_wait_timeout_message_includes_runtime_diagnostics() -> None:
+    service = BotService(BotConfig(exchange="kraken", ready_timeout_seconds=45.0))
+    state = StrategyRuntimeState(
+        symbol="PI_XBTUSD",
+        public=PublicMarketState(
+            symbol="PI_XBTUSD",
+            best_bid=None,
+            best_ask=None,
+            mid_price=None,
+            last_price=None,
+            mark_price=None,
+            index_price=None,
+            tick_size=None,
+            spread=None,
+            imbalance=None,
+            avg_bid=None,
+            avg_ask=None,
+            recorded_at=None,
+            source_timestamp=None,
+            age_seconds=9.5,
+            source_age_seconds=None,
+            indicators={},
+            ready=False,
+            reason="public market data is stale",
+        ),
+        private_ws=PrivateFeedState(
+            stream_kind="private_ws",
+            status="healthy",
+            updated_at="2026-05-29T16:04:46.183674",
+            last_heartbeat_at="2026-05-29T16:04:46.183674",
+            age_seconds=266.1,
+            ready=False,
+            last_error=None,
+            reason="private_ws state is stale",
+        ),
+        rest_reconciler=PrivateFeedState(
+            stream_kind="rest_reconciler",
+            status="healthy",
+            updated_at=None,
+            last_heartbeat_at=None,
+            age_seconds=None,
+            ready=True,
+            last_error=None,
+            reason=None,
+        ),
+        open_order_count=0,
+        fill_count=0,
+        position_size=None,
+        position_entry_price=None,
+        ready=False,
+        reasons=("private_ws state is stale",),
+    )
+
+    message = service._format_wait_timeout(state)
+
+    assert "private_ws state is stale" in message
+    assert "public_age=9.50s" in message
+    assert "private_status=healthy" in message
+    assert "private_age=266.10s" in message
+    assert "private_last_heartbeat=2026-05-29T16:04:46.183674" in message

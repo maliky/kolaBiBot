@@ -6,6 +6,7 @@ from kolabi.shared.persistence import (
     AccountPosition,
     Base,
     ExchangeConnection,
+    ExchangeOrder,
     MarketIndicator,
     MarketSnapshot,
 )
@@ -316,3 +317,292 @@ def test_runtime_state_ignores_stale_rest_reconcile_error(tmp_path) -> None:
     assert state.private_ws.ready is True
     assert state.rest_reconciler.ready is True
     assert state.ready is True
+
+
+def test_runtime_state_falls_back_to_private_ws_critical_when_alias_missing(tmp_path) -> None:
+    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    market_engine = create_engine(market_db)
+    account_engine = create_engine(account_db)
+    Base.metadata.create_all(market_engine)
+    Base.metadata.create_all(account_engine)
+    now = datetime.now(timezone.utc)
+    with Session(market_engine) as session:
+        session.add(
+            MarketSnapshot(
+                local_uuid="snap-1",
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                symbol="PI_XBTUSD",
+                best_bid=100.0,
+                best_ask=101.0,
+                avg_bid=99.5,
+                avg_ask=101.5,
+                mid_price=100.5,
+                spread=1.0,
+                imbalance=0.55,
+                source_timestamp=now - timedelta(seconds=1),
+                local_timestamp=now - timedelta(seconds=1),
+            )
+        )
+        session.commit()
+    with Session(account_engine) as session:
+        session.add_all(
+            [
+                ExchangeConnection(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    stream_kind="private_ws_critical",
+                    status="healthy",
+                    last_heartbeat_at=now - timedelta(seconds=2),
+                    updated_at=now - timedelta(seconds=2),
+                ),
+                ExchangeConnection(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    stream_kind="rest_reconciler",
+                    status="healthy",
+                    last_heartbeat_at=now - timedelta(seconds=5),
+                    updated_at=now - timedelta(seconds=5),
+                ),
+            ]
+        )
+        session.commit()
+
+    client = KrakenRuntimeStateClient(
+        market_db_url=market_db,
+        account_db_url=account_db,
+        symbol="PI_XBTUSD",
+    )
+    state = client.fetch_runtime_state()
+
+    assert state.private_ws.ready is True
+    assert state.ready is True
+
+
+def test_runtime_state_reads_order_lifecycle_from_critical_db(tmp_path) -> None:
+    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    critical_db = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+    market_engine = create_engine(market_db)
+    account_engine = create_engine(account_db)
+    critical_engine = create_engine(critical_db)
+    Base.metadata.create_all(market_engine)
+    Base.metadata.create_all(account_engine)
+    Base.metadata.create_all(critical_engine)
+    now = datetime.now(timezone.utc)
+    with Session(market_engine) as session:
+        session.add(
+            MarketSnapshot(
+                local_uuid="snap-1",
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                symbol="PI_XBTUSD",
+                best_bid=100.0,
+                best_ask=101.0,
+                avg_bid=99.5,
+                avg_ask=101.5,
+                mid_price=100.5,
+                spread=1.0,
+                imbalance=0.55,
+                source_timestamp=now - timedelta(seconds=1),
+                local_timestamp=now - timedelta(seconds=1),
+            )
+        )
+        session.commit()
+    with Session(account_engine) as session:
+        session.add(
+            AccountPosition(
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                account_scope="default",
+                symbol="PI_XBTUSD",
+                side="long",
+                size=4.0,
+                entry_price=100.0,
+                local_timestamp=now - timedelta(seconds=2),
+            )
+        )
+        session.commit()
+    with Session(critical_engine) as session:
+        session.add_all(
+            [
+                ExchangeConnection(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    stream_kind="private_ws",
+                    status="healthy",
+                    last_heartbeat_at=now - timedelta(seconds=2),
+                    updated_at=now - timedelta(seconds=2),
+                ),
+                ExchangeOrder(
+                    local_uuid="order-critical",
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    account_scope="default",
+                    symbol="PI_XBTUSD",
+                    exchange_order_id="OID-T",
+                    client_order_id="CID-T",
+                    side="sell",
+                    order_type="stop",
+                    status="open",
+                    price=99.0,
+                    quantity=4.0,
+                    filled_quantity=0.0,
+                    reduce_only=True,
+                    raw_payload={},
+                    source_timestamp=now,
+                    local_timestamp=now,
+                ),
+            ]
+        )
+        session.commit()
+
+    client = KrakenRuntimeStateClient(
+        market_db_url=market_db,
+        account_db_url=account_db,
+        critical_account_db_url=critical_db,
+        symbol="PI_XBTUSD",
+    )
+    state = client.fetch_runtime_state()
+    records = client.fetch_private_orders_for_identities(
+        client_order_ids=("CID-T",),
+        exchange_order_ids=("OID-T",),
+    )
+
+    assert state.ready is True
+    assert state.open_order_count == 1
+    assert state.position_size == 4.0
+    assert len(records) == 1
+    assert records[0].client_order_id == "CID-T"
+
+
+def test_private_order_records_use_raw_execution_price_when_column_is_empty(tmp_path) -> None:
+    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    market_engine = create_engine(market_db)
+    account_engine = create_engine(account_db)
+    Base.metadata.create_all(market_engine)
+    Base.metadata.create_all(account_engine)
+    now = datetime.now(timezone.utc)
+    with Session(account_engine) as session:
+        session.add(
+            ExchangeOrder(
+                local_uuid="order-1",
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                account_scope="default",
+                symbol="PI_XBTUSD",
+                exchange_order_id="OID-H",
+                client_order_id="CID-H",
+                side="buy",
+                order_type="market",
+                status="filled",
+                price=None,
+                quantity=6.0,
+                filled_quantity=6.0,
+                reduce_only=False,
+                raw_payload={"price": 73585.5},
+                source_timestamp=now,
+                local_timestamp=now,
+            )
+        )
+        session.commit()
+    client = KrakenRuntimeStateClient(
+        market_db_url=market_db,
+        account_db_url=account_db,
+        symbol="PI_XBTUSD",
+    )
+
+    records = client.fetch_private_orders_for_identities(
+        client_order_ids=("CID-H",),
+        exchange_order_ids=("OID-H",),
+    )
+
+    assert len(records) == 1
+    assert records[0].price == 73585.5
+
+
+def test_runtime_state_does_not_accept_fresh_account_stream_when_private_ws_stale(
+    tmp_path,
+) -> None:
+    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    market_engine = create_engine(market_db)
+    account_engine = create_engine(account_db)
+    Base.metadata.create_all(market_engine)
+    Base.metadata.create_all(account_engine)
+    now = datetime.now(timezone.utc)
+    with Session(market_engine) as session:
+        session.add(
+            MarketSnapshot(
+                local_uuid="snap-1",
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                symbol="PI_XBTUSD",
+                best_bid=100.0,
+                best_ask=101.0,
+                avg_bid=99.5,
+                avg_ask=101.5,
+                mid_price=100.5,
+                spread=1.0,
+                imbalance=0.55,
+                source_timestamp=now - timedelta(seconds=1),
+                local_timestamp=now - timedelta(seconds=1),
+            )
+        )
+        session.commit()
+    with Session(account_engine) as session:
+        session.add_all(
+            [
+                ExchangeConnection(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    stream_kind="private_ws",
+                    status="healthy",
+                    last_heartbeat_at=now - timedelta(minutes=10),
+                    updated_at=now - timedelta(minutes=10),
+                ),
+                ExchangeConnection(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    stream_kind="private_ws_account",
+                    status="healthy",
+                    last_heartbeat_at=now - timedelta(seconds=2),
+                    updated_at=now - timedelta(seconds=2),
+                ),
+                ExchangeConnection(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    stream_kind="rest_reconciler",
+                    status="healthy",
+                    last_heartbeat_at=now - timedelta(seconds=5),
+                    updated_at=now - timedelta(seconds=5),
+                ),
+            ]
+        )
+        session.commit()
+
+    client = KrakenRuntimeStateClient(
+        market_db_url=market_db,
+        account_db_url=account_db,
+        symbol="PI_XBTUSD",
+        max_private_age_seconds=30.0,
+    )
+    state = client.fetch_runtime_state()
+
+    assert state.private_ws.ready is False
+    assert "private_ws state is stale" in state.reasons
+    assert state.ready is False

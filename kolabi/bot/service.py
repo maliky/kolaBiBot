@@ -97,6 +97,7 @@ class BotConfig:
     db_url: Optional[str] = None
     market_db_url: Optional[str] = None
     account_db_url: Optional[str] = None
+    critical_account_db_url: Optional[str] = None
     require_ready: bool = True
     ready_timeout_seconds: float = 45.0
     ready_poll_seconds: float = 1.0
@@ -121,10 +122,14 @@ class BotService:
         self.exchange_config: ExchangeConfig | None = None
         market_db_url = config.market_db_url
         account_db_url = config.account_db_url
+        critical_account_db_url = config.critical_account_db_url
         if config.exchange.lower() == "kraken":
             env_cfg = kraken_futures_environment(config.environment)
             market_db_url = market_db_url or env_cfg.public_db_url
             account_db_url = account_db_url or env_cfg.private_db_url
+            critical_account_db_url = (
+                critical_account_db_url or env_cfg.critical_private_db_url
+            )
         self.indicators: IndicatorClient = indicators or (
             KrakenDbIndicatorClient(
                 # > should probably use global constant here instead of string
@@ -144,6 +149,7 @@ class BotService:
         )
         self._server_started = False
         self._account_db_url = account_db_url
+        self._critical_account_db_url = critical_account_db_url
         self._market_db_url = market_db_url
         self.runtime_state: KrakenRuntimeStateClient | None = None
         if (
@@ -154,6 +160,7 @@ class BotService:
             self.runtime_state = KrakenRuntimeStateClient(
                 market_db_url=market_db_url,
                 account_db_url=account_db_url,
+                critical_account_db_url=critical_account_db_url,
                 symbol=config.symbol,
                 exchange=config.exchange.lower(),
                 environment=config.environment,
@@ -192,11 +199,12 @@ class BotService:
         ):
             return
         self.logger.info(
-            "kraken runtime preflight symbol=%s env=%s market_db=%s account_db=%s",
+            "kraken runtime preflight symbol=%s env=%s market_db=%s account_db=%s critical_account_db=%s",
             self.config.symbol,
             self.config.environment,
             self._market_db_url,
             self._account_db_url,
+            self._critical_account_db_url or self._account_db_url,
         )
         state = self.runtime_state.wait_until_ready(
             timeout_seconds=self.config.ready_timeout_seconds,
@@ -214,9 +222,22 @@ class BotService:
     def _format_wait_timeout(self, state: StrategyRuntimeState) -> str:
         """Format a short readiness timeout message for CLI users."""
         reasons = ", ".join(state.reasons) if state.reasons else "unknown readiness failure"
+        public_age = (
+            f"{state.public.age_seconds:.2f}s"
+            if state.public.age_seconds is not None
+            else "unknown"
+        )
+        private_age = (
+            f"{state.private_ws.age_seconds:.2f}s"
+            if state.private_ws.age_seconds is not None
+            else "unknown"
+        )
+        private_last_heartbeat = state.private_ws.last_heartbeat_at or "-"
         return (
             "Kraken runtime did not become ready within "
-            f"{self.config.ready_timeout_seconds:.0f}s: {reasons}"
+            f"{self.config.ready_timeout_seconds:.0f}s: {reasons} "
+            f"(public_age={public_age} private_status={state.private_ws.status} "
+            f"private_age={private_age} private_last_heartbeat={private_last_heartbeat})"
         )
 
     def run_strategy(

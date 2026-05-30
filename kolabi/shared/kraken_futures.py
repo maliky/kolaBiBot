@@ -13,6 +13,7 @@ class KrakenFuturesEnvironment:
     rest_url: str
     public_db_url: str
     private_db_url: str
+    critical_private_db_url: str
     api_key_env: str
     api_secret_env: str
 
@@ -25,6 +26,7 @@ _KRAKEN_FUTURES_ENVIRONMENTS = {
         rest_url="https://demo-futures.kraken.com/derivatives/api/v3",
         public_db_url="sqlite:///pub-futures-demo.sqlite",
         private_db_url="sqlite:///prv-futures-demo.sqlite",
+        critical_private_db_url="sqlite:///prv-futures-demo-critical.sqlite",
         api_key_env="KRAKEN_FUTURE_DEMO_API_KEY",
         api_secret_env="KRAKEN_FUTURE_DEMO_API_SECRET",
     ),
@@ -35,6 +37,7 @@ _KRAKEN_FUTURES_ENVIRONMENTS = {
         rest_url="https://futures.kraken.com/derivatives/api/v3",
         public_db_url="sqlite:///pub-futures-live.sqlite",
         private_db_url="sqlite:///prv-futures-live.sqlite",
+        critical_private_db_url="sqlite:///prv-futures-live-critical.sqlite",
         api_key_env="KRAKEN_FUTURE_API_KEY",
         api_secret_env="KRAKEN_FUTURE_API_SECRET",
     ),
@@ -51,4 +54,3 @@ def kraken_futures_environment(environment: str) -> KrakenFuturesEnvironment:
             "Expected 'demo' or 'live'."
         )
     return _KRAKEN_FUTURES_ENVIRONMENTS[normalized]
-

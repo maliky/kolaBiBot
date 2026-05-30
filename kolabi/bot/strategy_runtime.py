@@ -84,6 +84,9 @@ class RuntimeQueueLike(Protocol):
     @property
     def all_pairs_terminal(self) -> bool: ...
 
+    @property
+    def should_keep_sources_alive(self) -> bool: ...
+
     async def enqueue(self, event: EggMove) -> None: ...
 
     def pair_state_for_record(self, record: object) -> tuple[PairCycleState, OrderRole] | None: ...
@@ -171,6 +174,18 @@ class _OrderLifecycleSnapshot:
 class _TailVisibilityWindow:
     pair_name: str
     attempt_index: int
+    client_order_id: str | None
+    exchange_order_id: str | None
+    started_at: datetime
+    deadline_at: datetime
+    last_warned_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class _TailAmendPending:
+    pair_name: str
+    attempt_index: int
+    desired_stop_price: Decimal
     client_order_id: str | None
     exchange_order_id: str | None
     started_at: datetime
@@ -285,7 +300,7 @@ class KrakenPublicTriggerSource:
                     continue
                 self._seen_event_ids.add(event_id)
                 await runtime.enqueue(replace(move, event_id=event_id))
-            if runtime.all_pairs_terminal:
+            if _runtime_sources_should_stop(runtime):
                 return
             await asyncio.sleep(self.poll_seconds)
 
@@ -403,18 +418,13 @@ class KrakenPrivateOrderPollingSource:
                             f"orderID={order_id} grace_seconds={self.head_fill_reference_grace_seconds:g}"
                         )
                 event_id = (
-                    (
-                        f"private-fill:{record.local_id}"
-                        if is_new_fill and record.local_id is not None
-                        else (
-                            f"private-order:{record.local_id}"
-                            if record.local_id is not None
-                            else None
-                        )
+                    self._private_record_event_id(
+                        record,
+                        is_fill=is_new_fill,
                     )
                 )
                 await runtime.enqueue(replace(move, event_id=event_id))
-            if runtime.all_pairs_terminal:
+            if _runtime_sources_should_stop(runtime):
                 return
             await asyncio.sleep(self.poll_seconds)
 
@@ -456,6 +466,36 @@ class KrakenPrivateOrderPollingSource:
             merged[key] = record
         return tuple(merged.values())
 
+    @staticmethod
+    def _private_record_event_id(
+        record: PrivateOrderRecord,
+        *,
+        is_fill: bool,
+    ) -> str | None:
+        prefix = "private-fill" if is_fill else "private-order"
+        identity = (
+            str(record.local_id)
+            if record.local_id is not None
+            else (record.exchange_order_id or record.client_order_id)
+        )
+        if identity is None:
+            return None
+        # One DB row can represent multiple lifecycle snapshots over time.
+        # Include state fingerprint so open -> amend -> close emits distinct events.
+        fingerprint = ":".join(
+            (
+                _event_atom(record.local_timestamp),
+                _event_atom(record.source_timestamp),
+                _event_atom(record.status),
+                _event_atom(record.reason),
+                _event_atom(record.price),
+                _event_atom(record.stop_price),
+                _event_atom(record.filled_quantity),
+                _event_atom(record.quantity),
+            )
+        )
+        return f"{prefix}:{identity}:{fingerprint}"
+
     def _with_reference_price(
         self,
         move: EggMove,
@@ -494,6 +534,8 @@ class KrakenPrivateOrderPollingSource:
         if move.kind not in {EggMoveKind.PLAYED_NOT_CANCELED, EggMoveKind.PLAYED_AND_CANCELED}:
             return False
         if not _pair_uses_relative_tail(pair_state):
+            return False
+        if pair_state.tail_trail is not None:
             return False
         played = _played_quantity_from_move(move)
         if played is None or played <= 0:
@@ -563,8 +605,10 @@ class StrategyRuntime:
         self._last_pair_updates: dict[str, tuple[str, ...]] = {}
         self._last_tail_metrics: dict[str, tuple[str, ...]] = {}
         self._head_order_lifecycle: dict[str, _OrderLifecycleSnapshot] = {}
+        self._tail_order_lifecycle: dict[str, _OrderLifecycleSnapshot] = {}
         self._live_command_identities: dict[str, OrderIdentity] = {}
         self._pending_tail_visibility: dict[_CommandSlot, _TailVisibilityWindow] = {}
+        self._pending_tail_amends: dict[_CommandSlot, _TailAmendPending] = {}
 
     def _pair_state(self, pair):
         from kolabi.bot.domain import PairCycleState
@@ -574,6 +618,10 @@ class StrategyRuntime:
     @property
     def all_pairs_terminal(self) -> bool:
         return all(_pair_runtime_complete(pair_state) for pair_state in self.state.pairs.values())
+
+    @property
+    def should_keep_sources_alive(self) -> bool:
+        return bool(self.chronos.pending_repeats)
 
     async def enqueue(self, event: EggMove) -> None:
         await self.event_queue.put(event)
@@ -616,6 +664,7 @@ class StrategyRuntime:
         self._inflight_commands.clear()
         self._pending_commands.clear()
         self._pending_tail_visibility.clear()
+        self._pending_tail_amends.clear()
 
     async def run(self) -> StrategyRunResult:
         await self.start()
@@ -623,11 +672,13 @@ class StrategyRuntime:
             while self.running:
                 current_time = datetime.now(timezone.utc)
                 self.chronos.expire_pending(now=current_time)
+                self._reap_source_tasks()
                 self._reap_command_tasks()
                 if self._command_errors:
                     raise self._command_errors[0]
                 self._prune_live_command_identities()
                 self._check_tail_visibility_deadlines(current_time)
+                self._check_tail_amend_deadlines(current_time)
                 repeat_commands = self.chronos.activate_ready_repeats(
                     symbol=self.symbol,
                     now=current_time,
@@ -635,6 +686,7 @@ class StrategyRuntime:
                 if repeat_commands:
                     previous_pairs = dict(self.state.pairs)
                     self.state = self.chronos.state
+                    self._log_repeat_start(repeat_commands)
                     self._dispatch_commands(repeat_commands)
                     self._log_living_updates(previous_pairs)
                 if (
@@ -650,9 +702,11 @@ class StrategyRuntime:
                 except TimeoutError:
                     continue
                 previous_pairs = dict(self.state.pairs)
+                previous_repeats = dict(self.chronos.pending_repeats)
                 self._record_head_lifecycle(event)
                 commands = self.chronos.process_event(event)
                 self.state = self.chronos.state
+                self._log_new_pending_repeats(previous_repeats)
                 self._dispatch_commands(commands)
                 self._log_living_updates(previous_pairs)
         finally:
@@ -688,6 +742,7 @@ class StrategyRuntime:
         identity = self._command_identity_from_command(prepared)
         if identity is not None:
             self._live_command_identities[_identity_key(identity)] = identity
+        self._on_command_dispatched(slot, prepared, identity)
         self._inflight_commands[slot] = _InFlightCommand(
             command=prepared,
             task=asyncio.create_task(self._execute_and_enqueue(prepared)),
@@ -716,6 +771,25 @@ class StrategyRuntime:
         for slot in done_slots:
             self._inflight_commands.pop(slot, None)
             self._dispatch_next_pending(slot)
+
+    def _reap_source_tasks(self) -> None:
+        alive_tasks: list[asyncio.Task[None]] = []
+        for task in self._tasks:
+            if not task.done():
+                alive_tasks.append(task)
+                continue
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                continue
+            except BaseException as exc:
+                self._command_errors.append(exc)
+                continue
+            if self.running and not self.all_pairs_terminal and not self.simulate:
+                self._command_errors.append(
+                    RuntimeError("runtime event source stopped before strategy completed")
+                )
+        self._tasks = alive_tasks
 
     def _dispatch_next_pending(self, slot: _CommandSlot) -> None:
         pending = self._pending_commands.get(slot)
@@ -771,7 +845,14 @@ class StrategyRuntime:
             )
             rows = self._collect_tail_telemetry_rows(now)
             if rows and self.tail_telemetry_writer is not None:
-                self.tail_telemetry_writer.record_rows(rows)
+                try:
+                    self.tail_telemetry_writer.record_rows(rows)
+                except Exception as exc:
+                    _LOGGER.warning(
+                        "tail telemetry persistence failed rows=%s error=%s",
+                        len(rows),
+                        _compact_error(exc),
+                    )
             for row in rows:
                 source = "unknown"
                 if market is not None:
@@ -786,6 +867,9 @@ class StrategyRuntime:
                     _fmt_compact_price(row.current_distance),
                     row.last_tail_update_at.isoformat() if row.last_tail_update_at is not None else "-",
                     source,
+                    _fmt_compact_price(None if market is None else getattr(market, "best_bid", None)),
+                    _fmt_compact_price(None if market is None else getattr(market, "best_ask", None)),
+                    _fmt_compact_price(None if market is None else getattr(market, "mid_price", None)),
                     _fmt_compact_price(None if market is None else getattr(market, "last_price", None)),
                     _fmt_compact_price(None if market is None else getattr(market, "mark_price", None)),
                     _fmt_compact_price(None if market is None else getattr(market, "index_price", None)),
@@ -794,7 +878,7 @@ class StrategyRuntime:
                     continue
                 self._last_tail_metrics[row.pair_name] = signature
                 _LOGGER.info(
-                    "METRICS (%s#%s): (%s--%s) ref=%s stop=%s ID=%s CD=%s LU=%s src=%s px=L:%s M:%s I:%s",
+                    "METRICS (%s#%s): (%s--%s) ref=%s stop=%s ID=%s CD=%s LU=%s src=%s px=B:%s A:%s MID:%s L:%s MK:%s I:%s",
                     row.pair_name,
                     signature[0],
                     row.head_state,
@@ -808,6 +892,9 @@ class StrategyRuntime:
                     signature[9],
                     signature[10],
                     signature[11],
+                    signature[12],
+                    signature[13],
+                    signature[14],
                 )
             await asyncio.sleep(interval)
 
@@ -865,15 +952,19 @@ class StrategyRuntime:
             quantity_changed = current.played_quantity != previous.played_quantity
             stop_previous = _confirmed_tail_stop(previous)
             stop_current = _confirmed_tail_stop(current)
+            desired_stop_previous = (
+                None if previous.tail_trail is None else previous.tail_trail.current_stop_price
+            )
             desired_stop = (
                 None if current.tail_trail is None else current.tail_trail.current_stop_price
             )
             stop_changed = stop_current != stop_previous
+            desired_stop_changed = desired_stop != desired_stop_previous
             state_changed = (
                 current.head_state != previous.head_state
                 or current.tail_state != previous.tail_state
             )
-            if not (quantity_changed or stop_changed or state_changed):
+            if not (quantity_changed or stop_changed or desired_stop_changed or state_changed):
                 continue
             head_lifecycle = self._head_order_lifecycle.get(pair_name, _OrderLifecycleSnapshot())
             update_signature: tuple[str, ...]
@@ -912,6 +1003,41 @@ class StrategyRuntime:
                     update_signature[6],
                     update_signature[7],
                     update_signature[8],
+                )
+            elif transition[0] == "closed" and transition[1] in {"closed", "failed"}:
+                tail_lifecycle = self._tail_order_lifecycle.get(
+                    pair_name,
+                    _OrderLifecycleSnapshot(),
+                )
+                update_signature = (
+                    str(current.attempt_index),
+                    transition[0],
+                    transition[1],
+                    played_qty,
+                    _fmt_compact_price(stop_current),
+                    _fmt_compact_price(desired_stop),
+                    tail_lifecycle.side or "-",
+                    _fmt_compact_price(tail_lifecycle.filled_qty),
+                    _fmt_compact_price(tail_lifecycle.filled_price),
+                    tail_lifecycle.filled_at.isoformat()
+                    if tail_lifecycle.filled_at is not None
+                    else "-",
+                )
+                message = (
+                    "UPDATE (%s#%s): (%s--%s) PQ=%s CS=%s DS=%s TFS=%s TFQ=%s TFP=%s TFT=%s"
+                )
+                message_args = (
+                    pair_name,
+                    update_signature[0],
+                    update_signature[1],
+                    update_signature[2],
+                    update_signature[3],
+                    update_signature[4],
+                    update_signature[5],
+                    update_signature[6],
+                    update_signature[7],
+                    update_signature[8],
+                    update_signature[9],
                 )
             elif transition in {("closed", "submitted"), ("closed", "living")}:
                 tail_identity = current.tail_identity
@@ -976,11 +1102,11 @@ class StrategyRuntime:
             return
         self._legend_logged = True
         _LOGGER.info(
-            "RAPPEL: AI=attempt_index PU=pair_update HS=head_state TS=tail_state PQ=played_qty CS=confirmed_stop DS=desired_stop ID=initial_dist CD=current_dist LU=last_update TCID=tail_client_id TOID=tail_order_id TLU=tail_last_update HFS/HFQ/HFP/HFT=head_fill_fields(closed--hooked)"
+            "RAPPEL: AI=attempt_index PU=pair_update HS=head_state TS=tail_state PQ=played_qty CS=confirmed_stop DS=desired_stop ID=initial_dist CD=current_dist LU=last_update TCID=tail_client_id TOID=tail_order_id TLU=tail_last_update HFS/HFQ/HFP/HFT=head_fill_fields(closed--hooked) TFS/TFQ/TFP/TFT=tail_fill_fields(closed--closed)"
         )
 
     def _record_head_lifecycle(self, move: EggMove) -> None:
-        if move.role != OrderRole.HEAD or move.reply is None:
+        if move.role not in {OrderRole.HEAD, OrderRole.TAIL} or move.reply is None:
             return
         pair_name = move.pair_name or resolve_pair_name(self.state, move)
         if pair_name is None:
@@ -993,13 +1119,27 @@ class StrategyRuntime:
         if side_value is None:
             pair_state = self.state.pairs.get(pair_name)
             if pair_state is not None:
-                side_value = pair_state.pair.head.side.value
-        previous = self._head_order_lifecycle.get(pair_name, _OrderLifecycleSnapshot())
-        self._head_order_lifecycle[pair_name] = _OrderLifecycleSnapshot(
+                side = (
+                    pair_state.pair.head.side
+                    if move.role == OrderRole.HEAD
+                    else pair_state.pair.tail.side
+                )
+                side_value = side.value
+        snapshots = (
+            self._head_order_lifecycle
+            if move.role == OrderRole.HEAD
+            else self._tail_order_lifecycle
+        )
+        previous = snapshots.get(pair_name, _OrderLifecycleSnapshot())
+        snapshots[pair_name] = _OrderLifecycleSnapshot(
             side=side_value,
             filled_qty=filled_qty if filled_qty is not None else previous.filled_qty,
             filled_price=filled_price if filled_price is not None else previous.filled_price,
-            filled_at=move.occurred_at if (filled_qty is not None or filled_price is not None) else previous.filled_at,
+            filled_at=(
+                move.occurred_at
+                if (filled_qty is not None or filled_price is not None)
+                else previous.filled_at
+            ),
         )
 
     def _prune_live_command_identities(self) -> None:
@@ -1170,6 +1310,7 @@ class StrategyRuntime:
 
     def _check_tail_visibility_deadlines(self, now: datetime) -> None:
         stale_slots: list[_CommandSlot] = []
+        delayed_slots: dict[_CommandSlot, _TailVisibilityWindow] = {}
         for slot, window in self._pending_tail_visibility.items():
             pair_state = self.state.pairs.get(window.pair_name)
             if pair_state is None or pair_state.attempt_index != window.attempt_index:
@@ -1181,6 +1322,15 @@ class StrategyRuntime:
                 window.client_order_id,
                 window.exchange_order_id,
             ):
+                if window.last_warned_at is not None:
+                    _LOGGER.info(
+                        "TAIL_VISIBLE (%s#%s): TCID=%s TOID=%s waited=%ss",
+                        window.pair_name,
+                        window.attempt_index,
+                        window.client_order_id or "-",
+                        window.exchange_order_id or "-",
+                        f"{(now - window.started_at).total_seconds():.1f}",
+                    )
                 stale_slots.append(slot)
                 continue
             if pair_state.tail_state in {TailState.CLOSED, TailState.FAILED}:
@@ -1188,15 +1338,142 @@ class StrategyRuntime:
                 continue
             if now < window.deadline_at:
                 continue
-            raise RuntimeError(
-                "tail order not visible in private DB before deadline: "
-                f"pair={window.pair_name} attempt={window.attempt_index} "
-                f"clOrdID={window.client_order_id or '-'} "
-                f"orderID={window.exchange_order_id or '-'} "
-                f"timeout={self.tail_visibility_timeout_seconds:.1f}s"
+            warn_after = max(5.0, self.tail_visibility_timeout_seconds)
+            if (
+                window.last_warned_at is not None
+                and (now - window.last_warned_at).total_seconds() < warn_after
+            ):
+                continue
+            _LOGGER.warning(
+                "TAIL_PENDING (%s#%s): TCID=%s TOID=%s waited=%ss timeout=%ss",
+                window.pair_name,
+                window.attempt_index,
+                window.client_order_id or "-",
+                window.exchange_order_id or "-",
+                f"{(now - window.started_at).total_seconds():.1f}",
+                f"{self.tail_visibility_timeout_seconds:.1f}",
             )
+            delayed_slots[slot] = replace(window, last_warned_at=now)
         for slot in stale_slots:
             self._pending_tail_visibility.pop(slot, None)
+        self._pending_tail_visibility.update(delayed_slots)
+
+    def _check_tail_amend_deadlines(self, now: datetime) -> None:
+        stale_slots: list[_CommandSlot] = []
+        for slot, pending in self._pending_tail_amends.items():
+            pair_state = self.state.pairs.get(pending.pair_name)
+            if pair_state is None or pair_state.attempt_index != pending.attempt_index:
+                stale_slots.append(slot)
+                continue
+            if pair_state.tail_state in {None, TailState.CLOSED, TailState.FAILED}:
+                stale_slots.append(slot)
+                continue
+            confirmed_stop = _confirmed_tail_stop(pair_state)
+            if _prices_close(confirmed_stop, pending.desired_stop_price):
+                stale_slots.append(slot)
+                continue
+            if now < pending.deadline_at:
+                continue
+            _LOGGER.warning(
+                "AMEND_PENDING (%s#%s): CS=%s DS=%s TCID=%s TOID=%s waited=%ss",
+                pending.pair_name,
+                pending.attempt_index,
+                _fmt_compact_price(confirmed_stop),
+                _fmt_compact_price(pending.desired_stop_price),
+                pending.client_order_id or "-",
+                pending.exchange_order_id or "-",
+                f"{(now - pending.started_at).total_seconds():.1f}",
+            )
+            stale_slots.append(slot)
+        for slot in stale_slots:
+            self._pending_tail_amends.pop(slot, None)
+
+    def _on_command_dispatched(
+        self,
+        slot: _CommandSlot,
+        command: DragonSong,
+        identity: OrderIdentity | None,
+    ) -> None:
+        if isinstance(command, PlaceHeadCommand):
+            pair_state = self.state.pairs.get(command.pair_name)
+            attempt_index = slot.attempt_index if pair_state is None else pair_state.attempt_index
+            _LOGGER.info(
+                "HEAD_SENT (%s#%s): HCID=%s side=%s type=%s qty=%s price=%s stop=%s",
+                command.pair_name,
+                attempt_index,
+                "-" if identity is None else identity.client_order_id or "-",
+                command.request.side,
+                command.request.ordType,
+                _fmt_compact_price(command.request.orderQty),
+                _fmt_compact_price(command.request.price),
+                _fmt_compact_price(command.request.stopPx),
+            )
+            return
+        if not isinstance(command, AmendTailCommand):
+            return
+        pair_state = self.state.pairs.get(command.pair_name)
+        if pair_state is None:
+            return
+        now = datetime.now(timezone.utc)
+        desired_stop = to_decimal(command.request.newPrice)
+        confirmed_stop = _confirmed_tail_stop(pair_state)
+        ref_source = "-"
+        ref_price: Decimal | None = None
+        if self.public_state_reader is not None:
+            market = self.public_state_reader.fetch_market_state(self.symbol)
+            ref_source, ref_price_value = tail_reference_price(pair_state.pair, market)
+            ref_price = to_decimal(ref_price_value)
+        _LOGGER.info(
+            "AMEND_SENT (%s#%s): CS=%s DS=%s ref=%s src=%s TCID=%s TOID=%s",
+            command.pair_name,
+            pair_state.attempt_index,
+            _fmt_compact_price(confirmed_stop),
+            _fmt_compact_price(desired_stop),
+            _fmt_compact_price(ref_price),
+            ref_source,
+            "-" if identity is None else identity.client_order_id or "-",
+            "-" if identity is None else identity.exchange_order_id or "-",
+        )
+        self._pending_tail_amends[slot] = _TailAmendPending(
+            pair_name=command.pair_name,
+            attempt_index=pair_state.attempt_index,
+            desired_stop_price=desired_stop,
+            client_order_id=None if identity is None else identity.client_order_id,
+            exchange_order_id=None if identity is None else identity.exchange_order_id,
+            started_at=now,
+            deadline_at=now + timedelta(seconds=self.tail_visibility_timeout_seconds),
+        )
+
+    def _log_new_pending_repeats(
+        self,
+        previous_repeats: dict[str, object],
+    ) -> None:
+        for pair_name, pending in self.chronos.pending_repeats.items():
+            if previous_repeats.get(pair_name) == pending:
+                continue
+            _LOGGER.info(
+                "REPEAT_WAIT (%s#%s): ready_at=%s",
+                pair_name,
+                pending.next_attempt,
+                pending.ready_at.isoformat(),
+            )
+
+    def _log_repeat_start(self, commands: tuple[DragonSong, ...]) -> None:
+        started: set[tuple[str, int]] = set()
+        for command in commands:
+            pair_state = self.state.pairs.get(command.pair_name)
+            if pair_state is None:
+                continue
+            key = (command.pair_name, pair_state.attempt_index)
+            if key in started:
+                continue
+            started.add(key)
+            _LOGGER.info(
+                "REPEAT_START (%s#%s): commands=%s",
+                key[0],
+                key[1],
+                sum(1 for item in commands if item.pair_name == key[0]),
+            )
 
     def _followup_events(self, command: DragonSong, ack: OrderAck) -> tuple[EggMove, ...]:
         if not self.simulate:
@@ -1417,6 +1694,11 @@ def _pair_uses_relative_tail(pair_state: PairCycleState) -> bool:
     return "t%" in tail_type or "td" in tail_type or "t%" in amount_type or "td" in amount_type
 
 
+def _runtime_sources_should_stop(runtime: RuntimeQueueLike) -> bool:
+    keep_alive = bool(getattr(runtime, "should_keep_sources_alive", False))
+    return runtime.all_pairs_terminal and not keep_alive
+
+
 def _played_quantity_from_move(move: EggMove) -> Decimal | None:
     payload = move.reply or {}
     for key in ("cumQty", "executedQty", "filledQty", "filled_quantity"):
@@ -1448,6 +1730,36 @@ def _fmt_compact_price(value: float | Decimal | None) -> str:
     as_float = float(value)
     decimals = 2 if abs(as_float) >= 1 else 4
     return f"{as_float:.{decimals}f}"
+
+
+def _event_atom(value: object) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped if stripped else "-"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return str(value)
+
+
+def _compact_error(exc: BaseException) -> str:
+    return " ".join(str(exc).split())
+
+
+def _prices_close(
+    left: Decimal | None,
+    right: Decimal | None,
+    *,
+    epsilon: Decimal = Decimal("0.00000001"),
+) -> bool:
+    if left is None or right is None:
+        return False
+    return abs(left - right) <= epsilon
 
 
 def _record_timestamp(record) -> datetime | None:
