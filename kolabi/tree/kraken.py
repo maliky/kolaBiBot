@@ -525,6 +525,7 @@ class KrakenTree:
             raw_message_count=self._raw_message_count,
             book_message_count=self._book_message_count,
             tick_size=tick_size,
+            ticker_prices=self._latest_ticker_prices,
         )
         if status_line == self._last_status_log_line:
             return
@@ -708,7 +709,7 @@ def upgrade_public_schema(engine: Engine) -> None:
     tables = set(inspector.get_table_names())
     with engine.begin() as connection:
         if "raw_exchange_events" in tables:
-            ensure_columns(
+            added_raw_columns = ensure_columns(
                 connection,
                 "raw_exchange_events",
                 {
@@ -723,25 +724,34 @@ def upgrade_public_schema(engine: Engine) -> None:
                     "received_at": "DATETIME",
                 },
             )
-            connection.execute(
-                text(
-                    "UPDATE raw_exchange_events "
-                    "SET duplicate_count = COALESCE(duplicate_count, 0) "
-                    "WHERE duplicate_count IS NULL"
+            if "duplicate_count" in added_raw_columns:
+                connection.execute(
+                    text(
+                        "UPDATE raw_exchange_events "
+                        "SET duplicate_count = COALESCE(duplicate_count, 0) "
+                        "WHERE duplicate_count IS NULL"
+                    )
                 )
-            )
-            connection.execute(
-                text(
-                    "UPDATE raw_exchange_events "
-                    "SET last_seen_at = COALESCE(last_seen_at, received_at) "
-                    "WHERE last_seen_at IS NULL"
+            if "last_seen_at" in added_raw_columns:
+                connection.execute(
+                    text(
+                        "UPDATE raw_exchange_events "
+                        "SET last_seen_at = COALESCE(last_seen_at, received_at) "
+                        "WHERE last_seen_at IS NULL"
+                    )
                 )
-            )
             connection.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_identity "
                     "ON raw_exchange_events "
                     "(exchange, environment, stream_kind, event_type, correlation_id)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_event_latest "
+                    "ON raw_exchange_events "
+                    "(exchange, environment, stream_kind, event_type, received_at, id)"
                 )
             )
             connection.execute(
@@ -769,16 +779,19 @@ def upgrade_public_schema(engine: Engine) -> None:
             )
 
 
-def ensure_columns(connection: Any, table_name: str, columns: dict[str, str]) -> None:
+def ensure_columns(connection: Any, table_name: str, columns: dict[str, str]) -> set[str]:
     existing = {
         str(row[1])
         for row in connection.execute(text(f"PRAGMA table_info({table_name})"))
     }
+    added: set[str] = set()
     for column_name, column_type in columns.items():
         if column_name not in existing:
             connection.execute(
                 text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
             )
+            added.add(column_name)
+    return added
 
 
 def subscription_message(config: KrakenConfig) -> dict[str, object]:
@@ -1348,24 +1361,45 @@ def format_market_status(
     raw_message_count: int,
     book_message_count: int,
     tick_size: float | None = None,
+    ticker_prices: TickerPrices | None = None,
 ) -> str:
     """Retourne une ligne courte tabulee lisible dans screen ou un log."""
     best_bid = round_price_for_display(metrics.best_bid, tick_size)
     best_ask = round_price_for_display(metrics.best_ask, tick_size)
     spread = round_price_for_display(metrics.spread, tick_size)
     mid_price = round_price_for_display(metrics.mid_price, tick_size)
+    last_price = _format_status_price(
+        None if ticker_prices is None else ticker_prices.last_price,
+        tick_size=tick_size,
+    )
+    mark_price = _format_status_price(
+        None if ticker_prices is None else ticker_prices.mark_price,
+        tick_size=tick_size,
+    )
+    index_price = _format_status_price(
+        None if ticker_prices is None else ticker_prices.index_price,
+        tick_size=tick_size,
+    )
     return (
         f"kraken_tree\t{config.environment}\t{stored_count}\t{config.pair}\t{persisted}\t"
         f"{raw_message_count}\t{book_message_count}\t{best_bid:.2f}\t{best_ask:.2f}\t"
-        f"{spread:.2f}\t{mid_price:.2f}\t{metrics.imbalance:.4f}"
+        f"{spread:.2f}\t{mid_price:.2f}\t{last_price}\t{mark_price}\t{index_price}\t{metrics.imbalance:.4f}"
     )
 
 
 def format_market_status_header() -> str:
     """Retourne l'en-tete tabulee pour les lignes de statut compactes."""
     return (
-        "kraken_tree\tenv\tcount\tpair\tpersisted\traw\tbook\tbest_bid\tbest_ask\tspread\tmid\timbalance"
+        "kraken_tree\tenv\tcount\tpair\tpersisted\traw\tbook\tbest_bid\tbest_ask\tspread\tmid\tlast\tmark\tindex\timbalance"
     )
+
+
+def _format_status_price(value: float | None, *, tick_size: float | None) -> str:
+    if value is None:
+        return "-"
+    rounded = round_price_for_display(float(value), tick_size)
+    decimals = 2 if abs(rounded) >= 1 else 4
+    return f"{rounded:.{decimals}f}"
 
 
 def format_trace_message(message: object, raw_payload: str, trace_format: str) -> str:

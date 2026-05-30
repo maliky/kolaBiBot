@@ -166,7 +166,7 @@ def test_status_log_suppresses_identical_lines(tmp_path, caplog):
         tree.log_due(fixed_time(1), snapshot=None)
 
     assert caplog.text.count(
-        "kraken_tree\tenv\tcount\tpair\tpersisted\traw\tbook\tbest_bid\tbest_ask\tspread\tmid\timbalance"
+        "kraken_tree\tenv\tcount\tpair\tpersisted\traw\tbook\tbest_bid\tbest_ask\tspread\tmid\tlast\tmark\tindex\timbalance"
     ) == 1
     assert caplog.text.count("kraken_tree\tdemo\t0\tPI_XBTUSD\tFalse") == 1
 
@@ -188,7 +188,7 @@ def test_status_log_prints_header_every_fifty_rows(tmp_path, caplog):
             tree.log_due(fixed_time(offset), snapshot=None)
 
     header = (
-        "kraken_tree\tenv\tcount\tpair\tpersisted\traw\tbook\tbest_bid\tbest_ask\tspread\tmid\timbalance"
+        "kraken_tree\tenv\tcount\tpair\tpersisted\traw\tbook\tbest_bid\tbest_ask\tspread\tmid\tlast\tmark\tindex\timbalance"
     )
     assert caplog.text.count(header) == 2
 
