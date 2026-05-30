@@ -16,6 +16,7 @@ from decimal import Decimal
 from typing import Any, Protocol
 
 from kolabi.bot.domain import OrderPairSpec, PairCycleState, Side
+from kolabi.bot.order_codes import order_price_source, parse_order_code
 from kolabi.shared.core.runtime_types import decimal_to_float, to_decimal
 
 
@@ -60,18 +61,33 @@ def pair_window_has_ended(
 
 def resolve_head_price(pair: OrderPairSpec, market: MarketLike) -> float | None:
     """Resolve the head order price from pair configuration and live market state."""
-    order_type = pair.head.order_type.replace("_", "").replace("-", "").lower()
-    if order_type in {"m", "market"}:
-        return None
-    reference = to_decimal(reference_price(pair.head.side, market))
-    lower, upper = pair.head_price
-    if "pA" in pair.amount_type:
-        return decimal_to_float(lower if pair.head.side == Side.BUY else upper)
-    if "p%" in pair.amount_type:
-        offset = to_decimal(lower if pair.head.side == Side.BUY else upper)
-        return decimal_to_float(reference * (Decimal("1") + offset / Decimal("100")))
-    offset = to_decimal(lower if pair.head.side == Side.BUY else upper)
-    return decimal_to_float(reference + offset)
+    price, _ = resolve_head_order_prices(pair, market)
+    return price
+
+
+def resolve_head_order_prices(
+    pair: OrderPairSpec,
+    market: MarketLike,
+) -> tuple[float | None, float | None]:
+    """Resolve concrete price/stopPx values for a non-market head order.
+
+    The `prix` interval is the hook condition. It is not a limit price. Once the
+    hook fires, order placement is anchored to the same market reference source
+    that the order type selects, with optional `oDelta` only adjusting plain
+    limit heads. Stop-limit/touch-limit heads keep `oDelta` for the adapter's
+    limit-price boundary.
+    """
+    code = parse_order_code(pair.head.order_type)
+    if code.base_key == "M":
+        return None, None
+    reference = to_decimal(head_price_reference_price(pair, market)[1])
+    if reference <= 0:
+        return None, None
+    if code.base_key == "L":
+        return decimal_to_float(_plain_limit_head_price(pair, reference)), None
+    if code.base_key in {"S", "SL", "MT", "LT"}:
+        return None, decimal_to_float(reference)
+    return None, None
 
 
 def reference_price(side: Side, market: MarketLike) -> float:
@@ -81,14 +97,37 @@ def reference_price(side: Side, market: MarketLike) -> float:
     return market.best_ask or market.mid_price or 0.0
 
 
+def _plain_limit_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal:
+    if pair.head.delta is None:
+        return reference
+    distance = abs(to_decimal(pair.head.delta))
+    if pair.head.side == Side.BUY:
+        return reference - distance
+    return reference + distance
+
+
 def executable_head_reference_price(
     pair: OrderPairSpec,
     market: MarketLike,
 ) -> tuple[str, float]:
     """Return the executable public reference for head placement conditions."""
+    source = order_price_source(pair.head.order_type)
+    if source is not None:
+        return source, price_from_source(source, market)
     if pair.head.side == Side.BUY:
         return "ask", _price_or_fallback(market.best_ask, market.mid_price)
     return "bid", _price_or_fallback(market.best_bid, market.mid_price)
+
+
+def head_price_reference_price(
+    pair: OrderPairSpec,
+    market: MarketLike,
+) -> tuple[str, float]:
+    """Return the public reference used to materialise a non-market head price."""
+    source = order_price_source(pair.head.order_type)
+    if source is not None:
+        return source, price_from_source(source, market)
+    return "book", reference_price(pair.head.side, market)
 
 
 def head_price_condition_satisfied(
@@ -122,14 +161,9 @@ def head_price_condition_needs_baseline(pair: OrderPairSpec) -> bool:
 
 def tail_trigger_source(order_type: str) -> str:
     """Resolve abstract trigger source from legacy tail order suffixes."""
-    normalized = (order_type or "").strip().lower()
-    reducible = normalized[:-1] if normalized.endswith("-") else normalized
-    if reducible.endswith("f"):
-        return "mark"
-    if reducible.endswith("i"):
-        return "index"
-    if reducible:
-        return "last"
+    code = parse_order_code(order_type)
+    if code.base_key in {"S", "SL", "MT", "LT"}:
+        return order_price_source(order_type, default="last") or "last"
     return "book"
 
 
@@ -161,6 +195,21 @@ def _price_or_fallback(primary: float | None, fallback: float | None) -> float:
     if fallback is not None and fallback > 0:
         return fallback
     return 0.0
+
+
+def price_from_source(source: str, market: MarketLike) -> float:
+    market_any = market_as_any(market)
+    if source == "last":
+        return _price_or_fallback(getattr(market_any, "last_price", None), market.mid_price)
+    if source == "mark":
+        return _price_or_fallback(getattr(market_any, "mark_price", None), market.mid_price)
+    if source == "index":
+        return _price_or_fallback(getattr(market_any, "index_price", None), market.mid_price)
+    if source == "ask":
+        return _price_or_fallback(market.best_ask, market.mid_price)
+    if source == "bid":
+        return _price_or_fallback(market.best_bid, market.mid_price)
+    return reference_price(Side.BUY, market)
 
 
 def market_as_any(market: MarketLike) -> Any:

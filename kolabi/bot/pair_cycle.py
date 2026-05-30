@@ -112,6 +112,8 @@ def step_pair(
             state,
             head_state=HeadState.HOOKED,
             head_trigger_reference_at=move.occurred_at,
+            head_order_price=_decimal_from_move(move, "head_order_price"),
+            head_order_stop_price=_decimal_from_move(move, "head_order_stop_price"),
         )
         return next_state, (PairIntent(PairIntentKind.PLACE_HEAD),)
 
@@ -343,6 +345,18 @@ def reference_price_from_move(state: PairCycleState, move: EggMove) -> Decimal |
                 return to_decimal(value)
     if state.tail_trail is not None:
         return state.tail_trail.entry_reference_price
+    return None
+
+
+def _decimal_from_move(move: EggMove, key: str) -> Decimal | None:
+    for payload in (move.reply, move.order):
+        if payload is None:
+            continue
+        value = payload.get(key)
+        if isinstance(value, (int, float, Decimal, str)):
+            parsed = to_decimal(value)
+            if parsed > 0:
+                return parsed
     return None
 
 

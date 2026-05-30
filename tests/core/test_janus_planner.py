@@ -35,6 +35,7 @@ from kolabi.shared.core.runtime_types import (
 def sample_pair(
     name: str,
     *,
+    head_order_type: str = "Limit",
     tail_order_type: str = "Stop",
     tail_price_spec: float = 99.0,
     tail_price_spec_type: str = "tA",
@@ -46,7 +47,7 @@ def sample_pair(
         try_num=1,
         dr_pause=None,
         timeout=60,
-        head=HeadSpec(side=Side.BUY, order_type="Limit"),
+        head=HeadSpec(side=Side.BUY, order_type=head_order_type),
         head_price=(100.0, 101.0),
         head_price_type="pA",
         head_quantity=2,
@@ -147,6 +148,88 @@ def test_place_head_translates_to_one_head_place_command() -> None:
     )
 
 
+def test_place_head_strips_local_limit_price_suffix() -> None:
+    state = sample_state()
+    state = PairCycleState(
+        pair=sample_pair("pair-a", head_order_type="Lm"),
+        head_state=state.head_state,
+        tail_state=state.tail_state,
+        played_quantity=state.played_quantity,
+    )
+
+    command = plan_runtime_commands(
+        state,
+        (PairIntent(PairIntentKind.PLACE_HEAD),),
+        symbol=Symbol("PI_XBTUSD"),
+    )[0]
+
+    assert isinstance(command, PlaceHeadCommand)
+    assert command.request.ordType == "L"
+    assert command.request.execInst is None
+    assert command.legacy_order is not None
+    assert command.legacy_order["ordType"] == "L"
+
+
+def test_place_head_uses_materialised_limit_price() -> None:
+    state = sample_state()
+    state = PairCycleState(
+        pair=sample_pair("pair-a", head_order_type="L"),
+        head_state=state.head_state,
+        tail_state=state.tail_state,
+        played_quantity=state.played_quantity,
+        head_order_price=Decimal("73500.5"),
+    )
+
+    command = plan_runtime_commands(
+        state,
+        (PairIntent(PairIntentKind.PLACE_HEAD),),
+        symbol=Symbol("PI_XBTUSD"),
+    )[0]
+
+    assert isinstance(command, PlaceHeadCommand)
+    assert command.request.price == Decimal("73500.5")
+
+
+def test_place_head_uses_materialised_trigger_price() -> None:
+    state = sample_state()
+    state = PairCycleState(
+        pair=sample_pair("pair-a", head_order_type="Sm"),
+        head_state=state.head_state,
+        tail_state=state.tail_state,
+        played_quantity=state.played_quantity,
+        head_order_stop_price=Decimal("73510.0"),
+    )
+
+    command = plan_runtime_commands(
+        state,
+        (PairIntent(PairIntentKind.PLACE_HEAD),),
+        symbol=Symbol("PI_XBTUSD"),
+    )[0]
+
+    assert isinstance(command, PlaceHeadCommand)
+    assert command.request.stopPx == Decimal("73510.0")
+
+
+def test_place_head_maps_trigger_price_suffix() -> None:
+    state = sample_state()
+    state = PairCycleState(
+        pair=sample_pair("pair-a", head_order_type="Sm"),
+        head_state=state.head_state,
+        tail_state=state.tail_state,
+        played_quantity=state.played_quantity,
+    )
+
+    command = plan_runtime_commands(
+        state,
+        (PairIntent(PairIntentKind.PLACE_HEAD),),
+        symbol=Symbol("PI_XBTUSD"),
+    )[0]
+
+    assert isinstance(command, PlaceHeadCommand)
+    assert command.request.ordType == "S"
+    assert command.request.execInst == "MarkPrice"
+
+
 def test_place_tail_translates_to_one_tail_place_command() -> None:
     commands = plan_runtime_commands(
         sample_state(),
@@ -214,10 +297,24 @@ def test_place_tail_translates_standard_stop_to_last_price_trigger() -> None:
     assert command.legacy_order["execInst"] == "LastPrice"
 
 
-def test_place_tail_translates_legacy_fair_price_trigger_suffix() -> None:
+@pytest.mark.parametrize(
+    ("tail_type", "expected_type", "expected_exec_inst"),
+    [
+        ("Sl-", "S", "ReduceOnly,LastPrice"),
+        ("Sm-", "S", "ReduceOnly,MarkPrice"),
+        ("Si-", "S", "ReduceOnly,IndexPrice"),
+        ("SLm-", "SL", "ReduceOnly,MarkPrice"),
+        ("LTi-", "LT", "ReduceOnly,IndexPrice"),
+    ],
+)
+def test_place_tail_translates_price_suffix_matrix(
+    tail_type: str,
+    expected_type: str,
+    expected_exec_inst: str,
+) -> None:
     state = sample_state()
     state = PairCycleState(
-        pair=sample_pair("pair-a", tail_order_type="Sf-"),
+        pair=sample_pair("pair-a", tail_order_type=tail_type),
         head_state=state.head_state,
         tail_state=state.tail_state,
         played_quantity=state.played_quantity,
@@ -230,8 +327,8 @@ def test_place_tail_translates_legacy_fair_price_trigger_suffix() -> None:
     )[0]
 
     assert isinstance(command, PlaceTailCommand)
-    assert command.request.ordType == "S"
-    assert command.request.execInst == "ReduceOnly,MarkPrice"
+    assert command.request.ordType == expected_type
+    assert command.request.execInst == expected_exec_inst
 
 
 def test_amend_tail_with_full_identity_translates_to_one_amend_command() -> None:

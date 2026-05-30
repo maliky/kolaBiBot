@@ -365,6 +365,8 @@ class Chronos:
             head_trigger_reference_price=None,
             head_trigger_reference_source=None,
             head_trigger_reference_at=None,
+            head_order_price=None,
+            head_order_stop_price=None,
             dependency_token=None,
             played_quantity=None,
             latest_commands=None,

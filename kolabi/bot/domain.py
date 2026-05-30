@@ -289,6 +289,8 @@ class PairCycleState:
     head_trigger_reference_price: Decimal | None = None
     head_trigger_reference_source: str | None = None
     head_trigger_reference_at: datetime | None = None
+    head_order_price: Decimal | None = None
+    head_order_stop_price: Decimal | None = None
     dependency_token: ChainDependencyToken | None = None
     played_quantity: Decimal | None = None
     latest_commands: Mapping[str, tuple[str, ...]] | None = None

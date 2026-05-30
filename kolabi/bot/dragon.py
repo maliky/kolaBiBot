@@ -32,6 +32,7 @@ from kolabi.bot.pricing import (
     head_price_condition_needs_baseline,
     head_price_condition_satisfied,
     pair_window_is_open,
+    resolve_head_order_prices,
     tail_reference_price,
 )
 from kolabi.shared.core.models import OrderAck
@@ -97,12 +98,15 @@ def head_hooked_from_market_snapshot(
         )
     if not head_price_condition_satisfied(pair_state, reference):
         return None
+    order_price, order_stop_price = resolve_head_order_prices(pair, snapshot)
     return head_hooked_event(
         pair_name=pair.name,
         symbol=snapshot.symbol,
         occurred_at=snapshot.occurred_at,
         reference_price=reference,
         reference_source=source,
+        head_order_price=order_price,
+        head_order_stop_price=order_stop_price,
     )
 
 
@@ -159,19 +163,23 @@ def head_hooked_event(
     occurred_at: datetime | None = None,
     reference_price: Decimal | int | float | str | None = None,
     reference_source: str | None = None,
+    head_order_price: Decimal | int | float | str | None = None,
+    head_order_stop_price: Decimal | int | float | str | None = None,
 ) -> EggMove:
-    reply = None
+    reply = {}
     if reference_price is not None:
-        reply = {
-            "reference_price": float(to_decimal(reference_price)),
-            "reference_source": reference_source or "unknown",
-        }
+        reply["reference_price"] = float(to_decimal(reference_price))
+        reply["reference_source"] = reference_source or "unknown"
+    if head_order_price is not None:
+        reply["head_order_price"] = float(to_decimal(head_order_price))
+    if head_order_stop_price is not None:
+        reply["head_order_stop_price"] = float(to_decimal(head_order_stop_price))
     return EggMove(
         kind=EggMoveKind.HEAD_HOOKED,
         occurred_at=occurred_at or datetime.now(timezone.utc),
         symbol=symbol,
         pair_name=pair_name,
-        reply=reply,
+        reply=reply or None,
     )
 
 

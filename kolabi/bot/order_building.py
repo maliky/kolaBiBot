@@ -16,11 +16,12 @@ from decimal import Decimal
 from typing import cast
 
 from kolabi.bot.domain import OrderPairSpec, PairCycleState, opposite_side
-from kolabi.bot.pricing import tail_trigger_source
+from kolabi.bot.order_codes import base_order_type, order_exec_inst
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
     AmendOrderCommandRequest,
     AmendTailCommand,
+    LimitPrice,
     OrderDict,
     OrderQty,
     PlaceHeadCommand,
@@ -36,37 +37,34 @@ from kolabi.shared.core.runtime_types import (
 
 def _tail_order_type(raw: str) -> str:
     """Return the base order type after legacy tail suffixes are removed."""
-    cleaned = raw.strip()
-    if cleaned.endswith("-"):
-        cleaned = cleaned[:-1]
-    if cleaned.endswith(("f", "i")) and cleaned.lower() not in {"limit"}:
-        cleaned = cleaned[:-1]
-    return cleaned or raw.strip()
+    return base_order_type(raw)
 
 
 def _tail_exec_inst(raw: str) -> str | None:
     """Translate legacy tail suffixes into adapter execution instructions."""
-    cleaned = raw.strip()
-    flags: list[str] = []
-    if cleaned.endswith("-"):
-        flags.append("ReduceOnly")
-    source = tail_trigger_source(cleaned)
-    if source == "mark":
-        flags.append("MarkPrice")
-    elif source == "index":
-        flags.append("IndexPrice")
-    elif source == "last":
-        flags.append("LastPrice")
-    return ",".join(flags) if flags else None
+    return order_exec_inst(raw, role="tail")
+
+
+def _head_order_type(raw: str) -> str:
+    """Return the base head type before exchange placement."""
+    return base_order_type(raw)
+
+
+def _head_exec_inst(raw: str) -> str | None:
+    """Translate valid head suffixes into adapter execution instructions."""
+    return order_exec_inst(raw, role="head")
 
 
 def head_order_dict(pair: OrderPairSpec, *, client_order_id: str | None = None) -> OrderDict:
     """Build the head order payload from the static pair specification."""
     order: OrderDict = {
         "side": pair.head.side.value,
-        "ordType": pair.head.order_type,
+        "ordType": _head_order_type(pair.head.order_type),
         "pair_name": pair.name,
     }
+    exec_inst = _head_exec_inst(pair.head.order_type)
+    if exec_inst is not None:
+        order["execInst"] = exec_inst
     if pair.head_quantity is not None:
         order["orderQty"] = cast(OrderQty, to_decimal(pair.head_quantity))
     if client_order_id is not None:
@@ -75,17 +73,34 @@ def head_order_dict(pair: OrderPairSpec, *, client_order_id: str | None = None) 
 
 
 def head_place_request(
-    pair: OrderPairSpec,
+    state: PairCycleState,
     *,
     client_order_id: str | None = None,
 ) -> PlaceOrderCommandRequest:
+    pair = state.pair
     quantity = None if pair.head_quantity is None else cast(OrderQty, to_decimal(pair.head_quantity))
     return PlaceOrderCommandRequest(
         pair_name=pair.name,
         side=pair.head.side.value,
-        ordType=pair.head.order_type,
+        ordType=_head_order_type(pair.head.order_type),
         orderQty=quantity,
+        price=(
+            None
+            if state.head_order_price is None
+            else cast(LimitPrice, state.head_order_price)
+        ),
+        stopPx=(
+            None
+            if state.head_order_stop_price is None
+            else cast(StopPrice, state.head_order_stop_price)
+        ),
         clOrdID=client_order_id,
+        execInst=_head_exec_inst(pair.head.order_type),
+        oDelta=(
+            None
+            if pair.head.delta is None
+            else cast(PriceOffset, to_decimal(pair.head.delta))
+        ),
     )
 
 
@@ -184,7 +199,7 @@ def head_amend_request(state: PairCycleState) -> AmendOrderCommandRequest:
     return AmendOrderCommandRequest(
         pair_name=state.pair.name,
         side=state.pair.head.side.value,
-        ordType=state.pair.head.order_type,
+        ordType=_head_order_type(state.pair.head.order_type),
         orderID=state.head_identity.exchange_order_id,
         clOrdID=state.head_identity.client_order_id,
         text="head amend",
@@ -224,7 +239,7 @@ def head_command(
     return PlaceHeadCommand(
         kind=kind,
         symbol=symbol,
-        request=head_place_request(state.pair),
+        request=head_place_request(state),
         pair_name=state.pair.name,
         legacy_order=head_order_dict(state.pair),
     )
