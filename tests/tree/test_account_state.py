@@ -1300,6 +1300,160 @@ def test_map_balances_and_positions_are_persisted(tmp_path):
         assert position_rows[0].funding_rate == 0.0001
 
 
+def test_unchanged_balance_snapshots_are_throttled(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            balance_write_min_interval_seconds=30.0,
+        )
+    )
+    first_at = datetime(2026, 5, 30, 1, 0, tzinfo=timezone.utc)
+    message = {
+        "feed": "balances",
+        "holding": {"USD": 100.0},
+        "timestamp": 1778025600000,
+    }
+
+    first = store.ingest_message(
+        message,
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at,
+    )
+    second = store.ingest_message(
+        message,
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at + timedelta(seconds=10),
+    )
+    third = store.ingest_message(
+        message,
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at + timedelta(seconds=31),
+    )
+
+    with Session(store.engine) as session:
+        rows = session.execute(select(AccountBalance)).scalars().all()
+    assert len(rows) == 2
+    assert len(first["balances"]) == 1
+    assert len(second["balances"]) == 0
+    assert len(third["balances"]) == 1
+
+
+def test_changed_balance_snapshot_bypasses_throttle(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            balance_write_min_interval_seconds=30.0,
+        )
+    )
+    first_at = datetime(2026, 5, 30, 1, 0, tzinfo=timezone.utc)
+
+    store.ingest_message(
+        {"feed": "balances", "holding": {"USD": 100.0}},
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at,
+    )
+    changed = store.ingest_message(
+        {"feed": "balances", "holding": {"USD": 101.0}},
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at + timedelta(seconds=1),
+    )
+
+    with Session(store.engine) as session:
+        rows = session.execute(select(AccountBalance)).scalars().all()
+    assert len(rows) == 2
+    assert len(changed["balances"]) == 1
+
+
+def test_unchanged_position_snapshots_are_throttled(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            position_write_min_interval_seconds=30.0,
+        )
+    )
+    first_at = datetime(2026, 5, 30, 1, 0, tzinfo=timezone.utc)
+    message = {
+        "feed": "open_positions",
+        "positions": [
+            {
+                "instrument": "PF_XBTUSD",
+                "side": "long",
+                "balance": "2",
+                "entry_price": "80000",
+            }
+        ],
+    }
+
+    first = store.ingest_message(
+        message,
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at,
+    )
+    second = store.ingest_message(
+        message,
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at + timedelta(seconds=10),
+    )
+    third = store.ingest_message(
+        message,
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at + timedelta(seconds=31),
+    )
+
+    with Session(store.engine) as session:
+        rows = session.execute(select(AccountPosition)).scalars().all()
+    assert len(rows) == 2
+    assert len(first["positions"]) == 1
+    assert len(second["positions"]) == 0
+    assert len(third["positions"]) == 1
+
+
+def test_changed_position_snapshot_bypasses_throttle(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            position_write_min_interval_seconds=30.0,
+        )
+    )
+    first_at = datetime(2026, 5, 30, 1, 0, tzinfo=timezone.utc)
+
+    store.ingest_message(
+        {
+            "feed": "open_positions",
+            "positions": [{"instrument": "PF_XBTUSD", "side": "long", "balance": "2"}],
+        },
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at,
+    )
+    changed = store.ingest_message(
+        {
+            "feed": "open_positions",
+            "positions": [{"instrument": "PF_XBTUSD", "side": "long", "balance": "3"}],
+        },
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at + timedelta(seconds=1),
+    )
+
+    with Session(store.engine) as session:
+        rows = session.execute(select(AccountPosition)).scalars().all()
+    assert len(rows) == 2
+    assert len(changed["positions"]) == 1
+
+
 def test_map_rest_balances_handles_nested_accounts_payload():
     rows = map_rest_balances(
         {

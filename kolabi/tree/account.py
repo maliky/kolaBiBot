@@ -80,6 +80,8 @@ class AccountStreamConfig:
     account_batch_max_wait_seconds: float = 0.35
     queue_maxsize: int = 5000
     rest_reconcile_seconds: float = 10.0
+    balance_write_min_interval_seconds: float = 30.0
+    position_write_min_interval_seconds: float = 30.0
     raw_retention_minutes: int = 1440
     raw_retention_limit: int = 100000
     log_level: str = "INFO"
@@ -445,10 +447,17 @@ class AccountStateStore:
                     row_count += 1
             elif feed.startswith("balances"):
                 balances = map_balances(payload)
+                persisted_balances: list[BalanceWrite] = []
                 for balance in balances:
-                    self._record_balance_in_session(session, balance, now=now)
-                balance_rows = balances
-                row_count += len(balances)
+                    _, inserted = self._record_balance_in_session(
+                        session,
+                        balance,
+                        now=now,
+                    )
+                    if inserted:
+                        persisted_balances.append(balance)
+                        row_count += 1
+                balance_rows = persisted_balances
             elif feed.startswith("open_positions"):
                 positions = map_positions(payload)
                 if feed.endswith("snapshot"):
@@ -458,10 +467,17 @@ class AccountStateStore:
                         raw_payload=payload,
                         source_timestamp=raw_event_source_timestamp(payload),
                     )
+                persisted_positions: list[PositionWrite] = []
                 for position in positions:
-                    self._record_position_in_session(session, position, now=now)
-                position_rows = positions
-                row_count += len(positions)
+                    _, inserted = self._record_position_in_session(
+                        session,
+                        position,
+                        now=now,
+                    )
+                    if inserted:
+                        persisted_positions.append(position)
+                        row_count += 1
+                position_rows = persisted_positions
             committed_at = datetime.now(timezone.utc)
             self._record_ingest_audit_in_session(
                 session,
@@ -553,14 +569,17 @@ class AccountStateStore:
                         row_count += 1
                 elif feed.startswith("balances"):
                     balances = map_balances(payload)
+                    persisted_balances: list[BalanceWrite] = []
                     for balance in balances:
-                        self._record_balance_in_session(
+                        _, inserted = self._record_balance_in_session(
                             session,
                             balance,
                             now=queued.received_at,
                         )
-                    balance_rows = balances
-                    row_count += len(balances)
+                        if inserted:
+                            persisted_balances.append(balance)
+                            row_count += 1
+                    balance_rows = persisted_balances
                 elif feed.startswith("open_positions"):
                     positions = map_positions(payload)
                     if feed.endswith("snapshot"):
@@ -570,14 +589,17 @@ class AccountStateStore:
                             raw_payload=payload,
                             source_timestamp=raw_event_source_timestamp(payload),
                         )
+                    persisted_positions: list[PositionWrite] = []
                     for position in positions:
-                        self._record_position_in_session(
+                        _, inserted = self._record_position_in_session(
                             session,
                             position,
                             now=queued.received_at,
                         )
-                    position_rows = positions
-                    row_count += len(positions)
+                        if inserted:
+                            persisted_positions.append(position)
+                            row_count += 1
+                    position_rows = persisted_positions
                 committed_at = datetime.now(timezone.utc)
                 self._record_ingest_audit_in_session(
                     session,
@@ -769,7 +791,15 @@ class AccountStateStore:
         balance: BalanceWrite,
         *,
         now: datetime,
-    ) -> AccountBalance:
+    ) -> tuple[AccountBalance, bool]:
+        previous = self._latest_balance_in_session(session, balance.asset)
+        if previous is not None and not _balance_snapshot_should_write(
+            previous,
+            balance,
+            now=now,
+            min_interval_seconds=self.config.balance_write_min_interval_seconds,
+        ):
+            return previous, False
         row = AccountBalance(
             exchange=self.config.exchange,
             environment=self.config.environment,
@@ -783,7 +813,7 @@ class AccountStateStore:
             local_timestamp=now,
         )
         session.add(row)
-        return row
+        return row, True
 
     def _record_position_in_session(
         self,
@@ -791,7 +821,19 @@ class AccountStateStore:
         position: PositionWrite,
         *,
         now: datetime,
-    ) -> AccountPosition:
+    ) -> tuple[AccountPosition, bool]:
+        previous = self._latest_position_in_session(
+            session,
+            symbol=position.symbol,
+            side=position.side,
+        )
+        if previous is not None and not _position_snapshot_should_write(
+            previous,
+            position,
+            now=now,
+            min_interval_seconds=self.config.position_write_min_interval_seconds,
+        ):
+            return previous, False
         row = AccountPosition(
             exchange=self.config.exchange,
             environment=self.config.environment,
@@ -812,7 +854,51 @@ class AccountStateStore:
             local_timestamp=now,
         )
         session.add(row)
-        return row
+        return row, True
+
+    def _latest_balance_in_session(
+        self,
+        session: Session,
+        asset: str,
+    ) -> AccountBalance | None:
+        return (
+            session.execute(
+                select(AccountBalance)
+                .where(
+                    AccountBalance.exchange == self.config.exchange,
+                    AccountBalance.environment == self.config.environment,
+                    AccountBalance.account_scope == self.config.account_scope,
+                    AccountBalance.asset == asset,
+                )
+                .order_by(AccountBalance.local_timestamp.desc(), AccountBalance.id.desc())
+            )
+            .scalars()
+            .first()
+        )
+
+    def _latest_position_in_session(
+        self,
+        session: Session,
+        *,
+        symbol: str,
+        side: str,
+    ) -> AccountPosition | None:
+        return (
+            session.execute(
+                select(AccountPosition)
+                .where(
+                    AccountPosition.exchange == self.config.exchange,
+                    AccountPosition.environment == self.config.environment,
+                    AccountPosition.market_type == self.config.market_type,
+                    AccountPosition.account_scope == self.config.account_scope,
+                    AccountPosition.symbol == symbol,
+                    AccountPosition.side == side,
+                )
+                .order_by(AccountPosition.local_timestamp.desc(), AccountPosition.id.desc())
+            )
+            .scalars()
+            .first()
+        )
 
     def _with_flat_positions_for_snapshot(
         self,
@@ -1179,7 +1265,7 @@ class AccountStateStore:
         """Persiste un solde normalise."""
         now = datetime.now(timezone.utc)
         with self.sessionmaker() as session:
-            row = self._record_balance_in_session(session, balance, now=now)
+            row, _inserted = self._record_balance_in_session(session, balance, now=now)
             session.commit()
             return row
 
@@ -1206,7 +1292,7 @@ class AccountStateStore:
         """Persiste une position normalisee."""
         now = datetime.now(timezone.utc)
         with self.sessionmaker() as session:
-            row = self._record_position_in_session(session, position, now=now)
+            row, _inserted = self._record_position_in_session(session, position, now=now)
             session.commit()
             return row
 
@@ -1228,8 +1314,11 @@ class AccountStateStore:
                 source_timestamp=source_timestamp,
             )
             rows = tuple(
-                self._record_position_in_session(session, position, now=now)
-                for position in normalized
+                row
+                for row, _inserted in (
+                    self._record_position_in_session(session, position, now=now)
+                    for position in normalized
+                )
             )
             session.commit()
             return rows
@@ -2573,6 +2662,86 @@ def _is_null_balance(balance: BalanceWrite) -> bool:
     return balance.available == 0.0 and balance.locked == 0.0 and balance.total == 0.0
 
 
+def _balance_snapshot_should_write(
+    previous: AccountBalance,
+    balance: BalanceWrite,
+    *,
+    now: datetime,
+    min_interval_seconds: float,
+) -> bool:
+    if not (
+        _same_float(previous.available, balance.available)
+        and _same_float(previous.locked, balance.locked)
+        and _same_float(previous.total, balance.total)
+    ):
+        return True
+    return _snapshot_interval_elapsed(
+        previous.local_timestamp,
+        now=now,
+        min_interval_seconds=min_interval_seconds,
+    )
+
+
+def _position_snapshot_should_write(
+    previous: AccountPosition,
+    position: PositionWrite,
+    *,
+    now: datetime,
+    min_interval_seconds: float,
+) -> bool:
+    if not (
+        _same_float(previous.size, position.size)
+        and _same_optional_float(previous.entry_price, position.entry_price)
+        and _same_optional_float(previous.leverage, position.leverage)
+        and _same_optional_float(previous.liquidation_price, position.liquidation_price)
+        and _same_optional_float(previous.available_margin, position.available_margin)
+        and _same_optional_float(previous.maintenance_margin, position.maintenance_margin)
+        and _same_optional_float(
+            previous.maintenance_margin_buffer,
+            position.maintenance_margin_buffer,
+        )
+        and _same_optional_float(previous.funding_rate, position.funding_rate)
+    ):
+        return True
+    return _snapshot_interval_elapsed(
+        previous.local_timestamp,
+        now=now,
+        min_interval_seconds=min_interval_seconds,
+    )
+
+
+def _snapshot_interval_elapsed(
+    previous_at: datetime | None,
+    *,
+    now: datetime,
+    min_interval_seconds: float,
+) -> bool:
+    if min_interval_seconds <= 0:
+        return True
+    if previous_at is None:
+        return True
+    elapsed = _as_utc_aware(now) - _as_utc_aware(previous_at)
+    return elapsed.total_seconds() >= min_interval_seconds
+
+
+def _as_utc_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _same_optional_float(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return _same_float(left, right)
+
+
+def _same_float(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return abs(float(left) - float(right)) <= 1e-12
+
+
 def _is_actionable_private_notice(kind: str, order_id: str, message: str) -> bool:
     """Return True when a private notice carries operator-actionable payload."""
     normalized_kind = kind.strip().lower()
@@ -2873,6 +3042,18 @@ def build_parser() -> argparse.ArgumentParser:
             default=AccountStreamConfig.rest_reconcile_seconds,
             help="Cadence for private REST reconcile writes during run; 0 disables loop.",
         )
+        cmd.add_argument(
+            "--balance-write-min-interval-seconds",
+            type=float,
+            default=AccountStreamConfig.balance_write_min_interval_seconds,
+            help="Minimum seconds between unchanged balance snapshot rows.",
+        )
+        cmd.add_argument(
+            "--position-write-min-interval-seconds",
+            type=float,
+            default=AccountStreamConfig.position_write_min_interval_seconds,
+            help="Minimum seconds between unchanged position snapshot rows.",
+        )
     return parser
 
 
@@ -2893,6 +3074,14 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
         ingest_profile=args.ingest_profile,
         health_write_seconds=args.health_write_seconds,
         rest_reconcile_seconds=max(0.0, args.rest_reconcile_seconds),
+        balance_write_min_interval_seconds=max(
+            0.0,
+            args.balance_write_min_interval_seconds,
+        ),
+        position_write_min_interval_seconds=max(
+            0.0,
+            args.position_write_min_interval_seconds,
+        ),
         raw_retention_minutes=args.raw_retention_minutes,
         raw_retention_limit=args.raw_retention_limit,
         log_level=args.log_level,
