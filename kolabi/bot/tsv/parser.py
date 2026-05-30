@@ -15,8 +15,12 @@ from kolabi.bot.domain import (
     normalize_side,
     opposite_side,
 )
+from kolabi.bot.order_codes import validate_order_code
 
 NumberPair = tuple[float, float]
+PERCENT_OPEN_BOUND = 90.0
+DIFFERENTIAL_OPEN_BOUND = 1_000_000.0
+ABSOLUTE_PRICE_OPEN_MAX = 1_000_000_000.0
 
 
 def read_strategy_file(path: str | Path) -> StrategySpec:
@@ -58,6 +62,8 @@ def order_pair_from_legacy_values(
     """Normalise une ligne legacy vers une paire canonique."""
     head_quantity_type, tail_price_type, head_price_type = split_amount_type(atype)
     normalized_side = normalize_side(side)
+    validate_order_code(oType, role="head")
+    validate_order_code(tType, role="tail")
     validate_price_interval(prix)
     validate_quantity(q)
 
@@ -145,16 +151,14 @@ def normalize_legacy_row(row: pd.Series) -> dict[str, object]:
         el1, el2 = raw.strip().split(" ")
         amount_type = atype or ""
         if "p%" in amount_type:
-            el1 = "-90" if el1 == "-" else el1
-            el2 = "90" if el2 == "+" else el2
+            el1 = str(-PERCENT_OPEN_BOUND) if el1 == "-" else el1
+            el2 = str(PERCENT_OPEN_BOUND) if el2 == "+" else el2
         if "pD" in amount_type:
-            el1 = str(float(el2) * 10) if el1 == "-" else el1
-            el2 = str(float(el1) * 10) if el2 == "+" else el2
+            el1 = str(-DIFFERENTIAL_OPEN_BOUND) if el1 == "-" else el1
+            el2 = str(DIFFERENTIAL_OPEN_BOUND) if el2 == "+" else el2
         if "pA" in amount_type:
-            if el1 == "-":
-                el1 = str(int(float(el2) / 10))
-            if el2 == "+":
-                el2 = str(int(float(el1) * 10))
+            el1 = "0" if el1 == "-" else el1
+            el2 = str(ABSOLUTE_PRICE_OPEN_MAX) if el2 == "+" else el2
         return float(el1), float(el2)
 
     def coerce_to(kind: str, value: object) -> int | float | None:
