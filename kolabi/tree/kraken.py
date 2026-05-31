@@ -674,23 +674,35 @@ class OrderBookLevel(Base):
     )
 
 
-def build_engine(db_url: str) -> Engine:
+def build_engine(
+    db_url: str,
+    *,
+    sqlite_busy_timeout_seconds: float = 30.0,
+) -> Engine:
     """Cree l'engine DB du service avec reglages SQLite locaux."""
-    connect_args = {"timeout": 30} if db_url.startswith("sqlite") else {}
+    timeout_seconds = max(0.0, float(sqlite_busy_timeout_seconds))
+    connect_args = {"timeout": timeout_seconds} if db_url.startswith("sqlite") else {}
     engine = create_engine(db_url, future=True, connect_args=connect_args)
     if db_url.startswith("sqlite"):
-        configure_sqlite_engine(engine)
+        configure_sqlite_engine(
+            engine,
+            busy_timeout_ms=int(timeout_seconds * 1000),
+        )
     return engine
 
 
-def configure_sqlite_engine(engine: Engine) -> None:
+def configure_sqlite_engine(
+    engine: Engine,
+    *,
+    busy_timeout_ms: int = 30_000,
+) -> None:
     """Installe WAL et les pragmas de concurrence sur chaque connexion."""
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_connection: object, _connection_record: object) -> None:
         cursor = cast_dbapi_connection(dbapi_connection).cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute(f"PRAGMA busy_timeout={max(0, busy_timeout_ms)}")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()

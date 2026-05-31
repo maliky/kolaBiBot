@@ -82,6 +82,8 @@ class AccountStreamConfig:
     rest_reconcile_seconds: float = 10.0
     balance_write_min_interval_seconds: float = 30.0
     position_write_min_interval_seconds: float = 30.0
+    sqlite_busy_timeout_seconds: float = 30.0
+    critical_mirror_busy_timeout_seconds: float = 1.0
     raw_retention_minutes: int = 1440
     raw_retention_limit: int = 100000
     log_level: str = "INFO"
@@ -217,6 +219,7 @@ class PrivateIngestMirror:
         )
         self._thread: threading.Thread | None = None
         self._dropped = 0
+        self._locked = 0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -265,6 +268,16 @@ class PrivateIngestMirror:
                     prune_raw=False,
                 )
             except Exception as exc:
+                if _is_sqlite_locked_error(exc):
+                    self._locked += 1
+                    if self._locked == 1 or self._locked % 100 == 0:
+                        self.logger.warning(
+                            "kraken_account critical mirror skipped locked message count=%s feed=%s stream=%s",
+                            self._locked,
+                            feed,
+                            self.stream_kind,
+                        )
+                    continue
                 self.logger.warning(
                     "kraken_account critical mirror failed feed=%s stream=%s error=%s",
                     feed,
@@ -380,7 +393,10 @@ class AccountStateStore:
 
     def __init__(self, config: AccountStreamConfig) -> None:
         self.config = config
-        self.engine = build_engine(config.db_url)
+        self.engine = build_engine(
+            config.db_url,
+            sqlite_busy_timeout_seconds=config.sqlite_busy_timeout_seconds,
+        )
         upgrade_private_schema(self.engine)
         Base.metadata.create_all(self.engine)
         self.sessionmaker = sessionmaker(
@@ -1876,6 +1892,17 @@ def critical_private_config(config: AccountStreamConfig) -> AccountStreamConfig:
     return replace(config, db_url=config.critical_db_url or config.db_url)
 
 
+def critical_mirror_config(config: AccountStreamConfig) -> AccountStreamConfig:
+    """Return config for best-effort critical mirroring into the broad private DB."""
+    return replace(
+        config,
+        sqlite_busy_timeout_seconds=max(
+            0.0,
+            float(config.critical_mirror_busy_timeout_seconds),
+        ),
+    )
+
+
 def profile_uses_critical_db(profile: PrivateStreamProfile) -> bool:
     """Critical feed profile owns order/fill truth."""
     return profile.name == "critical"
@@ -2944,6 +2971,17 @@ def _stop_price_from_payload(payload: object) -> float | None:
     return None
 
 
+def _is_sqlite_locked_error(exc: BaseException) -> bool:
+    """Return true for SQLite lock errors, including SQLAlchemy wrappers."""
+    current: BaseException | None = exc
+    while current is not None:
+        message = str(current).lower()
+        if "database is locked" in message or "database table is locked" in message:
+            return True
+        current = current.__cause__ if isinstance(current.__cause__, BaseException) else None
+    return False
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construit la CLI de memoire privee."""
     parser = argparse.ArgumentParser(
@@ -3054,6 +3092,21 @@ def build_parser() -> argparse.ArgumentParser:
             default=AccountStreamConfig.position_write_min_interval_seconds,
             help="Minimum seconds between unchanged position snapshot rows.",
         )
+        cmd.add_argument(
+            "--sqlite-busy-timeout-seconds",
+            type=float,
+            default=AccountStreamConfig.sqlite_busy_timeout_seconds,
+            help="SQLite write-lock wait timeout for primary private DB writers.",
+        )
+        cmd.add_argument(
+            "--critical-mirror-busy-timeout-seconds",
+            type=float,
+            default=AccountStreamConfig.critical_mirror_busy_timeout_seconds,
+            help=(
+                "SQLite write-lock wait timeout for best-effort critical mirroring "
+                "into the broad private DB."
+            ),
+        )
     return parser
 
 
@@ -3082,6 +3135,11 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
             0.0,
             args.position_write_min_interval_seconds,
         ),
+        sqlite_busy_timeout_seconds=max(0.0, args.sqlite_busy_timeout_seconds),
+        critical_mirror_busy_timeout_seconds=max(
+            0.0,
+            args.critical_mirror_busy_timeout_seconds,
+        ),
         raw_retention_minutes=args.raw_retention_minutes,
         raw_retention_limit=args.raw_retention_limit,
         log_level=args.log_level,
@@ -3095,6 +3153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = config_from_args(args)
     account_store = AccountStateStore(config)
     critical_store = AccountStateStore(critical_private_config(config))
+    mirror_store = AccountStateStore(critical_mirror_config(config))
     if args.command == "status":
         status_store = (
             critical_store
@@ -3123,7 +3182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 critical_store if use_critical else account_store,
                 credentials,
                 profile=profile,
-                mirror_store=account_store if use_critical else None,
+                mirror_store=mirror_store if use_critical else None,
             )
         )
     streams_tuple = tuple(streams)

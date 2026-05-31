@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 from kolabi.shared.persistence import (
     AccountBalance,
@@ -17,11 +18,14 @@ from kolabi.tree.account import (
     AccountStreamConfig,
     BalanceWrite,
     FillWrite,
+    IngestMessage,
     KrakenFuturesCredentials,
     KrakenFuturesPrivateStream,
     KrakenFuturesRestReconciler,
     OrderWrite,
+    PrivateIngestMirror,
     PrivateStreamProfile,
+    critical_mirror_config,
     critical_private_config,
     map_balances,
     map_fill_event,
@@ -800,6 +804,47 @@ def test_rest_reconcile_tombstones_missing_open_order_in_critical_db(tmp_path):
             ).scalar_one()
         assert row.status == "canceled"
         assert row.raw_payload["reason"] == "absent_from_open_orders_snapshot"
+
+
+def test_critical_mirror_config_uses_short_sqlite_timeout() -> None:
+    config = AccountStreamConfig(
+        db_url="sqlite:///main.sqlite",
+        critical_db_url="sqlite:///critical.sqlite",
+        sqlite_busy_timeout_seconds=30.0,
+        critical_mirror_busy_timeout_seconds=0.5,
+    )
+
+    mirror = critical_mirror_config(config)
+
+    assert mirror.db_url == config.db_url
+    assert mirror.sqlite_busy_timeout_seconds == 0.5
+
+
+def test_private_ingest_mirror_skips_sqlite_lock(caplog) -> None:
+    class _LockedStore:
+        def ingest_message(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("sqlite3.OperationalError: database is locked")
+
+    logger = logging.getLogger("test-private-mirror")
+    mirror = PrivateIngestMirror(
+        cast(AccountStateStore, _LockedStore()),
+        logger,
+        stream_kind="private_ws_critical",
+        is_critical=True,
+    )
+    mirror._queue.put_nowait(
+        IngestMessage(
+            payload={"feed": "open_orders"},
+            received_at=datetime.now(timezone.utc),
+        )
+    )
+    mirror._queue.put_nowait(None)
+
+    with caplog.at_level(logging.WARNING, logger=logger.name):
+        mirror._run()
+
+    assert "critical mirror skipped locked message" in caplog.text
 
 
 def test_handle_message_logs_balance_delta_event(tmp_path, caplog):
