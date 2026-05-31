@@ -1696,11 +1696,12 @@ def plan_strategy_once(
     commands = chronos.process_events(
         tuple(
             head_hooked_event(
-                pair_name=pair.name,
+                pair_name=pair_state.pair.name,
                 symbol=symbol,
                 occurred_at=state.launched_at,
             )
-            for pair in strategy.pairs
+            for pair_state in state.pairs.values()
+            if pair_dependency_satisfied(state, pair_state)
         )
     )
     return StrategyRunResult(

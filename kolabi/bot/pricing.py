@@ -95,7 +95,9 @@ def resolve_head_order_prices(
         return None, None
     if code.base_key == "L":
         return decimal_to_float(_plain_limit_head_price(pair, reference)), None
-    if code.base_key in {"S", "SL", "MT", "LT"}:
+    if code.base_key == "S":
+        return None, decimal_to_float(_stop_head_price(pair, reference))
+    if code.base_key in {"SL", "MT", "LT"}:
         return None, decimal_to_float(reference)
     return None, None
 
@@ -114,6 +116,15 @@ def _plain_limit_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal:
     if pair.head.side == Side.BUY:
         return reference - distance
     return reference + distance
+
+
+def _stop_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal:
+    if pair.head.delta is None:
+        return reference
+    distance = abs(to_decimal(pair.head.delta))
+    if pair.head.side == Side.BUY:
+        return reference + distance
+    return reference - distance
 
 
 def executable_head_reference_price(

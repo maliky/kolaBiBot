@@ -380,6 +380,18 @@ def test_plan_strategy_once_uses_the_chronos_path() -> None:
     assert result.commands[0].role is not None and result.commands[0].role.value == "head"
 
 
+def test_plan_strategy_once_respects_chain_dependencies() -> None:
+    parent = sample_strategy()[0]
+    child = replace(parent, name="pair-b", hook_name="pair-a-tail-closed")
+
+    result = plan_strategy_once(
+        strategy=StrategySpec(name="demo-chain", pairs=(parent, child)),
+        symbol="PI_XBTUSD",
+    )
+
+    assert [command.pair_name for command in result.commands] == ["pair-a"]
+
+
 def test_strategy_runtime_simulation_advances_to_tail_state() -> None:
     from kolabi.bot.domain import StrategySpec
 

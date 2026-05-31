@@ -17,6 +17,7 @@ from kolabi.bot.pricing import (
     executable_head_reference_price,
     pair_window_has_ended,
     pair_window_is_open,
+    resolve_head_order_prices,
 )
 
 
@@ -137,6 +138,46 @@ def test_head_stop_hook_carries_materialised_stop_price() -> None:
     assert move is not None
     assert move.reply is not None
     assert move.reply["head_order_stop_price"] == 104.0
+
+
+def test_buy_stop_head_delta_places_trigger_above_reference() -> None:
+    pair = replace(
+        _pair("Sl"),
+        head=HeadSpec(side=Side.BUY, order_type="Sl", delta=10.0),
+    )
+
+    price, stop_price = resolve_head_order_prices(
+        pair,
+        _Market(
+            best_bid=99.0,
+            best_ask=101.0,
+            mid_price=100.0,
+            last_price=100.5,
+        ),
+    )
+
+    assert price is None
+    assert stop_price == 110.5
+
+
+def test_sell_stop_head_delta_places_trigger_below_reference() -> None:
+    pair = replace(
+        _pair("Sl"),
+        head=HeadSpec(side=Side.SELL, order_type="Sl", delta=10.0),
+    )
+
+    price, stop_price = resolve_head_order_prices(
+        pair,
+        _Market(
+            best_bid=99.0,
+            best_ask=101.0,
+            mid_price=100.0,
+            last_price=100.5,
+        ),
+    )
+
+    assert price is None
+    assert stop_price == 90.5
 
 
 def test_pair_window_accepts_mixed_naive_and_aware_datetimes() -> None:
