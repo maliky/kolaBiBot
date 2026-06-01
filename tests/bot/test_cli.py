@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 
+import pytest
 from kolabi.bot.__main__ import (
     build_parser,
     build_single_strategy,
@@ -97,6 +98,42 @@ def test_run_once_parser_keeps_percent_tail_percent_head_grammar() -> None:
     assert pair.tail_price_spec_type == "t%"
     assert pair.head_price_type == "p%"
     assert pair.tail_price_spec == 0.5
+
+
+def test_bot_parser_uses_critical_db_url_only() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "run",
+            "--strategy",
+            "orders/advers.tsv",
+            "--critical-db-url",
+            "sqlite:///critical.sqlite",
+            "--audit-db-url",
+            "sqlite:///audit.sqlite",
+            "--telemetry-db-url",
+            "sqlite:///telemetry.sqlite",
+            "--account-scope",
+            "advers",
+            "--dry-run",
+        ]
+    )
+
+    assert args.critical_account_db_url == "sqlite:///critical.sqlite"
+    assert args.audit_db_url == "sqlite:///audit.sqlite"
+    assert args.telemetry_db_url == "sqlite:///telemetry.sqlite"
+    assert args.account_scope == "advers"
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "run",
+                "--strategy",
+                "orders/advers.tsv",
+                "--critical-account-db-url",
+                "sqlite:///critical.sqlite",
+            ]
+        )
 
 
 def test_run_once_command_dry_run_prints_canonical_structure(capsys) -> None:

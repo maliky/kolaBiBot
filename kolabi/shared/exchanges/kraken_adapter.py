@@ -20,7 +20,10 @@ from kolabi.kraken_contract import build_send_order_contract
 from kolabi.shared.core.models import OrderAck, Position
 from kolabi.shared.core.runtime_types import OrderQty, Price, StopPrice
 from kolabi.shared.core.types import ExchangeABC
-from kolabi.shared.kraken_futures import kraken_futures_environment
+from kolabi.shared.kraken_futures import (
+    kraken_futures_audit_db_url,
+    kraken_futures_environment,
+)
 from kolabi.shared.persistence import (
     Base,
     ExchangeFill,
@@ -34,6 +37,7 @@ from kolabi.tree.account import sign_rest_auth
 _LOGGER = logging.getLogger("kola")
 _REST_AUDIT_LOCK_RETRIES = 3
 _REST_AUDIT_LOCK_SLEEP_SECONDS = 0.05
+_REST_AUDIT_SQLITE_BUSY_TIMEOUT_SECONDS = 0.5
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -46,6 +50,22 @@ class _Ticker:
     mark_price: float
     index_price: float
     last: float
+
+
+def _default_audit_db_url(
+    *,
+    environment: str,
+    account_scope: str,
+    account_db_url: str | None,
+) -> str:
+    """Keep explicit account DB tests local while splitting audit writes by default."""
+
+    if account_db_url and account_db_url.startswith("sqlite:///"):
+        path = account_db_url.removeprefix("sqlite:///")
+        if path.endswith(".sqlite"):
+            return f"sqlite:///{path[:-7]}-audit.sqlite"
+        return f"{account_db_url}-audit"
+    return kraken_futures_audit_db_url(environment, account_scope)
 
 
 class KrakenFuturesAdapter(ExchangeABC):
@@ -61,6 +81,8 @@ class KrakenFuturesAdapter(ExchangeABC):
         environment: str = "demo",
         account_db_url: str | None = None,
         public_db_url: str | None = None,
+        audit_db_url: str | None = None,
+        account_scope: str = "default",
         timeout: float = 10.0,
         postOnly: bool = False,
         session: requests.Session | None = None,
@@ -75,13 +97,28 @@ class KrakenFuturesAdapter(ExchangeABC):
         env_cfg = kraken_futures_environment(environment)
         self.account_db_url = account_db_url or env_cfg.private_db_url
         self.public_db_url = public_db_url or env_cfg.public_db_url
+        self.account_scope = account_scope or "default"
+        self.audit_db_url = audit_db_url or _default_audit_db_url(
+            environment=environment,
+            account_scope=self.account_scope,
+            account_db_url=account_db_url,
+        )
         self.dummy = False
         self.dummyID = ""
         self._last_nonce = 0
         self._engine = create_persistence_engine(self.account_db_url)
+        self._audit_engine = create_persistence_engine(
+            self.audit_db_url,
+            sqlite_busy_timeout_seconds=_REST_AUDIT_SQLITE_BUSY_TIMEOUT_SECONDS,
+        )
         self._public_engine = create_persistence_engine(self.public_db_url)
         self._sessionmaker = sessionmaker(
             bind=self._engine,
+            expire_on_commit=False,
+            class_=Session,
+        )
+        self._audit_sessionmaker = sessionmaker(
+            bind=self._audit_engine,
             expire_on_commit=False,
             class_=Session,
         )
@@ -90,7 +127,9 @@ class KrakenFuturesAdapter(ExchangeABC):
             expire_on_commit=False,
             class_=Session,
         )
+        self.rest_audit_errors: list[str] = []
         Base.metadata.create_all(self._engine)
+        Base.metadata.create_all(self._audit_engine)
         Base.metadata.create_all(self._public_engine)
 
     @staticmethod
@@ -273,7 +312,7 @@ class KrakenFuturesAdapter(ExchangeABC):
         ack_status = _map_order_status_from_payload(order_like) if order_like else None
         ack_order_id = endpoint_order_id
         ack_client_order_id = client_order_id
-        with self._sessionmaker() as session:
+        with self._audit_sessionmaker() as session:
             for retry in range(_REST_AUDIT_LOCK_RETRIES + 1):
                 try:
                     session.add(
@@ -282,7 +321,7 @@ class KrakenFuturesAdapter(ExchangeABC):
                             exchange="kraken",
                             environment=self.environment,
                             market_type="futures",
-                            account_scope="default",
+                            account_scope=self.account_scope,
                             symbol=self.symbol,
                             method=method.upper(),
                             path=path,
@@ -308,28 +347,54 @@ class KrakenFuturesAdapter(ExchangeABC):
                     if _is_sqlite_locked_error(exc) and retry < _REST_AUDIT_LOCK_RETRIES:
                         time.sleep(_REST_AUDIT_LOCK_SLEEP_SECONDS * (retry + 1))
                         continue
-                    _LOGGER.warning(
-                        "rest call audit persistence failed method=%s path=%s clOrdID=%s orderID=%s retry=%s error=%s",
-                        method.upper(),
-                        path,
-                        client_order_id or "-",
-                        endpoint_order_id or "-",
-                        retry,
-                        _compact_error(exc),
+                    self._record_rest_audit_failure(
+                        method=method,
+                        path=path,
+                        client_order_id=client_order_id,
+                        endpoint_order_id=endpoint_order_id,
+                        retry=retry,
+                        exc=exc,
                     )
                     return
                 except Exception as exc:
                     session.rollback()
-                    _LOGGER.warning(
-                        "rest call audit persistence failed method=%s path=%s clOrdID=%s orderID=%s retry=%s error=%s",
-                        method.upper(),
-                        path,
-                        client_order_id or "-",
-                        endpoint_order_id or "-",
-                        retry,
-                        _compact_error(exc),
+                    self._record_rest_audit_failure(
+                        method=method,
+                        path=path,
+                        client_order_id=client_order_id,
+                        endpoint_order_id=endpoint_order_id,
+                        retry=retry,
+                        exc=exc,
                     )
                     return
+
+    def _record_rest_audit_failure(
+        self,
+        *,
+        method: str,
+        path: str,
+        client_order_id: str | None,
+        endpoint_order_id: str | None,
+        retry: int,
+        exc: BaseException,
+    ) -> None:
+        error = _compact_error(exc)
+        self.rest_audit_errors.append(
+            (
+                f"method={method.upper()} path={path} "
+                f"clOrdID={client_order_id or '-'} orderID={endpoint_order_id or '-'} "
+                f"retry={retry} error={error}"
+            )
+        )
+        _LOGGER.warning(
+            "rest call audit persistence failed method=%s path=%s clOrdID=%s orderID=%s retry=%s error=%s",
+            method.upper(),
+            path,
+            client_order_id or "-",
+            endpoint_order_id or "-",
+            retry,
+            error,
+        )
 
     def _ticker(self) -> _Ticker:
         payload = self._request("GET", f"/tickers/{self.symbol}")

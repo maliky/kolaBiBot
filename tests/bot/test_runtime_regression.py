@@ -45,6 +45,39 @@ def test_demo_ada_strategy_parsed_and_planned_on_active_runtime() -> None:
     assert first.request is not None
 
 
+def test_bot_service_keeps_audit_and_telemetry_lanes_off_account_db(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_KEY", "k")
+    monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_SECRET", "s")
+    account_db_url = f"sqlite:///{tmp_path / 'account.sqlite'}"
+    audit_db_url = f"sqlite:///{tmp_path / 'audit.sqlite'}"
+    telemetry_db_url = f"sqlite:///{tmp_path / 'telemetry.sqlite'}"
+    service = BotService(
+        BotConfig(
+            symbol="PI_XBTUSD",
+            exchange="kraken",
+            require_ready=False,
+            account_db_url=account_db_url,
+            audit_db_url=audit_db_url,
+            telemetry_db_url=telemetry_db_url,
+            account_scope="advers",
+        ),
+        indicators=DummyIndicatorClient({"ma": 42}),
+    )
+
+    assert service._account_db_url == account_db_url
+    assert service._audit_db_url == audit_db_url
+    assert service._telemetry_db_url == telemetry_db_url
+    service._ensure_exchange_config()
+
+    assert service.exchange_config is not None
+    assert service.exchange_config.adapter_kwargs["account_db_url"] == account_db_url
+    assert service.exchange_config.adapter_kwargs["audit_db_url"] == audit_db_url
+    assert service.exchange_config.adapter_kwargs["account_scope"] == "advers"
+
+
 def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) -> None:
     class FakeKrakenAdapter:
         def __init__(self, **kwargs) -> None:

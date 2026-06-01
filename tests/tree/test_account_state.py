@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
+import pytest
 from kolabi.shared.persistence import (
     AccountBalance,
     AccountPosition,
@@ -820,6 +821,25 @@ def test_critical_mirror_config_uses_short_sqlite_timeout() -> None:
     assert mirror.sqlite_busy_timeout_seconds == 0.5
 
 
+def test_reconciler_status_write_failure_is_fail_open(caplog) -> None:
+    class _Store:
+        def record_connection_status(self, *args, **kwargs) -> None:
+            raise RuntimeError("status lane locked")
+
+    class _Reconciler:
+        store = _Store()
+
+    with caplog.at_level(logging.WARNING):
+        account_module._record_reconciler_error_status(
+            _Reconciler(),
+            RuntimeError("snapshot lane locked"),
+            logging.getLogger("kola"),
+        )
+
+    assert "rest_reconcile status write skipped" in caplog.text
+    assert "snapshot lane locked" in caplog.text
+
+
 def test_private_ingest_mirror_skips_sqlite_lock(caplog) -> None:
     class _LockedStore:
         def ingest_message(self, *args, **kwargs):
@@ -1293,7 +1313,13 @@ def test_main_handles_ctrl_c_as_clean_stop(tmp_path, monkeypatch, capsys):
     )
 
     result = account_module.main(
-        ["run", "--db-url", db_url, "--critical-db-url", critical_db_url]
+        [
+            "run",
+            "--account-db-url",
+            db_url,
+            "--critical-db-url",
+            critical_db_url,
+        ]
     )
 
     assert result == 0
@@ -1303,6 +1329,31 @@ def test_main_handles_ctrl_c_as_clean_stop(tmp_path, monkeypatch, capsys):
     )
     status = store.latest_status("private_ws")
     assert status["status"] == "stopped"
+
+
+def test_account_parser_uses_critical_db_url_only() -> None:
+    parser = account_module.build_parser()
+
+    args = parser.parse_args(
+        [
+            "run",
+            "--account-db-url",
+            "sqlite:///account.sqlite",
+            "--critical-db-url",
+            "sqlite:///critical.sqlite",
+        ]
+    )
+
+    assert args.db_url == "sqlite:///account.sqlite"
+    assert args.critical_db_url == "sqlite:///critical.sqlite"
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "run",
+                "--critical-account-db-url",
+                "sqlite:///critical.sqlite",
+            ]
+        )
 
 
 def test_map_balances_and_positions_are_persisted(tmp_path):
@@ -1414,6 +1465,86 @@ def test_changed_balance_snapshot_bypasses_throttle(tmp_path):
         rows = session.execute(select(AccountBalance)).scalars().all()
     assert len(rows) == 2
     assert len(changed["balances"]) == 1
+
+
+def test_default_balance_snapshot_throttle_is_longer_than_positions() -> None:
+    assert AccountStreamConfig.balance_write_min_interval_seconds == 300.0
+    assert AccountStreamConfig.position_write_min_interval_seconds == 60.0
+
+
+def test_balance_assets_are_normalized_and_payloads_are_compact(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    received_at = datetime(2026, 5, 30, 1, 0, tzinfo=timezone.utc)
+
+    result = store.ingest_message(
+        {
+            "feed": "balances",
+            "account": "A1",
+            "holding": {"xbt": 0.25},
+            "flex_futures": {
+                "currencies": {
+                    "usd": {
+                        "available_balance": 5000.0,
+                        "balance_value": 5001.0,
+                        "large_unused_field": "x" * 1000,
+                    }
+                }
+            },
+        },
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=received_at,
+    )
+
+    with Session(store.engine) as session:
+        rows = (
+            session.execute(select(AccountBalance).order_by(AccountBalance.asset.asc()))
+            .scalars()
+            .all()
+        )
+    assert {row.asset for row in rows} == {"USD", "XBT"}
+    assert {balance.asset for balance in result["balances"]} == {"USD", "XBT"}
+    for row in rows:
+        assert row.raw_payload["asset"] == row.asset
+        assert "holding" not in row.raw_payload
+        assert "flex_futures" not in row.raw_payload
+
+
+def test_zero_balance_noise_is_skipped_until_nonzero_transition(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    first_at = datetime(2026, 5, 30, 1, 0, tzinfo=timezone.utc)
+
+    first = store.ingest_message(
+        {"feed": "balances", "holding": {"USD": 0.0}},
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at,
+    )
+    second = store.ingest_message(
+        {"feed": "balances", "holding": {"USD": 10.0}},
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at + timedelta(seconds=1),
+    )
+    third = store.ingest_message(
+        {"feed": "balances", "holding": {"USD": 0.0}},
+        stream_kind="private_ws_account",
+        is_critical=False,
+        received_at=first_at + timedelta(seconds=2),
+    )
+
+    with Session(store.engine) as session:
+        rows = (
+            session.execute(select(AccountBalance).order_by(AccountBalance.id.asc()))
+            .scalars()
+            .all()
+        )
+    assert len(first["balances"]) == 0
+    assert len(second["balances"]) == 1
+    assert len(third["balances"]) == 1
+    assert [row.total for row in rows] == [10.0, 0.0]
 
 
 def test_unchanged_position_snapshots_are_throttled(tmp_path):

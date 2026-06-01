@@ -293,6 +293,81 @@ Private DB update
   -> CommandConfirmation / PairEvent
      -> back to Chronos
 #+end_src
+
+** TODO Multi-instrument TSV support on one platform
+
+Goal: allow one TSV file to contain several instruments while keeping one platform per bot run.
+
+Current state:
+- =kolabi.bot run= receives one global =--exchange=, =--environment=, and =--symbol=.
+- Every TSV row becomes an =OrderPairSpec= without its own symbol.
+- =BotService= validates one instrument and =StrategyRuntime= polls public/private state for one symbol.
+- Commands already carry a symbol, but today that symbol is filled from the global runtime symbol.
+
+Target design:
+- Keep one platform per process: one =exchange=, =environment=, =market_type=, and =account_scope=.
+- Add optional TSV column =symbol= after =hook=.
+- If =symbol= is empty or absent, use CLI =--symbol= for backward compatibility.
+- Each pair has an effective symbol before runtime starts.
+- Pair name stays the logical identity and must remain unique across the whole TSV.
+
+Pure model changes:
+- Add =symbol: str | None = None= to =OrderPairSpec=.
+- Keep =Chronos=, =Isis=, and =step_pair()= pure and narrow.
+- Do not put exchange routing or DB lookup logic in reducers.
+- Events and commands should carry the pair effective symbol at the runtime boundary.
+
+TSV parser changes:
+- Accept both old and new TSV headers.
+- Old header:
+  =name tps_run essais tOut pause side oType oDelta tType tDelta atype quantity tp prix hook=
+- New header:
+  =name tps_run essais tOut pause side oType oDelta tType tDelta atype quantity tp prix hook symbol=
+- Blank =symbol= means use the run default.
+- Parser tests must cover old files, new files, and blank symbol fallback.
+
+Runtime changes:
+- =BotService= materializes pair symbols before validation and runtime creation.
+- Startup readiness checks public market freshness for every symbol used in the strategy.
+- Private websocket readiness remains platform-level.
+- Public source groups active pairs by symbol and calls =fetch_market_state(symbol)= once per symbol per poll tick.
+- Market events use the pair symbol.
+- Private polling keeps independent order/fill cursors per symbol so one active symbol cannot advance the cursor past another symbol's rows.
+- Private record matching requires order identity and symbol.
+
+Ogun/exchange boundary:
+- Commands already carry =command.symbol=; this becomes authoritative.
+- Replace the single-symbol adapter port with a one-platform symbol router.
+- =SymbolRoutingExchangePort= caches one existing adapter per symbol using the same credentials, base URL, environment, and DB URLs.
+- Ogun remains unchanged and receives one =ExchangePort=.
+- The router chooses the per-symbol adapter for place, amend, and cancel commands.
+
+Validation:
+- Validate Kraken instrument rules per distinct symbol.
+- Minimum quantity checks use the row symbol.
+- Tick size used by tail tracking and rounding must come from the row symbol.
+- If public DB has no fresh snapshot for a TSV symbol, fail startup with a clear list of missing or stale symbols.
+
+Operational requirement:
+- Public market ingestion must already run for every symbol used in the TSV.
+- This can be one poller per symbol now.
+- A future multi-symbol public poller is useful but not required for this step.
+
+Tests:
+- Old TSV without =symbol= parses unchanged.
+- TSV with =symbol= stores pair-specific symbols.
+- Duplicate pair names are rejected even if symbols differ.
+- Two latent pairs on different symbols trigger two public reads.
+- Commands emitted for each pair carry the pair-specific symbol.
+- Private fills/orders from the wrong symbol do not close or amend a pair.
+- Tail placement and tail amendments use reference prices and tick size from the pair symbol.
+- Symbol router dispatches =PI_XBTUSD= and =PI_ETHUSD= commands to separate symbol-bound adapters.
+
+Non-goals:
+- No cross-platform arbitrage yet.
+- No TSV =exchange= or =environment= columns yet.
+- No cross-symbol price formula yet.
+- No exchange logic inside =Isis= or =step_pair()=.
 ** DONE 6. Corrected metaphor table
    CLOSED: [2026-05-19 mar. 20:51]
 
@@ -621,16 +696,56 @@ Demo and live databases are separated. Public and private databases are also sep
 
 | Purpose      | Demo DB                         | Live DB                         |
 |--------------+----------------------------------+----------------------------------|
-| Public book  | sqlite:///pub-futures-demo.sqlite | sqlite:///pub-futures-live.sqlite |
-| Private data | sqlite:///prv-futures-demo.sqlite | sqlite:///prv-futures-live.sqlite |
+| Public book  | sqlite:///db/pub-futures-demo-PI_XBTUSD.sqlite | sqlite:///db/pub-futures-live-PI_XBTUSD.sqlite |
+| Private data | sqlite:///db/prv-futures-demo.sqlite | sqlite:///db/prv-futures-live.sqlite |
+| Critical private data | sqlite:///db/prv-futures-demo-critical.sqlite | sqlite:///db/prv-futures-live-critical.sqlite |
 
 The public service stores market-book snapshots.
+Public DB files are instrument-scoped. For example, =PI_ADAUSD= defaults to =sqlite:///db/pub-futures-demo-PI_ADAUSD.sqlite=.
 The private service stores orders, fills, balances, positions, margin fields, and connection health.
+Private DB files are account-scope scoped, not instrument-scoped. =--account-scope= is the logical account/persona label stored with private rows, for example =default= or =advers=.
+Bot-side REST audit and tail telemetry use separate low-priority lanes so they cannot lock the private account DB during order/fill lifecycle decisions:
+
+| Lane       | Default demo URL                                      | Purpose                                        |
+|------------+-------------------------------------------------------+------------------------------------------------|
+| Audit      | sqlite:///db/audit-futures-demo-default.sqlite        | Forensic REST send/amend/cancel audit rows     |
+| Telemetry  | sqlite:///db/telemetry-futures-demo-default.sqlite    | Bot tail metrics and non-critical diagnostics  |
+
+The runtime flags are =--audit-db-url= and =--telemetry-db-url=. These lanes are not platform truth. If they are locked or unavailable, exchange commands and lifecycle state must continue.
+
+** Queued writer option
+
+If SQLite lock contention persists under multi-pair stress, the next SQLite step is a per-lane queued writer: one writer thread owns one SQLAlchemy sessionmaker per DB lane, producers enqueue immutable row payloads, and the writer flushes batches in order. This keeps Chronos/Ogun non-blocking and preserves the functional boundary because reducers still emit values, not DB side effects.
+
+** PostgreSQL persistence replacement plan
+
+PostgreSQL is the preferred backend for long-running concurrent bots and multi-account tests. It removes SQLite's single-writer file lock and lets the current SQLAlchemy models use normal multi-connection transactions. It does not remove the need for lane separation: critical lifecycle truth, broad account state, audit, and telemetry should remain logically separated so low-priority writes cannot obscure operator reasoning.
+
+Local Docker target:
+
+#+begin_src bash
+docker run --name kolabi-postgres \
+  -e POSTGRES_USER=kolabi \
+  -e POSTGRES_PASSWORD=kolabi \
+  -e POSTGRES_DB=kolabi \
+  -p 5432:5432 \
+  -v kolabi-postgres-data:/var/lib/postgresql/data \
+  -d postgres:16
+#+end_src
+
+Repository integration plan:
+- Add an optional =docker-compose.postgres.yml= with the same credentials and volume.
+- Add =psycopg[binary]= to the development/runtime dependency set used for SQLAlchemy PostgreSQL URLs.
+- Keep the existing URL flags unchanged: =--market-db-url=, =--account-db-url=, =--critical-db-url=, =--audit-db-url=, and =--telemetry-db-url=.
+- Use URL examples like =postgresql+psycopg://kolabi:kolabi@localhost:5432/kolabi= for all lanes during the first pass; later split schemas if operational clarity requires it.
+- Initialise tables through the existing SQLAlchemy metadata path before running feeders. No behavioural migration is required for an empty test DB.
+- Smoke test sequence: start PostgreSQL, start public feeder with a PostgreSQL =--db-url=, start private feeder with PostgreSQL =--account-db-url= and =--critical-db-url=, run =rep_xbt.tsv= with PostgreSQL audit/telemetry URLs, then compare lifecycle logs and row counts against the SQLite run.
+- Acceptance: no =database is locked= errors, order/fill lifecycle still comes from the critical private lane, audit failures remain non-fatal, and existing SQLite defaults still work for local smoke tests.
 
 Local inspection commands:
 #+BEGIN_SRC bash  -i
 # list tables
-sqlite3 pub-futures-demo.sqlite '.tables'
+sqlite3 db/pub-futures-demo-PI_XBTUSD.sqlite '.tables'
 #+END_SRC
 
 #+RESULTS:
@@ -642,7 +757,7 @@ sqlite3 pub-futures-demo.sqlite '.tables'
 
 #+begin_src bash
 # inspect all cached instrument rules
-sqlite3 pub-futures-demo.sqlite \
+sqlite3 db/pub-futures-demo-PI_XBTUSD.sqlite \
   "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments ORDER BY symbol;"
 #+end_src
 
@@ -652,7 +767,7 @@ sqlite3 pub-futures-demo.sqlite \
 
 #+BEGIN_SRC bash  -i
 # inspect one instrument
-sqlite3 pub-futures-demo.sqlite \
+sqlite3 db/pub-futures-demo-PI_XBTUSD.sqlite \
   "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments WHERE symbol = 'PI_XBTUSD';"
 #+END_SRC
 
@@ -666,6 +781,12 @@ sqlite3 pub-futures-demo.sqlite \
   python -m kolabi.tree.kraken run --pair PI_XBTUSD --environment demo
   # Start the private account/order DB service:
   python -m kolabi.tree.account run --environment demo
+  # Or manage background DB feeders through the helper:
+  scripts/kolabidb public start --pair PI_XBTUSD
+  scripts/kolabidb private start
+  scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  scripts/kolabidb private status
+  scripts/kolabidb private logs
   # Check strategy readiness against both DBs:
   python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo
 
@@ -731,4 +852,3 @@ python -m kolabi.bot run --strategy Orders/pi_xbtusd_sell_plus1_tail_0p5.tsv --e
  | =spot-margin-costs= | get Spot pair leverage/margin metadata, plus margin-fee warning |
  | =futures-costs=     | get Futures maker/taker schedule, funding, margin parameters    |
  | =costs=             | compare Spot and Futures for one logical asset pair             |
-

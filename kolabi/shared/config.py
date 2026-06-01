@@ -62,6 +62,7 @@ _DEFAULTS: Dict[str, Dict[str, Any]] = {
             "timeout": "KRAKEN_FUTURE_TIMEOUT",
             "account_db_url": "KRAKEN_FUTURE_ACCOUNT_DB_URL",
             "public_db_url": "KRAKEN_FUTURE_PUBLIC_DB_URL",
+            "audit_db_url": "KRAKEN_FUTURE_AUDIT_DB_URL",
         },
     },
 }
@@ -111,12 +112,18 @@ def load_exchange_config(
 
     key = overrides.pop("api_key", None)
     secret = overrides.pop("api_secret", None)
+    key_var_override = overrides.pop("api_key_env", None)
+    secret_var_override = overrides.pop("api_secret_env", None)
 
     if not key:
-        key_var = defaults["test_key_var"] if testnet else defaults["key_var"]
+        key_var = key_var_override or (
+            defaults["test_key_var"] if testnet else defaults["key_var"]
+        )
         key = env_mapping.get(key_var) or ""
     if not secret:
-        secret_var = defaults["test_secret_var"] if testnet else defaults["secret_var"]
+        secret_var = secret_var_override or (
+            defaults["test_secret_var"] if testnet else defaults["secret_var"]
+        )
         secret = env_mapping.get(secret_var) or ""
 
     if not key or not secret:

@@ -45,7 +45,7 @@ JsonDictT = dict[str, Any]
 class AccountStreamConfig:
     """Configuration de la memoire privee ordre/compte."""
 
-    db_url: str = "sqlite:///prv-futures-demo.sqlite"
+    db_url: str = "sqlite:///db/prv-futures-demo.sqlite"
     critical_db_url: str | None = None
     exchange: str = "kraken"
     environment: str = "demo"
@@ -80,8 +80,8 @@ class AccountStreamConfig:
     account_batch_max_wait_seconds: float = 0.35
     queue_maxsize: int = 5000
     rest_reconcile_seconds: float = 10.0
-    balance_write_min_interval_seconds: float = 30.0
-    position_write_min_interval_seconds: float = 30.0
+    balance_write_min_interval_seconds: float = 300.0
+    position_write_min_interval_seconds: float = 60.0
     sqlite_busy_timeout_seconds: float = 30.0
     critical_mirror_busy_timeout_seconds: float = 1.0
     raw_retention_minutes: int = 1440
@@ -469,6 +469,7 @@ class AccountStateStore:
                         session,
                         balance,
                         now=now,
+                        skip_zero_noop=True,
                     )
                     if inserted:
                         persisted_balances.append(balance)
@@ -591,6 +592,7 @@ class AccountStateStore:
                             session,
                             balance,
                             now=queued.received_at,
+                            skip_zero_noop=True,
                         )
                         if inserted:
                             persisted_balances.append(balance)
@@ -807,8 +809,13 @@ class AccountStateStore:
         balance: BalanceWrite,
         *,
         now: datetime,
-    ) -> tuple[AccountBalance, bool]:
+        skip_zero_noop: bool = False,
+    ) -> tuple[AccountBalance | None, bool]:
+        balance = _normalise_balance_write(balance)
         previous = self._latest_balance_in_session(session, balance.asset)
+        if skip_zero_noop and _is_null_balance(balance):
+            if previous is None or _account_balance_is_null(previous):
+                return previous, False
         if previous is not None and not _balance_snapshot_should_write(
             previous,
             balance,
@@ -1282,6 +1289,8 @@ class AccountStateStore:
         now = datetime.now(timezone.utc)
         with self.sessionmaker() as session:
             row, _inserted = self._record_balance_in_session(session, balance, now=now)
+            if row is None:
+                raise RuntimeError("balance write skipped without a previous row")
             session.commit()
             return row
 
@@ -1913,6 +1922,39 @@ def stream_kind_uses_critical_db(stream_kind: str) -> bool:
     return stream_kind in {"private_ws", "private_ws_critical"}
 
 
+def _compact_exception_text(exc: BaseException, *, limit: int = 500) -> str:
+    """Return a bounded exception string for DB status rows and logs."""
+
+    text = str(exc).replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}..."
+
+
+def _record_reconciler_error_status(
+    rest_reconciler: Any,
+    exc: BaseException,
+    logger: logging.Logger,
+) -> None:
+    """Best-effort status write that must never kill the reconciler loop."""
+
+    store = getattr(rest_reconciler, "store", None)
+    if store is None:
+        return
+    try:
+        store.record_connection_status(
+            "rest_reconciler",
+            "error",
+            last_error=_compact_exception_text(exc),
+        )
+    except Exception as status_exc:
+        logger.warning(
+            "kraken_account rest_reconcile status write skipped original=%s status_error=%s",
+            _compact_exception_text(exc),
+            _compact_exception_text(status_exc),
+        )
+
+
 async def run_private_stream_group(
     streams: tuple[KrakenFuturesPrivateStream, ...],
     *,
@@ -1949,17 +1991,11 @@ async def run_private_stream_group(
             except asyncio.CancelledError:
                 return None
             except Exception as exc:
-                store = getattr(rest_reconciler, "store", None)
-                if store is not None:
-                    store.record_connection_status(
-                        "rest_reconciler",
-                        "error",
-                        last_error=str(exc),
-                    )
+                _record_reconciler_error_status(rest_reconciler, exc, logger)
                 logger.warning(
                     "kraken_account rest_reconcile failed interval=%ss error=%s",
                     f"{interval:.1f}",
-                    exc,
+                    _compact_exception_text(exc),
                 )
             except BaseException as exc:  # pragma: no cover - defensive shutdown.
                 return exc
@@ -2037,17 +2073,11 @@ def run_private_stream_group_threaded(
                     f"{interval:.1f}",
                 )
             except Exception as exc:
-                store = getattr(rest_reconciler, "store", None)
-                if store is not None:
-                    store.record_connection_status(
-                        "rest_reconciler",
-                        "error",
-                        last_error=str(exc),
-                    )
+                _record_reconciler_error_status(rest_reconciler, exc, logger)
                 logger.warning(
                     "kraken_account rest_reconcile failed interval=%ss error=%s",
                     f"{interval:.1f}",
-                    exc,
+                    _compact_exception_text(exc),
                 )
 
     reconcile_thread = threading.Thread(
@@ -2317,6 +2347,29 @@ def map_fill_event(payload: JsonMapT) -> FillEvent:
     )
 
 
+def _normalise_asset(asset: object) -> str:
+    return str(asset).strip().upper()
+
+
+def _compact_balance_payload(
+    message: JsonMapT,
+    *,
+    asset: str,
+    source: str,
+    value: object,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "feed": str(message.get("feed") or "unknown"),
+        "asset": asset,
+        "source": source,
+        "value": dict(value) if isinstance(value, Mapping) else value,
+    }
+    for key in ("account", "timestamp", "time"):
+        if key in message:
+            payload[key] = cast(object, message[key])
+    return payload
+
+
 def map_balances(message: JsonMapT) -> list[BalanceWrite]:
     """Mappe le feed balances vers des soldes normalises."""
     source_time = parse_kraken_time(message.get("timestamp"))
@@ -2325,14 +2378,20 @@ def map_balances(message: JsonMapT) -> list[BalanceWrite]:
         container = message.get(container_key)
         if isinstance(container, Mapping):
             for asset, value in container.items():
+                asset_name = _normalise_asset(asset)
                 container_total = as_float(value)
                 rows.append(
                     BalanceWrite(
-                        asset=str(asset),
+                        asset=asset_name,
                         available=container_total,
                         locked=0.0,
                         total=container_total,
-                        raw_payload=dict(message),
+                        raw_payload=_compact_balance_payload(
+                            message,
+                            asset=asset_name,
+                            source=container_key,
+                            value=value,
+                        ),
                         source_timestamp=source_time,
                     )
                 )
@@ -2343,6 +2402,7 @@ def map_balances(message: JsonMapT) -> list[BalanceWrite]:
             for asset, value in currencies.items():
                 if not isinstance(value, Mapping):
                     continue
+                asset_name = _normalise_asset(asset)
                 available = first_float(value, "available_balance", "availableBalance")
                 if available is None:
                     available = first_float(value, "balance_value", "balanceValue")
@@ -2352,11 +2412,16 @@ def map_balances(message: JsonMapT) -> list[BalanceWrite]:
                 locked = max(total - (available or 0.0), 0.0)
                 rows.append(
                     BalanceWrite(
-                        asset=str(asset),
+                        asset=asset_name,
                         available=available or 0.0,
                         locked=locked,
                         total=total,
-                        raw_payload=dict(message),
+                        raw_payload=_compact_balance_payload(
+                            message,
+                            asset=asset_name,
+                            source="flex_futures.currencies",
+                            value=value,
+                        ),
                         source_timestamp=source_time,
                     )
                 )
@@ -2383,13 +2448,19 @@ def map_rest_balances(payload: JsonMapT) -> list[BalanceWrite]:
             rows.extend(map_rest_balance_entry(asset, value))
             continue
         scalar_total = as_float(value)
+        asset_name = _normalise_asset(asset)
         rows.append(
             BalanceWrite(
-                asset=str(asset),
+                asset=asset_name,
                 available=scalar_total,
                 locked=0.0,
                 total=scalar_total,
-                raw_payload=dict(payload),
+                raw_payload=_compact_balance_payload(
+                    payload,
+                    asset=asset_name,
+                    source="accounts",
+                    value=value,
+                ),
             )
         )
     return rows
@@ -2408,14 +2479,20 @@ def map_rest_balance_entry(asset_key: object, payload: JsonMapT) -> list[Balance
     source_time = parse_kraken_time(first_present(payload, "timestamp", "time"))
     if isinstance(holding, Mapping):
         for asset, value in holding.items():
+            asset_name = _normalise_asset(asset)
             holding_total = as_float(value)
             rows.append(
                 BalanceWrite(
-                    asset=str(asset),
+                    asset=asset_name,
                     available=holding_total,
                     locked=0.0,
                     total=holding_total,
-                    raw_payload=dict(payload),
+                    raw_payload=_compact_balance_payload(
+                        payload,
+                        asset=asset_name,
+                        source="accounts.holding",
+                        value=value,
+                    ),
                     source_timestamp=source_time,
                 )
             )
@@ -2423,7 +2500,7 @@ def map_rest_balance_entry(asset_key: object, payload: JsonMapT) -> list[Balance
     auxiliary = payload.get("auxiliary")
     auxiliary_payload = auxiliary if isinstance(auxiliary, Mapping) else {}
     unit = optional_str(first_present(payload, "unit", "currency"))
-    settlement_asset = unit or str(asset_key)
+    settlement_asset = _normalise_asset(unit or asset_key)
     total = first_float(
         payload,
         "balance",
@@ -2459,7 +2536,12 @@ def map_rest_balance_entry(asset_key: object, payload: JsonMapT) -> list[Balance
                 available=safe_available,
                 locked=max(safe_total - safe_available, 0.0),
                 total=safe_total,
-                raw_payload=dict(payload),
+                raw_payload=_compact_balance_payload(
+                    payload,
+                    asset=settlement_asset,
+                    source="accounts.entry",
+                    value=payload,
+                ),
                 source_timestamp=source_time,
             )
         )
@@ -2687,6 +2769,14 @@ def parse_kraken_time(value: object) -> datetime | None:
 def _is_null_balance(balance: BalanceWrite) -> bool:
     """Treat fully zero balances as null-noise for log emission."""
     return balance.available == 0.0 and balance.locked == 0.0 and balance.total == 0.0
+
+
+def _account_balance_is_null(balance: AccountBalance) -> bool:
+    return balance.available == 0.0 and balance.locked == 0.0 and balance.total == 0.0
+
+
+def _normalise_balance_write(balance: BalanceWrite) -> BalanceWrite:
+    return replace(balance, asset=_normalise_asset(balance.asset))
 
 
 def _balance_snapshot_should_write(
@@ -3007,9 +3097,14 @@ def build_parser() -> argparse.ArgumentParser:
             description=command_help[command],
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
-        cmd.add_argument("--db-url", help="Private SQLite database URL.")
+        cmd.add_argument(
+            "--account-db-url",
+            dest="db_url",
+            help="Private account SQLite database URL.",
+        )
         cmd.add_argument(
             "--critical-db-url",
+            dest="critical_db_url",
             help=(
                 "Critical private SQLite database URL for open_orders/fills. "
                 "Defaults from Kraken Futures environment."

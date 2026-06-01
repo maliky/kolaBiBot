@@ -37,10 +37,44 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
         help="Optional private account DB URL. Defaults from Kraken Futures environment.",
     )
     parser.add_argument(
-        "--critical-account-db-url",
+        "--critical-db-url",
+        dest="critical_account_db_url",
         help=(
             "Optional critical private DB URL for order/fill lifecycle. "
             "Defaults from Kraken Futures environment."
+        ),
+    )
+    parser.add_argument(
+        "--audit-db-url",
+        help=(
+            "Optional REST audit DB URL. Defaults to "
+            "sqlite:///db/audit-futures-<env>-<account-scope>.sqlite."
+        ),
+    )
+    parser.add_argument(
+        "--telemetry-db-url",
+        help=(
+            "Optional bot telemetry DB URL. Defaults to "
+            "sqlite:///db/telemetry-futures-<env>-<account-scope>.sqlite."
+        ),
+    )
+    parser.add_argument(
+        "--account-scope",
+        default="default",
+        help="Logical account/persona label used for account-scoped persistence lanes.",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        help=(
+            "Environment variable name containing the exchange API key. "
+            "Use this to select a second account without passing the secret value."
+        ),
+    )
+    parser.add_argument(
+        "--api-secret-env",
+        help=(
+            "Environment variable name containing the exchange API secret. "
+            "Use this to select a second account without passing the secret value."
         ),
     )
     parser.add_argument(
@@ -138,7 +172,7 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--tOut",
         "-O",
-        type=int,
+        type=float,
         default=None,
         help="Validation timeout in minutes for the main order lifecycle.",
     )
@@ -268,6 +302,11 @@ def build_service(args: argparse.Namespace) -> BotService:
             market_db_url=args.market_db_url,
             account_db_url=args.account_db_url,
             critical_account_db_url=getattr(args, "critical_account_db_url", None),
+            audit_db_url=getattr(args, "audit_db_url", None),
+            telemetry_db_url=getattr(args, "telemetry_db_url", None),
+            account_scope=getattr(args, "account_scope", "default"),
+            api_key_env=getattr(args, "api_key_env", None),
+            api_secret_env=getattr(args, "api_secret_env", None),
             require_ready=not args.skip_ready_check,
             ready_timeout_seconds=args.ready_timeout_seconds,
             ready_poll_seconds=args.ready_poll_seconds,
@@ -349,6 +388,14 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_parser.add_argument(
         "--account-db-url",
         help="Optional private account DB URL. Defaults from Kraken Futures environment.",
+    )
+    preflight_parser.add_argument(
+        "--critical-db-url",
+        dest="critical_account_db_url",
+        help=(
+            "Optional critical private DB URL for order/fill lifecycle. "
+            "Defaults from Kraken Futures environment."
+        ),
     )
     preflight_parser.add_argument(
         "--ready-timeout-seconds",

@@ -45,7 +45,12 @@ from kolabi.shared.core.runtime_types import (
     Symbol,
 )
 from kolabi.shared.exchanges import get_adapter
-from kolabi.shared.kraken_futures import kraken_futures_environment
+from kolabi.shared.kraken_futures import (
+    kraken_futures_audit_db_url,
+    kraken_futures_environment,
+    kraken_futures_public_db_url,
+    kraken_futures_telemetry_db_url,
+)
 from kolabi.shared.logging import setup_logging
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntimeState
 
@@ -99,6 +104,11 @@ class BotConfig:
     market_db_url: Optional[str] = None
     account_db_url: Optional[str] = None
     critical_account_db_url: Optional[str] = None
+    audit_db_url: Optional[str] = None
+    telemetry_db_url: Optional[str] = None
+    account_scope: str = "default"
+    api_key_env: Optional[str] = None
+    api_secret_env: Optional[str] = None
     require_ready: bool = True
     ready_timeout_seconds: float = 45.0
     ready_poll_seconds: float = 1.0
@@ -127,17 +137,31 @@ class BotService:
         market_db_url = config.market_db_url
         account_db_url = config.account_db_url
         critical_account_db_url = config.critical_account_db_url
+        audit_db_url = config.audit_db_url
+        telemetry_db_url = config.telemetry_db_url
         if config.exchange.lower() == "kraken":
             env_cfg = kraken_futures_environment(config.environment)
-            market_db_url = market_db_url or env_cfg.public_db_url
+            market_db_url = market_db_url or kraken_futures_public_db_url(
+                config.environment,
+                config.symbol,
+            )
             account_db_url = account_db_url or env_cfg.private_db_url
             critical_account_db_url = (
                 critical_account_db_url or env_cfg.critical_private_db_url
             )
+            audit_db_url = audit_db_url or kraken_futures_audit_db_url(
+                config.environment,
+                config.account_scope,
+            )
+            telemetry_db_url = telemetry_db_url or kraken_futures_telemetry_db_url(
+                config.environment,
+                config.account_scope,
+            )
         self.indicators: IndicatorClient = indicators or (
             KrakenDbIndicatorClient(
                 # > should probably use global constant here instead of string
-                db_url=market_db_url or "sqlite:///pub-futures-demo.sqlite",
+                db_url=market_db_url
+                or kraken_futures_public_db_url(config.environment, config.symbol),
                 environment=config.environment,
                 # > Same here for the moment we swith to spot
                 market_type="futures",
@@ -155,6 +179,8 @@ class BotService:
         self._account_db_url = account_db_url
         self._critical_account_db_url = critical_account_db_url
         self._market_db_url = market_db_url
+        self._audit_db_url = audit_db_url
+        self._telemetry_db_url = telemetry_db_url
         self.runtime_state: KrakenRuntimeStateClient | None = None
         if (
             config.exchange.lower() == "kraken"
@@ -278,13 +304,18 @@ class BotService:
             ),
             tail_telemetry_writer=(
                 None
-                if simulate or self._account_db_url is None
-                else TailTelemetryRecorder(PersistenceConfig(self._account_db_url))
+                if dry_run or simulate or self._telemetry_db_url is None
+                else TailTelemetryRecorder(
+                    PersistenceConfig(
+                        self._telemetry_db_url,
+                        sqlite_busy_timeout_seconds=0.5,
+                    )
+                )
             ),
             exchange=self.config.exchange.lower(),
             environment=self.config.environment,
             market_type="futures",
-            account_scope="default",
+            account_scope=self.config.account_scope,
             tail_visibility_timeout_seconds=self.config.tail_visibility_timeout_seconds,
             max_active_pairs=self.config.max_active_pairs,
             simulate=simulate,
@@ -394,11 +425,23 @@ class BotService:
             self.config.exchange,
             symbol=self.config.symbol,
             environment=self.config.environment,
+            api_key_env=self.config.api_key_env,
+            api_secret_env=self.config.api_secret_env,
         )
-        if self._market_db_url is not None:
-            self.exchange_config.adapter_kwargs.setdefault("public_db_url", self._market_db_url)
-        if self._account_db_url is not None:
-            self.exchange_config.adapter_kwargs.setdefault("account_db_url", self._account_db_url)
+        if self.config.exchange.lower() == "kraken":
+            if self._market_db_url is not None:
+                self.exchange_config.adapter_kwargs["public_db_url"] = (
+                    self._market_db_url
+                )
+            if self._account_db_url is not None:
+                self.exchange_config.adapter_kwargs["account_db_url"] = (
+                    self._account_db_url
+                )
+            if self._audit_db_url is not None:
+                self.exchange_config.adapter_kwargs["audit_db_url"] = self._audit_db_url
+            self.exchange_config.adapter_kwargs["account_scope"] = (
+                self.config.account_scope
+            )
 
     def _build_admin_port(self) -> AdapterExchangePort:
         self._ensure_exchange_config()
@@ -415,8 +458,16 @@ class BotService:
     def cancel_all_orders(self) -> list[OrderAck]:
         """Cancel all currently visible open/trigger orders via bot execution path."""
         port = self._build_admin_port()
+        cancelled, _cancel_errors = self._cancel_all_orders_with_port(port)
+        return cancelled
+
+    def _cancel_all_orders_with_port(
+        self,
+        port: AdapterExchangePort,
+    ) -> tuple[list[OrderAck], list[dict[str, str]]]:
         executor = OgunExecutor(port)
         cancelled: list[OrderAck] = []
+        cancel_errors: list[dict[str, str]] = []
         seen: set[str] = set()
         for order in _safe_cancel_order_candidates(cast(OpenOrderReader, port.adapter)):
             identity = _extract_cancelable_order_id(order)
@@ -437,19 +488,24 @@ class BotService:
             )
             try:
                 cancelled.append(asyncio.run(executor.execute(command)))
-            except Exception:
+            except Exception as exc:
+                cancel_errors.append({"order_id": key, "error": _compact_admin_error(exc)})
                 continue
-        return cancelled
+        return cancelled, cancel_errors
 
     def close_all_orders(self) -> dict[str, object]:
         """Cancel all orders then close residual position through the bot boundary."""
         port = self._build_admin_port()
-        cancelled = self.cancel_all_orders()
+        cancelled, cancel_errors = self._cancel_all_orders_with_port(port)
         position_before = port.adapter.get_position()
         qty_before = float(position_before.qty)
         close_ack: OrderAck | None = None
+        close_action = "skipped_no_position"
+        close_skipped_reason: str | None = "no_position"
         if qty_before != 0.0:
             close_side = "sell" if qty_before > 0 else "buy"
+            close_action = "submitted_reduce_only_market"
+            close_skipped_reason = None
             close_ack = port.adapter.place_order(
                 side=close_side,
                 orderQty=abs(qty_before),
@@ -457,12 +513,18 @@ class BotService:
                 reduceOnly=True,
             )
         position_after = port.adapter.get_position()
+        audit_errors = list(getattr(port.adapter, "rest_audit_errors", ()))
         return {
             "cancelled": cancelled,
+            "cancel_errors": cancel_errors,
             "close_ack": close_ack,
+            "close_action": close_action,
+            "close_skipped_reason": close_skipped_reason,
             "position_before": position_before,
             "position_after": position_after,
             "closed": float(position_after.qty) == 0.0,
+            "audit_persistence_ok": not audit_errors,
+            "audit_persistence_errors": audit_errors,
         }
 
     def cancel_living_tails(self, runtime: StrategyRuntime) -> list[OrderAck]:
@@ -837,6 +899,10 @@ def _extract_cancelable_order_id(order: dict[str, object]) -> str | None:
         if value:
             return str(value)
     return None
+
+
+def _compact_admin_error(exc: BaseException) -> str:
+    return " ".join(str(exc).split())
 
 
 def _limit_price_from_stop_offset(

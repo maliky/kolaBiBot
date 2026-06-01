@@ -95,6 +95,7 @@ def test_place_maps_limit_order_to_sendorder(tmp_path):
         session=cast(Any, session),
     )
 
+    assert adapter.audit_db_url.endswith("prv-audit.sqlite")
     reply = adapter.place(
         orderQty=2,
         side="buy",
@@ -110,7 +111,7 @@ def test_place_maps_limit_order_to_sendorder(tmp_path):
     sent_payload = dict(session.calls[0]["data"])
     assert sent_payload["orderType"] == "lmt"
     assert sent_payload["postOnly"] is True
-    with Session(adapter._engine) as db_session:
+    with Session(adapter._audit_engine) as db_session:
         rows = db_session.execute(select(ExchangeRestCall)).scalars().all()
     assert len(rows) == 1
     assert rows[0].path == "/sendorder"
@@ -152,7 +153,7 @@ def test_sendorder_http_error_is_persisted_for_forensics(tmp_path):
             clOrdID="CID-ERR",
         )
 
-    with Session(adapter._engine) as db_session:
+    with Session(adapter._audit_engine) as db_session:
         rows = db_session.execute(select(ExchangeRestCall)).scalars().all()
     assert len(rows) == 1
     assert rows[0].path == "/sendorder"
@@ -178,7 +179,7 @@ def test_openorders_get_is_not_persisted_in_rest_call_audit(tmp_path):
     )
 
     assert adapter.live_open_orders() == []
-    with Session(adapter._engine) as db_session:
+    with Session(adapter._audit_engine) as db_session:
         rows = db_session.execute(select(ExchangeRestCall)).scalars().all()
     assert rows == []
 
@@ -205,7 +206,7 @@ def test_record_rest_call_serializes_decimal_request_params(tmp_path) -> None:
         error_text=None,
     )
 
-    with Session(adapter._engine) as db_session:
+    with Session(adapter._audit_engine) as db_session:
         row = db_session.execute(select(ExchangeRestCall)).scalars().one()
     assert row.request_params["stopPx"] == "77245.0"
 
@@ -238,7 +239,7 @@ def test_record_rest_call_serializes_nested_decimal_payload(tmp_path) -> None:
         error_text=None,
     )
 
-    with Session(adapter._engine) as db_session:
+    with Session(adapter._audit_engine) as db_session:
         row = db_session.execute(select(ExchangeRestCall)).scalars().one()
     nested = row.response_payload["sendStatus"]["nested"]
     history = row.response_payload["sendStatus"]["history"]
@@ -268,7 +269,7 @@ def test_record_rest_call_recovers_order_id_from_request_for_edit_failures(tmp_p
         error_text="503",
     )
 
-    with Session(adapter._engine) as db_session:
+    with Session(adapter._audit_engine) as db_session:
         row = db_session.execute(select(ExchangeRestCall)).scalars().one()
     assert row.endpoint_order_id == "OID-EDIT-1"
     assert row.exchange_order_id == "OID-EDIT-1"
@@ -297,7 +298,7 @@ def test_record_rest_call_recovers_order_id_from_request_for_cancel_failures(tmp
         error_text="503",
     )
 
-    with Session(adapter._engine) as db_session:
+    with Session(adapter._audit_engine) as db_session:
         row = db_session.execute(select(ExchangeRestCall)).scalars().one()
     assert row.endpoint_order_id == "OID-CANCEL-1"
     assert row.exchange_order_id == "OID-CANCEL-1"
@@ -334,7 +335,7 @@ def test_record_rest_call_persistence_failure_is_fail_open(tmp_path, caplog) -> 
     def _fail_sessionmaker():
         return _FailSession()
 
-    adapter._sessionmaker = _fail_sessionmaker  # type: ignore[assignment]
+    adapter._audit_sessionmaker = _fail_sessionmaker  # type: ignore[assignment]
 
     with caplog.at_level("WARNING"):
         adapter._record_rest_call(
@@ -348,6 +349,8 @@ def test_record_rest_call_persistence_failure_is_fail_open(tmp_path, caplog) -> 
             error_text=None,
         )
     assert "rest call audit persistence failed" in caplog.text
+    assert adapter.rest_audit_errors
+    assert "forced commit failure" in adapter.rest_audit_errors[0]
 
 
 def test_place_generates_client_order_id_when_missing(tmp_path):
