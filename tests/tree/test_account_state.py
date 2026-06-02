@@ -11,6 +11,7 @@ from kolabi.shared.persistence import (
     AccountPosition,
     ExchangeFill,
     ExchangeOrder,
+    PrivateIngestAudit,
     RawExchangeEvent,
 )
 from kolabi.tree import account as account_module
@@ -1205,6 +1206,164 @@ def test_raw_event_time_retention_deletes_old_events(tmp_path):
         session.commit()
         rows = session.execute(select(RawExchangeEvent)).scalars().all()
         assert [row.exchange_sequence for row in rows] == ["new"]
+
+
+def test_private_storage_maintenance_prunes_duplicate_state_and_audits(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            state_retention_minutes=60,
+            state_retention_limit=10,
+            ingest_audit_retention_minutes=0,
+            ingest_audit_retention_limit=2,
+            balance_write_min_interval_seconds=300,
+            position_write_min_interval_seconds=60,
+        )
+    )
+    now = datetime.now(timezone.utc)
+    with Session(store.engine) as session:
+        session.add_all(
+            [
+                AccountBalance(
+                    exchange="kraken",
+                    environment="demo",
+                    account_scope="default",
+                    asset="USD",
+                    available=10.0,
+                    locked=0.0,
+                    total=10.0,
+                    raw_payload={},
+                    local_timestamp=now - timedelta(seconds=10),
+                ),
+                AccountBalance(
+                    exchange="kraken",
+                    environment="demo",
+                    account_scope="default",
+                    asset="USD",
+                    available=10.0,
+                    locked=0.0,
+                    total=10.0,
+                    raw_payload={},
+                    local_timestamp=now - timedelta(seconds=20),
+                ),
+                AccountBalance(
+                    exchange="kraken",
+                    environment="demo",
+                    account_scope="default",
+                    asset="USD",
+                    available=10.0,
+                    locked=0.0,
+                    total=10.0,
+                    raw_payload={},
+                    local_timestamp=now - timedelta(seconds=400),
+                ),
+                AccountBalance(
+                    exchange="kraken",
+                    environment="demo",
+                    account_scope="default",
+                    asset="USD",
+                    available=10.0,
+                    locked=0.0,
+                    total=10.0,
+                    raw_payload={},
+                    local_timestamp=now - timedelta(days=2),
+                ),
+                AccountPosition(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    account_scope="default",
+                    symbol="PI_XBTUSD",
+                    side="long",
+                    size=1.0,
+                    raw_payload={},
+                    local_timestamp=now - timedelta(seconds=10),
+                ),
+                AccountPosition(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    account_scope="default",
+                    symbol="PI_XBTUSD",
+                    side="long",
+                    size=1.0,
+                    raw_payload={},
+                    local_timestamp=now - timedelta(seconds=20),
+                ),
+                AccountPosition(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    account_scope="default",
+                    symbol="PI_XBTUSD",
+                    side="long",
+                    size=1.0,
+                    raw_payload={},
+                    local_timestamp=now - timedelta(seconds=90),
+                ),
+                AccountPosition(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    account_scope="default",
+                    symbol="PI_XBTUSD",
+                    side="long",
+                    size=1.0,
+                    raw_payload={},
+                    local_timestamp=now - timedelta(days=2),
+                ),
+                *[
+                    PrivateIngestAudit(
+                        exchange="kraken",
+                        environment="demo",
+                        market_type="futures",
+                        account_scope="default",
+                        stream_kind="private_ws_account",
+                        feed="balances",
+                        is_critical=False,
+                        event_type="balances",
+                        received_at=now - timedelta(seconds=index),
+                        raw_committed_at=now - timedelta(seconds=index),
+                        normalized_committed_at=now - timedelta(seconds=index),
+                        row_count=1,
+                    )
+                    for index in range(3)
+                ],
+            ]
+        )
+        session.commit()
+
+    store.prune_private_storage_now(stream_kind="private_ws_account")
+
+    with Session(store.engine) as session:
+        balances = (
+            session.execute(
+                select(AccountBalance).order_by(AccountBalance.local_timestamp.desc())
+            )
+            .scalars()
+            .all()
+        )
+        positions = (
+            session.execute(
+                select(AccountPosition).order_by(AccountPosition.local_timestamp.desc())
+            )
+            .scalars()
+            .all()
+        )
+        audits = (
+            session.execute(
+                select(PrivateIngestAudit).order_by(PrivateIngestAudit.received_at.desc())
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(balances) == 2
+    assert [row.available for row in balances] == [10.0, 10.0]
+    assert len(positions) == 2
+    assert [row.size for row in positions] == [1.0, 1.0]
+    assert len(audits) == 2
 
 
 def test_raw_event_consecutive_duplicate_is_collapsed_with_counter(tmp_path):

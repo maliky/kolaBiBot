@@ -1,0 +1,53 @@
+name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	prix	hook
+
+# Kolabi XBT adversarial helper strategy:
+# SCENARIO <name>: Given <price gate>; When <large market head fires>; Then <stop tail protects helper exposure near the pre-push price>.
+# Purpose: run from a second bot to push Kraken demo liquidity and help trigger the main scenario head/tail lifecycle.
+# Demo-book rule of thumb observed by operator: each visible level is roughly 7 USD wide with about 200 contracts.
+# Quantity guide: 201 ~= one level, 401 ~= two levels, 1401 ~= seven levels, 1601 may jump to the demo sentinels 999999 or 3500.
+# Tempo: scheduled helper rows start one minute apart and repeated attempts pause 0.5 minutes, giving roughly 30 seconds between market pushes.
+# Tail convention: tType=S- and qAtDpD place a reduce-only stop at the expected pre-push price.
+# Example: a 401 buy is expected to lift about 14 USD, so tp=14 places the sell stop about 14 USD below the fill.
+
+# Populate the adversarial private account DB in one shell:
+# set -a; . ./.env.postgres; set +a
+# scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+# scripts/kolabidb private status --account-scope advers
+# scripts/kolabidb private logs --account-scope advers
+#
+# Run the adversarial bot in another shell. It shares the default public market DB and uses the isolated adversarial private DBs:
+# set -a; . ./.env.postgres; set +a
+# python -m kolabi.bot run --strategy orders/advers.tsv --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET --max-active-pairs 0 2>&1 | tee logs/advers.log
+
+# name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	prix	hook
+# ####  ^^
+
+# Given last/reference price has moved up by at least 10 USD since activation; When crossed; Then buy 1401 at market once and protect helper exposure 49 USD below fill.
+ADV_BIG_BUY	0 120	2	60	.5	buy	M		S-		qAtDpD	1401	49	21 +	
+
+# ####  ^^
+
+# Given the bot is started; When active; Then buy at market twice with 30s pause and protect each helper exposure 14 USD below fill, near the pre-push price.
+ADV_STD_BUY	.0 120	2	60	.5	buy	M		S-		qAtDpD	400	14	- +
+ADV_STD_BUY2	2.0 120	2	60	.5	buy	M		S-		qAtDpD	600	14	- +
+ADV_STD_BUY3	4.0 120	2	60	.5	buy	M		S-		qAtDpD	600	14	- +	
+
+# ################ ################  market price  ####################  ################
+
+# Given the bot is started; When active; Then sell at market twice with 30s pause and protect each helper exposure 14 USD above fill, near the pre-push price.
+ADV_STD_SEL0	1.0 120	2	60	.5	sell	M		S-		qAtDpD	400	14	- +
+ADV_STD_SEL1	3.0 120	2	60	.5	sell	M		S-		qAtDpD	600	14	- +
+ADV_STD_SEL2	5.0 120	2	60	.5	sell	M		S-		qAtDpD	600	14	- +
+
+# #### vv
+
+# Given last/reference price has moved up by at least 63 USD since activation; When crossed; Then sell 1401 at market once and protect helper exposure 49 USD above fill.
+ADV_BIG_SELL	0 120	2	60	.5	sell	M		S-		qAtDpD	1401	49	61 +
+
+# #### --- Optional stronger push rows ---
+
+# Given the bot is started; When active; Then buy through most visible demo liquidity and protect helper exposure roughly 56 USD below fill.
+#ADV_BUY_1601_SENTINEL	0 1440	1	120	0	buy	M		S-		qAtDpD	1601	56	- +	
+
+# Given the bot is started; When active; Then sell through most visible demo liquidity and protect helper exposure roughly 56 USD above fill.
+#ADV_SELL_1601_SENTINEL	0 1440	1	120	0	sell	M		S-		qAtDpD	1601	56	- +	

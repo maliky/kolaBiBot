@@ -1,0 +1,639 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOG_DIR="$ROOT_DIR/logs"
+RUN_DIR="$ROOT_DIR/.run/kolabidb"
+
+TARGET=""
+ACTION=""
+DRY_RUN=0
+DB_BACKEND="postgres"
+ENV_FILE=".env.postgres"
+PAIR="PI_XBTUSD"
+ENVIRONMENT="demo"
+PUBLIC_MODE="reuse"
+ACCOUNT_SCOPE="default"
+API_KEY_ENV=""
+API_SECRET_ENV=""
+PUBLIC_DB_URL=""
+PRIVATE_DB_URL=""
+ACCOUNT_DB_URL=""
+CRITICAL_DB_URL=""
+LOG_LEVEL="INFO"
+TAIL_LINES=80
+STOP_TIMEOUT_SECONDS=10
+
+usage() {
+    cat <<'EOF'
+Usage:
+  scripts/kolabidb [--dry-run] public   start|status|stop|reload|logs [options]
+  scripts/kolabidb [--dry-run] private  start|status|stop|reload|logs [options]
+  scripts/kolabidb [--dry-run] postgres start|status|stop|reload|logs [options]
+
+Targets:
+  public      Kraken public market-data DB feeder, one DB per instrument.
+  private     Kraken private account/order DB feeder. Reuses the public DB by default.
+  postgres    Local PostgreSQL container from docker-compose.postgres.yml.
+
+Actions:
+  start       Start the selected feeder in the background.
+  status      Print PID/log status for the selected feeder.
+  stop        Stop the selected feeder. TERM first, then KILL after the timeout.
+  reload      Stop then start. This is a restart; the Python feeders have no live reload.
+  logs        Tail the selected feeder log from ./logs.
+
+Public options:
+  --pair SYMBOL                 Futures product id. Default: PI_XBTUSD.
+  --environment demo|live       Kraken endpoint family. Default: demo.
+  --db-url URL                  Public DB URL override. Default comes from the selected backend.
+  --private-db-url URL          Private DB URL used by the public feeder for correlation.
+
+Private options:
+  --account-scope NAME          Logical account/persona label stored with private rows.
+                                Default: default. Example: advers for the adversarial account.
+  --account-db-url URL          Private account DB URL override. Default comes from the selected backend.
+  --critical-db-url URL         Critical open_orders/fills DB URL. Default follows account DB naming.
+  --api-key-env NAME            Environment variable containing the Kraken API key.
+  --api-secret-env NAME         Environment variable containing the Kraken API secret.
+  --public reuse|spawn          For private start/reload, reuse existing public DB feeder or start one too.
+                                Default: reuse.
+
+Common options:
+  --backend postgres|sqlite    DB lane defaults to use for public/private feeders. Default: postgres.
+  --postgres                   Shortcut for --backend postgres.
+  --env-file PATH              PostgreSQL env file loaded for --backend postgres and postgres target.
+                               Default: .env.postgres.
+  --log-level LEVEL             Python log level. Default: INFO.
+  --tail-lines N                Lines printed before following logs. Default: 80.
+  --stop-timeout-seconds N      Grace seconds before KILL on stop. Default: 10.
+  -h, --help                    Show this help and exit.
+
+Examples:
+  scripts/kolabidb public start --pair PI_XBTUSD
+  scripts/kolabidb private start
+  scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
+  scripts/kolabidb --backend sqlite private start
+  scripts/kolabidb postgres logs
+  scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  scripts/kolabidb private start --public spawn --pair PI_XBTUSD
+
+Systemctl-shaped equivalents:
+  scripts/kolabidb public status      # like: systemctl --user status kolabidb-public-postgres-demo-PI_XBTUSD
+  scripts/kolabidb public stop        # like: systemctl --user stop   kolabidb-public-postgres-demo-PI_XBTUSD
+  scripts/kolabidb private logs       # like: journalctl --user -u    kolabidb-private-postgres-demo-default -f
+EOF
+}
+
+die() {
+    printf 'kolabidb: %s\n' "$*" >&2
+    exit 2
+}
+
+upper_env_key() {
+    local raw="$1"
+    raw="${raw//[^[:alnum:]]/_}"
+    printf '%s' "$raw" | tr '[:lower:]' '[:upper:]'
+}
+
+safe_name() {
+    local raw="$1"
+    raw="${raw//\//_}"
+    raw="${raw//:/_}"
+    raw="${raw// /_}"
+    printf '%s' "$raw" | tr -cd '[:alnum:]_.-'
+}
+
+public_db_default() {
+    local env="$1"
+    local pair="$2"
+    printf 'sqlite:///dbs/pub-futures-%s-%s.sqlite' "$(safe_name "$env")" "$(safe_name "$pair")"
+}
+
+private_db_default() {
+    local env="$1"
+    local scope="$2"
+    local suffix=""
+    if [[ "$scope" != "default" ]]; then
+        suffix="-$(safe_name "$scope")"
+    fi
+    printf 'sqlite:///dbs/prv-futures-%s%s.sqlite' "$(safe_name "$env")" "$suffix"
+}
+
+critical_db_default() {
+    local env="$1"
+    local scope="$2"
+    local suffix=""
+    if [[ "$scope" != "default" ]]; then
+        suffix="-$(safe_name "$scope")"
+    fi
+    printf 'sqlite:///dbs/prv-futures-%s%s-critical.sqlite' "$(safe_name "$env")" "$suffix"
+}
+
+load_backend_env() {
+    if [[ "$DB_BACKEND" != "postgres" && "$TARGET" != "postgres" ]]; then
+        return
+    fi
+    local env_path
+    env_path="$(resolve_env_file)"
+    if [[ ! -f "$env_path" && -f "$ROOT_DIR/$ENV_FILE" ]]; then
+        env_path="$ROOT_DIR/$ENV_FILE"
+    fi
+    if [[ -f "$env_path" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "$env_path"
+        set +a
+    elif [[ "$TARGET" != "postgres" && -z "${KOLABI_MARKET_DB_URL:-}" ]]; then
+        die "PostgreSQL env file '$ENV_FILE' not found; copy docker/postgres/kolabi-postgres.env.example to $ENV_FILE or pass --env-file"
+    fi
+}
+
+resolve_env_file() {
+    if [[ -f "$ENV_FILE" ]]; then
+        printf '%s' "$ENV_FILE"
+    elif [[ -f "$ROOT_DIR/$ENV_FILE" ]]; then
+        printf '%s' "$ROOT_DIR/$ENV_FILE"
+    fi
+}
+
+require_url() {
+    local name="$1"
+    local value="${!name:-}"
+    [[ -n "$value" ]] || die "missing $name for --backend postgres; load $ENV_FILE or pass an explicit DB URL"
+    printf '%s' "$value"
+}
+
+postgres_account_db_default() {
+    local scope_key
+    local var_name
+    if [[ "$ACCOUNT_SCOPE" == "default" ]]; then
+        require_url KOLABI_ACCOUNT_DB_URL
+        return
+    fi
+    scope_key="$(upper_env_key "$ACCOUNT_SCOPE")"
+    var_name="KOLABI_${scope_key}_ACCOUNT_DB_URL"
+    require_url "$var_name"
+}
+
+postgres_critical_db_default() {
+    local scope_key
+    local var_name
+    if [[ "$ACCOUNT_SCOPE" == "default" ]]; then
+        require_url KOLABI_CRITICAL_DB_URL
+        return
+    fi
+    scope_key="$(upper_env_key "$ACCOUNT_SCOPE")"
+    var_name="KOLABI_${scope_key}_CRITICAL_DB_URL"
+    require_url "$var_name"
+}
+
+market_db_url() {
+    if [[ -n "$PUBLIC_DB_URL" ]]; then
+        printf '%s' "$PUBLIC_DB_URL"
+    elif [[ "$DB_BACKEND" == "postgres" ]]; then
+        require_url KOLABI_MARKET_DB_URL
+    else
+        public_db_default "$ENVIRONMENT" "$PAIR"
+    fi
+}
+
+account_db_url() {
+    if [[ -n "$ACCOUNT_DB_URL" ]]; then
+        printf '%s' "$ACCOUNT_DB_URL"
+    elif [[ "$DB_BACKEND" == "postgres" ]]; then
+        postgres_account_db_default
+    else
+        private_db_default "$ENVIRONMENT" "$ACCOUNT_SCOPE"
+    fi
+}
+
+critical_db_url() {
+    if [[ -n "$CRITICAL_DB_URL" ]]; then
+        printf '%s' "$CRITICAL_DB_URL"
+    elif [[ "$DB_BACKEND" == "postgres" ]]; then
+        postgres_critical_db_default
+    else
+        critical_db_default "$ENVIRONMENT" "$ACCOUNT_SCOPE"
+    fi
+}
+
+unit_name() {
+    case "$1" in
+        public)
+            if [[ "$DB_BACKEND" == "sqlite" ]]; then
+                printf 'kolabidb-public-%s-%s' "$(safe_name "$ENVIRONMENT")" "$(safe_name "$PAIR")"
+            else
+                printf 'kolabidb-public-%s-%s-%s' "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$PAIR")"
+            fi
+            ;;
+        private)
+            if [[ "$DB_BACKEND" == "sqlite" ]]; then
+                printf 'kolabidb-private-%s-%s' "$(safe_name "$ENVIRONMENT")" "$(safe_name "$ACCOUNT_SCOPE")"
+            else
+                printf 'kolabidb-private-%s-%s-%s' "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$ACCOUNT_SCOPE")"
+            fi
+            ;;
+        postgres)
+            printf 'kolabidb-postgres'
+            ;;
+        *)
+            die "unknown target '$1'"
+            ;;
+    esac
+}
+
+pid_file() {
+    printf '%s/%s.pid' "$RUN_DIR" "$(unit_name "$1")"
+}
+
+log_file() {
+    printf '%s/%s.log' "$LOG_DIR" "$(unit_name "$1")"
+}
+
+is_alive() {
+    local pid="$1"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+read_pid() {
+    local file="$1"
+    if [[ -f "$file" ]]; then
+        tr -d '[:space:]' <"$file"
+    fi
+}
+
+ensure_dirs() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        return
+    fi
+    mkdir -p "$LOG_DIR" "$RUN_DIR"
+}
+
+public_command() {
+    local db_url
+    local private_url
+    db_url="$(market_db_url)"
+    private_url="${PRIVATE_DB_URL:-$(account_db_url)}"
+    printf '%q ' python -m kolabi.tree.kraken run \
+        --pair "$PAIR" \
+        --environment "$ENVIRONMENT" \
+        --db-url "$db_url" \
+        --private-db-url "$private_url" \
+        --log-level "$LOG_LEVEL"
+}
+
+private_command() {
+    local account_url
+    local critical_url
+    account_url="$(account_db_url)"
+    critical_url="$(critical_db_url)"
+    local cmd=(python -m kolabi.tree.account run
+        --environment "$ENVIRONMENT"
+        --account-scope "$ACCOUNT_SCOPE"
+        --account-db-url "$account_url"
+        --critical-db-url "$critical_url"
+        --log-level "$LOG_LEVEL")
+    if [[ -n "$API_KEY_ENV" ]]; then
+        cmd+=(--api-key-env "$API_KEY_ENV")
+    fi
+    if [[ -n "$API_SECRET_ENV" ]]; then
+        cmd+=(--api-secret-env "$API_SECRET_ENV")
+    fi
+    printf '%q ' "${cmd[@]}"
+}
+
+command_for_target() {
+    case "$1" in
+        public) public_command ;;
+        private) private_command ;;
+        *) die "unknown target '$1'" ;;
+    esac
+}
+
+start_target() {
+    local target="$1"
+    local pid_path
+    local pid
+    local log_path
+    local command_text
+    pid_path="$(pid_file "$target")"
+    log_path="$(log_file "$target")"
+    command_text="$(command_for_target "$target")"
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf 'cd %q && nohup bash -lc %q >>%q 2>&1 & echo $! >%q\n' "$ROOT_DIR" "$command_text" "$log_path" "$pid_path"
+        return
+    fi
+
+    pid="$(read_pid "$pid_path" || true)"
+    if is_alive "$pid"; then
+        printf '%s already running pid=%s log=%s\n' "$(unit_name "$target")" "$pid" "$log_path"
+        return
+    fi
+    if [[ -n "$pid" && -f "$pid_path" ]]; then
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            printf 'rm -f %q\n' "$pid_path"
+        else
+            rm -f "$pid_path"
+        fi
+    fi
+
+    ensure_dirs
+    (
+        cd "$ROOT_DIR"
+        nohup bash -lc "$command_text" >>"$log_path" 2>&1 &
+        printf '%s\n' "$!" >"$pid_path"
+    )
+    pid="$(read_pid "$pid_path")"
+    sleep 0.2
+    if is_alive "$pid"; then
+        printf '%s started pid=%s log=%s\n' "$(unit_name "$target")" "$pid" "$log_path"
+    else
+        printf '%s exited immediately pid=%s log=%s\n' "$(unit_name "$target")" "$pid" "$log_path" >&2
+        return 1
+    fi
+}
+
+status_target() {
+    local target="$1"
+    local pid_path
+    local pid
+    local log_path
+    pid_path="$(pid_file "$target")"
+    log_path="$(log_file "$target")"
+    pid="$(read_pid "$pid_path" || true)"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf 'test -f %q && kill -0 "$(cat %q)"\n' "$pid_path" "$pid_path"
+        return
+    fi
+    if is_alive "$pid"; then
+        printf '%s running pid=%s log=%s\n' "$(unit_name "$target")" "$pid" "$log_path"
+    elif [[ -n "$pid" ]]; then
+        printf '%s stopped stale_pid=%s log=%s\n' "$(unit_name "$target")" "$pid" "$log_path"
+    else
+        printf '%s stopped log=%s\n' "$(unit_name "$target")" "$log_path"
+    fi
+}
+
+stop_target() {
+    local target="$1"
+    local pid_path
+    local pid
+    local waited=0
+    pid_path="$(pid_file "$target")"
+    pid="$(read_pid "$pid_path" || true)"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf 'kill -TERM "$(cat %q)" && rm -f %q\n' "$pid_path" "$pid_path"
+        return
+    fi
+    if ! is_alive "$pid"; then
+        rm -f "$pid_path"
+        printf '%s stopped\n' "$(unit_name "$target")"
+        return
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    while is_alive "$pid" && [[ "$waited" -lt "$STOP_TIMEOUT_SECONDS" ]]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if is_alive "$pid"; then
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_path"
+    printf '%s stopped pid=%s\n' "$(unit_name "$target")" "$pid"
+}
+
+logs_target() {
+    local target="$1"
+    local log_path
+    log_path="$(log_file "$target")"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf 'tail -n %q -f %q\n' "$TAIL_LINES" "$log_path"
+        return
+    fi
+    mkdir -p "$LOG_DIR"
+    touch "$log_path"
+    tail -n "$TAIL_LINES" -f "$log_path"
+}
+
+postgres_compose_command() {
+    local cmd=(docker-compose)
+    local env_path
+    env_path="$(resolve_env_file)"
+    if [[ -n "$env_path" ]]; then
+        cmd+=(--env-file "$env_path")
+    fi
+    cmd+=(-f docker-compose.postgres.yml)
+    printf '%q ' "${cmd[@]}"
+}
+
+postgres_action() {
+    local command_prefix
+    command_prefix="$(postgres_compose_command)"
+    case "$ACTION" in
+        start)
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                printf 'mkdir -p %q\n' "$ROOT_DIR/dbs/postgres"
+                printf 'cd %q && %sup -d\n' "$ROOT_DIR" "$command_prefix"
+                return
+            fi
+            mkdir -p "$ROOT_DIR/dbs/postgres"
+            (cd "$ROOT_DIR" && bash -lc "${command_prefix}up -d")
+            ;;
+        status)
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                printf 'cd %q && %sps\n' "$ROOT_DIR" "$command_prefix"
+                return
+            fi
+            (cd "$ROOT_DIR" && bash -lc "${command_prefix}ps")
+            ;;
+        stop)
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                printf 'cd %q && %sstop\n' "$ROOT_DIR" "$command_prefix"
+                return
+            fi
+            (cd "$ROOT_DIR" && bash -lc "${command_prefix}stop")
+            ;;
+        reload)
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                printf 'cd %q && %srestart\n' "$ROOT_DIR" "$command_prefix"
+                return
+            fi
+            (cd "$ROOT_DIR" && bash -lc "${command_prefix}restart")
+            ;;
+        logs)
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                printf 'cd %q && %slogs --tail=%q -f\n' "$ROOT_DIR" "$command_prefix" "$TAIL_LINES"
+                return
+            fi
+            (cd "$ROOT_DIR" && bash -lc "${command_prefix}logs --tail=${TAIL_LINES} -f")
+            ;;
+        *)
+            die "unknown action '$ACTION'"
+            ;;
+    esac
+}
+
+parse_args() {
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            --backend)
+                DB_BACKEND="${2:-}"
+                shift 2
+                ;;
+            --postgres)
+                DB_BACKEND="postgres"
+                shift
+                ;;
+            --env-file)
+                ENV_FILE="${2:-}"
+                shift 2
+                ;;
+            public|private|postgres)
+                if [[ -z "$TARGET" ]]; then
+                    TARGET="$1"
+                    shift
+                else
+                    die "unexpected target '$1'"
+                fi
+                ;;
+            start|status|stop|reload|logs)
+                if [[ -z "$ACTION" ]]; then
+                    ACTION="$1"
+                    shift
+                else
+                    die "unexpected action '$1'"
+                fi
+                ;;
+            --pair)
+                PAIR="${2:-}"
+                shift 2
+                ;;
+            --environment)
+                ENVIRONMENT="${2:-}"
+                shift 2
+                ;;
+            --db-url)
+                PUBLIC_DB_URL="${2:-}"
+                shift 2
+                ;;
+            --private-db-url)
+                PRIVATE_DB_URL="${2:-}"
+                shift 2
+                ;;
+            --account-scope)
+                ACCOUNT_SCOPE="${2:-}"
+                shift 2
+                ;;
+            --account-db-url)
+                ACCOUNT_DB_URL="${2:-}"
+                shift 2
+                ;;
+            --critical-db-url)
+                CRITICAL_DB_URL="${2:-}"
+                shift 2
+                ;;
+            --api-key-env)
+                API_KEY_ENV="${2:-}"
+                shift 2
+                ;;
+            --api-secret-env)
+                API_SECRET_ENV="${2:-}"
+                shift 2
+                ;;
+            --public)
+                PUBLIC_MODE="${2:-}"
+                shift 2
+                ;;
+            --log-level)
+                LOG_LEVEL="${2:-}"
+                shift 2
+                ;;
+            --tail-lines)
+                TAIL_LINES="${2:-}"
+                shift 2
+                ;;
+            --stop-timeout-seconds)
+                STOP_TIMEOUT_SECONDS="${2:-}"
+                shift 2
+                ;;
+            *)
+                die "unknown argument '$1'"
+                ;;
+        esac
+    done
+}
+
+validate() {
+    [[ -n "$TARGET" ]] || die "missing target public|private|postgres"
+    [[ -n "$ACTION" ]] || die "missing action start|status|stop|reload|logs"
+    [[ "$DB_BACKEND" == "sqlite" || "$DB_BACKEND" == "postgres" ]] || die "--backend must be sqlite or postgres"
+    [[ "$ENVIRONMENT" == "demo" || "$ENVIRONMENT" == "live" ]] || die "--environment must be demo or live"
+    [[ "$PUBLIC_MODE" == "reuse" || "$PUBLIC_MODE" == "spawn" ]] || die "--public must be reuse or spawn"
+    [[ "$TAIL_LINES" =~ ^[0-9]+$ ]] || die "--tail-lines must be an integer"
+    [[ "$STOP_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || die "--stop-timeout-seconds must be an integer"
+}
+
+run_action() {
+    if [[ "$TARGET" == "postgres" ]]; then
+        postgres_action
+        return
+    fi
+
+    if [[ "$TARGET" == "private" && "$PUBLIC_MODE" == "spawn" ]]; then
+        case "$ACTION" in
+            start)
+                start_target public
+                start_target private
+                return
+                ;;
+            reload)
+                stop_target private
+                stop_target public
+                start_target public
+                start_target private
+                return
+                ;;
+            status)
+                status_target public
+                status_target private
+                return
+                ;;
+            stop)
+                stop_target private
+                stop_target public
+                return
+                ;;
+            logs)
+                logs_target private
+                return
+                ;;
+        esac
+    fi
+
+    case "$ACTION" in
+        start) start_target "$TARGET" ;;
+        status) status_target "$TARGET" ;;
+        stop) stop_target "$TARGET" ;;
+        reload)
+            stop_target "$TARGET"
+            start_target "$TARGET"
+            ;;
+        logs) logs_target "$TARGET" ;;
+        *) die "unknown action '$ACTION'" ;;
+    esac
+}
+
+parse_args "$@"
+load_backend_env
+validate
+run_action

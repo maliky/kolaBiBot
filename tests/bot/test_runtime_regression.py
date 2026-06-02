@@ -78,6 +78,45 @@ def test_bot_service_keeps_audit_and_telemetry_lanes_off_account_db(
     assert service.exchange_config.adapter_kwargs["account_scope"] == "advers"
 
 
+def test_bot_service_uses_scoped_kolabi_db_env_lanes(monkeypatch) -> None:
+    monkeypatch.setenv("KOLABI_MARKET_DB_URL", "postgresql+psycopg://x/market")
+    monkeypatch.setenv("KOLABI_ACCOUNT_DB_URL", "postgresql+psycopg://x/main_account")
+    monkeypatch.setenv("KOLABI_CRITICAL_DB_URL", "postgresql+psycopg://x/main_critical")
+    monkeypatch.setenv("KOLABI_AUDIT_DB_URL", "postgresql+psycopg://x/main_audit")
+    monkeypatch.setenv("KOLABI_TELEMETRY_DB_URL", "postgresql+psycopg://x/main_telemetry")
+    monkeypatch.setenv(
+        "KOLABI_ADVERS_ACCOUNT_DB_URL",
+        "postgresql+psycopg://x/advers_account",
+    )
+    monkeypatch.setenv(
+        "KOLABI_ADVERS_CRITICAL_DB_URL",
+        "postgresql+psycopg://x/advers_critical",
+    )
+    monkeypatch.setenv(
+        "KOLABI_ADVERS_AUDIT_DB_URL",
+        "postgresql+psycopg://x/advers_audit",
+    )
+    monkeypatch.setenv(
+        "KOLABI_ADVERS_TELEMETRY_DB_URL",
+        "postgresql+psycopg://x/advers_telemetry",
+    )
+    service = BotService(
+        BotConfig(
+            symbol="PI_XBTUSD",
+            exchange="kraken",
+            require_ready=False,
+            account_scope="advers",
+        ),
+        indicators=DummyIndicatorClient({"ma": 42}),
+    )
+
+    assert service._market_db_url == "postgresql+psycopg://x/market"
+    assert service._account_db_url == "postgresql+psycopg://x/advers_account"
+    assert service._critical_account_db_url == "postgresql+psycopg://x/advers_critical"
+    assert service._audit_db_url == "postgresql+psycopg://x/advers_audit"
+    assert service._telemetry_db_url == "postgresql+psycopg://x/advers_telemetry"
+
+
 def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) -> None:
     class FakeKrakenAdapter:
         def __init__(self, **kwargs) -> None:
@@ -447,3 +486,66 @@ def test_wait_timeout_message_includes_runtime_diagnostics() -> None:
     assert "private_status=healthy" in message
     assert "private_age=266.10s" in message
     assert "private_last_heartbeat=2026-05-29T16:04:46.183674" in message
+    assert "account_scope=default" in message
+
+
+def test_wait_timeout_message_hints_private_feeder_for_missing_schema() -> None:
+    service = BotService(
+        BotConfig(exchange="kraken", account_scope="advers", ready_timeout_seconds=5.0)
+    )
+    state = StrategyRuntimeState(
+        symbol="PI_XBTUSD",
+        public=PublicMarketState(
+            symbol="PI_XBTUSD",
+            best_bid=100.0,
+            best_ask=101.0,
+            mid_price=100.5,
+            last_price=100.0,
+            mark_price=100.0,
+            index_price=100.0,
+            tick_size=0.5,
+            spread=1.0,
+            imbalance=0.5,
+            avg_bid=100.0,
+            avg_ask=101.0,
+            recorded_at="2026-06-01T00:00:00+00:00",
+            source_timestamp="2026-06-01T00:00:00+00:00",
+            age_seconds=1.0,
+            source_age_seconds=1.0,
+            indicators={},
+            ready=True,
+            reason=None,
+        ),
+        private_ws=PrivateFeedState(
+            stream_kind="private_ws",
+            status="missing_schema",
+            updated_at=None,
+            last_heartbeat_at=None,
+            age_seconds=None,
+            ready=False,
+            last_error=None,
+            reason="private_ws DB schema missing",
+        ),
+        rest_reconciler=PrivateFeedState(
+            stream_kind="rest_reconciler",
+            status="missing_schema",
+            updated_at=None,
+            last_heartbeat_at=None,
+            age_seconds=None,
+            ready=True,
+            last_error=None,
+            reason=None,
+        ),
+        open_order_count=0,
+        fill_count=0,
+        position_size=None,
+        position_entry_price=None,
+        ready=False,
+        reasons=("private_ws DB schema missing",),
+    )
+
+    message = service._format_wait_timeout(state)
+
+    assert "private_ws DB schema missing" in message
+    assert "account_scope=advers" in message
+    assert "scripts/kolabidb private start --account-scope advers" in message

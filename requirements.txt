@@ -3,6 +3,7 @@ numpy
 websocket_client
 requests
 sqlalchemy
+psycopg[binary]
 python-binance
 responses
 coolname

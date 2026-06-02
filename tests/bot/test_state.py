@@ -106,6 +106,147 @@ def test_runtime_state_reports_ready_when_public_and_private_are_fresh(tmp_path)
     assert state.reasons == ()
 
 
+def test_runtime_state_reports_missing_public_schema_as_not_ready(tmp_path) -> None:
+    market_db = f"sqlite:///{tmp_path / 'empty-pub.sqlite'}"
+    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    account_engine = create_engine(account_db)
+    Base.metadata.create_all(account_engine)
+    now = datetime.now(timezone.utc)
+    with Session(account_engine) as session:
+        session.add(
+            ExchangeConnection(
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                stream_kind="private_ws",
+                status="healthy",
+                last_heartbeat_at=now - timedelta(seconds=2),
+                updated_at=now - timedelta(seconds=2),
+            )
+        )
+        session.commit()
+
+    client = KrakenRuntimeStateClient(
+        market_db_url=market_db,
+        account_db_url=account_db,
+        symbol="PI_XBTUSD",
+    )
+
+    state = client.fetch_runtime_state()
+
+    assert state.ready is False
+    assert state.public.ready is False
+    assert state.public.reason == "public market DB schema missing"
+    assert "public market DB schema missing" in state.reasons
+
+
+def test_runtime_state_reports_missing_critical_private_schema_as_not_ready(
+    tmp_path,
+) -> None:
+    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    critical_db = f"sqlite:///{tmp_path / 'empty-critical.sqlite'}"
+    market_engine = create_engine(market_db)
+    account_engine = create_engine(account_db)
+    Base.metadata.create_all(market_engine)
+    Base.metadata.create_all(account_engine)
+    now = datetime.now(timezone.utc)
+    with Session(market_engine) as session:
+        session.add(
+            MarketSnapshot(
+                local_uuid="snap-1",
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                symbol="PI_XBTUSD",
+                best_bid=100.0,
+                best_ask=101.0,
+                avg_bid=99.5,
+                avg_ask=101.5,
+                mid_price=100.5,
+                spread=1.0,
+                imbalance=0.55,
+                source_timestamp=now - timedelta(seconds=1),
+                local_timestamp=now - timedelta(seconds=1),
+            )
+        )
+        session.commit()
+
+    client = KrakenRuntimeStateClient(
+        market_db_url=market_db,
+        account_db_url=account_db,
+        critical_account_db_url=critical_db,
+        symbol="PI_XBTUSD",
+    )
+
+    state = client.fetch_runtime_state()
+
+    assert state.ready is False
+    assert state.private_ws.status == "missing_schema"
+    assert state.private_ws.reason == "private_ws DB schema missing"
+    assert state.open_order_count == 0
+    assert state.fill_count == 0
+
+
+def test_runtime_state_tolerates_missing_broad_account_schema(tmp_path) -> None:
+    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+    account_db = f"sqlite:///{tmp_path / 'empty-account.sqlite'}"
+    critical_db = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+    market_engine = create_engine(market_db)
+    critical_engine = create_engine(critical_db)
+    Base.metadata.create_all(market_engine)
+    Base.metadata.create_all(critical_engine)
+    now = datetime.now(timezone.utc)
+    with Session(market_engine) as session:
+        session.add(
+            MarketSnapshot(
+                local_uuid="snap-1",
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                symbol="PI_XBTUSD",
+                best_bid=100.0,
+                best_ask=101.0,
+                avg_bid=99.5,
+                avg_ask=101.5,
+                mid_price=100.5,
+                spread=1.0,
+                imbalance=0.55,
+                source_timestamp=now - timedelta(seconds=1),
+                local_timestamp=now - timedelta(seconds=1),
+            )
+        )
+        session.commit()
+    with Session(critical_engine) as session:
+        session.add(
+            ExchangeConnection(
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                stream_kind="private_ws",
+                status="healthy",
+                last_heartbeat_at=now - timedelta(seconds=2),
+                updated_at=now - timedelta(seconds=2),
+            )
+        )
+        session.commit()
+
+    client = KrakenRuntimeStateClient(
+        market_db_url=market_db,
+        account_db_url=account_db,
+        critical_account_db_url=critical_db,
+        symbol="PI_XBTUSD",
+    )
+
+    state = client.fetch_runtime_state()
+
+    assert state.ready is True
+    assert state.private_ws.ready is True
+    assert state.rest_reconciler.status == "missing_schema"
+    assert state.position_size is None
+    assert state.position_entry_price is None
+
+
 def test_runtime_state_flags_stale_public_market(tmp_path) -> None:
     market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
     account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"

@@ -114,6 +114,14 @@ def test_bot_parser_uses_critical_db_url_only() -> None:
             "sqlite:///audit.sqlite",
             "--telemetry-db-url",
             "sqlite:///telemetry.sqlite",
+            "--rest-audit-retention-minutes",
+            "60",
+            "--rest-audit-retention-limit",
+            "10",
+            "--tail-telemetry-retention-minutes",
+            "30",
+            "--tail-telemetry-retention-limit",
+            "5",
             "--account-scope",
             "advers",
             "--dry-run",
@@ -123,6 +131,10 @@ def test_bot_parser_uses_critical_db_url_only() -> None:
     assert args.critical_account_db_url == "sqlite:///critical.sqlite"
     assert args.audit_db_url == "sqlite:///audit.sqlite"
     assert args.telemetry_db_url == "sqlite:///telemetry.sqlite"
+    assert args.rest_audit_retention_minutes == 60
+    assert args.rest_audit_retention_limit == 10
+    assert args.tail_telemetry_retention_minutes == 30
+    assert args.tail_telemetry_retention_limit == 5
     assert args.account_scope == "advers"
     with pytest.raises(SystemExit):
         parser.parse_args(
@@ -134,6 +146,23 @@ def test_bot_parser_uses_critical_db_url_only() -> None:
                 "sqlite:///critical.sqlite",
             ]
         )
+
+
+def test_preflight_parser_accepts_account_scope() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "preflight",
+            "--account-scope",
+            "advers",
+            "--critical-db-url",
+            "postgresql+psycopg://x/critical",
+        ]
+    )
+
+    assert args.account_scope == "advers"
+    assert args.critical_account_db_url == "postgresql+psycopg://x/critical"
 
 
 def test_run_once_command_dry_run_prints_canonical_structure(capsys) -> None:

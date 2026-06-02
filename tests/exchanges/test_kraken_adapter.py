@@ -353,6 +353,55 @@ def test_record_rest_call_persistence_failure_is_fail_open(tmp_path, caplog) -> 
     assert "forced commit failure" in adapter.rest_audit_errors[0]
 
 
+def test_record_rest_call_prunes_audit_history_by_limit(tmp_path) -> None:
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        audit_db_url=f"sqlite:///{tmp_path / 'audit.sqlite'}",
+        rest_audit_retention_minutes=0,
+        rest_audit_retention_limit=1,
+        session=cast(Any, DummySession([])),
+    )
+    with Session(adapter._audit_engine) as db_session:
+        db_session.add(
+            ExchangeRestCall(
+                local_uuid="old",
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                account_scope="default",
+                symbol="PI_XBTUSD",
+                method="POST",
+                path="/sendorder",
+                request_params={},
+                attempt_count=1,
+                result_kind="ok",
+                response_payload={},
+                created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+        )
+        db_session.commit()
+
+    adapter._record_rest_call(
+        method="POST",
+        path="/sendorder",
+        request_params=[("cliOrdId", "CID-NEW")],
+        attempt_count=1,
+        http_status=200,
+        response_payload={"sendStatus": {"order_id": "OID-NEW", "cli_ord_id": "CID-NEW"}},
+        result_kind="ok",
+        error_text=None,
+    )
+
+    with Session(adapter._audit_engine) as db_session:
+        rows = db_session.execute(select(ExchangeRestCall)).scalars().all()
+    assert [row.client_order_id for row in rows] == ["CID-NEW"]
+
+
 def test_place_generates_client_order_id_when_missing(tmp_path):
     session = DummySession(
         [

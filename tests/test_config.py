@@ -83,35 +83,35 @@ def test_load_exchange_config_kraken_live(monkeypatch) -> None:
     assert cfg.adapter_kwargs["environment"] == "live"
 
 
-def test_kraken_futures_default_sqlite_paths_live_under_db() -> None:
+def test_kraken_futures_default_sqlite_paths_live_under_dbs() -> None:
     demo = kraken_futures_environment("demo")
     live = kraken_futures_environment("live")
 
-    assert demo.public_db_url == "sqlite:///db/pub-futures-demo-PI_XBTUSD.sqlite"
-    assert demo.private_db_url == "sqlite:///db/prv-futures-demo.sqlite"
-    assert demo.critical_private_db_url == "sqlite:///db/prv-futures-demo-critical.sqlite"
-    assert live.public_db_url == "sqlite:///db/pub-futures-live-PI_XBTUSD.sqlite"
-    assert live.private_db_url == "sqlite:///db/prv-futures-live.sqlite"
-    assert live.critical_private_db_url == "sqlite:///db/prv-futures-live-critical.sqlite"
+    assert demo.public_db_url == "sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite"
+    assert demo.private_db_url == "sqlite:///dbs/prv-futures-demo.sqlite"
+    assert demo.critical_private_db_url == "sqlite:///dbs/prv-futures-demo-critical.sqlite"
+    assert live.public_db_url == "sqlite:///dbs/pub-futures-live-PI_XBTUSD.sqlite"
+    assert live.private_db_url == "sqlite:///dbs/prv-futures-live.sqlite"
+    assert live.critical_private_db_url == "sqlite:///dbs/prv-futures-live-critical.sqlite"
 
 
 def test_kraken_futures_public_db_path_is_instrument_scoped() -> None:
     assert (
         kraken_futures_public_db_url("demo", "PI_ADAUSD")
-        == "sqlite:///db/pub-futures-demo-PI_ADAUSD.sqlite"
+        == "sqlite:///dbs/pub-futures-demo-PI_ADAUSD.sqlite"
     )
     assert (
         kraken_futures_public_db_url("live", "PF_SOLUSD")
-        == "sqlite:///db/pub-futures-live-PF_SOLUSD.sqlite"
+        == "sqlite:///dbs/pub-futures-live-PF_SOLUSD.sqlite"
     )
 
 
 def test_kraken_futures_audit_and_telemetry_paths_are_account_scoped() -> None:
     assert (
         kraken_futures_audit_db_url("demo", "default")
-        == "sqlite:///db/audit-futures-demo-default.sqlite"
+        == "sqlite:///dbs/audit-futures-demo-default.sqlite"
     )
     assert (
         kraken_futures_telemetry_db_url("demo", "advers")
-        == "sqlite:///db/telemetry-futures-demo-advers.sqlite"
+        == "sqlite:///dbs/telemetry-futures-demo-advers.sqlite"
     )

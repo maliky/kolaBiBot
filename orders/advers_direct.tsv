@@ -1,0 +1,38 @@
+name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	prix	hook
+
+# Kolabi XBT direct market agitator strategy:
+# SCENARIO <name>: Given <time/gate>; When <market pulse fires>; Then immediately send an opposite market tail for the played quantity.
+# Purpose: push Kraken demo liquidity without leaving reduce-only trigger tails fighting the account's net position.
+# Design note: the grammar requires a tail, so these rows use tType=M with no reduce-only flag. The tail should flatten the pair as soon as the head fill is seen.
+# Demo-book rule of thumb from observation: around 200 contracts can move one visible level, about 7 USD; 401 can move around two levels; 1401 can sweep much deeper.
+# Run with the adversarial account:
+# set -a; . ./.env.postgres; set +a
+# python -m kolabi.bot run --strategy orders/advers_direct.tsv --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET --max-active-pairs 1 2>&1 | tee logs/advers_direct.log
+
+# name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	prix	hook
+
+# Given the run starts; When active; Then buy 401 twice with 30s pause, each pulse immediately flattened by a sell market tail.
+ADIR_BUY_401_X2	0 20	2	2	.5	buy	M		M		qAtDpD	401	0	- +
+
+# Given last/reference moved up by at least 10 USD since activation; When crossed; Then buy 1401 once and immediately flatten with a sell market tail.
+ADIR_BUY_1401_GATE	0 120	1	2	0	buy	M		M		qAtDpD	1401	0	10 +
+
+# Given the run has been active for 3 minutes; When active; Then sell 401 twice with 30s pause, each pulse immediately flattened by a buy market tail.
+ADIR_SELL_401_X2	3 30	2	2	.5	sell	M		M		qAtDpD	401	0	- +
+
+# Given last/reference moved down by at least 10 USD after this row activates; When crossed; Then sell 1401 once and immediately flatten with a buy market tail.
+ADIR_SELL_1401_GATE	3 120	1	2	0	sell	M		M		qAtDpD	1401	0	- -10
+
+# --- Manual one-shot rows: uncomment only one at a time for clean book impact measurement. ---
+
+# Given the row is uncommented; When active; Then buy about one visible level and immediately flatten.
+#ADIR_BUY_201_ONESHOT	0 10	1	2	0	buy	M		M		qAtDpD	201	0	- +
+
+# Given the row is uncommented; When active; Then buy about four visible levels and immediately flatten.
+#ADIR_BUY_801_ONESHOT	0 10	1	2	0	buy	M		M		qAtDpD	801	0	- +
+
+# Given the row is uncommented; When active; Then sell about one visible level and immediately flatten.
+#ADIR_SELL_201_ONESHOT	0 10	1	2	0	sell	M		M		qAtDpD	201	0	- +
+
+# Given the row is uncommented; When active; Then sell about four visible levels and immediately flatten.
+#ADIR_SELL_801_ONESHOT	0 10	1	2	0	sell	M		M		qAtDpD	801	0	- +

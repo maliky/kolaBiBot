@@ -40,6 +40,7 @@ from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     AmendOrderCommandRequest,
     AmendTailCommand,
+    CancelCommand,
     DragonSong,
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
@@ -80,6 +81,21 @@ class _RecordingLiveExecutor:
             orig_qty=_command_quantity(command),
             executed_qty=0.0,
             side=getattr(command.request, "side", None),
+        )
+
+
+class _CancelAckLiveExecutor(_RecordingLiveExecutor):
+    async def execute(self, command: DragonSong) -> OrderAck:
+        if not isinstance(command, CancelCommand):
+            return await super().execute(command)
+        self.commands.append(command)
+        self.started.set()
+        await asyncio.sleep(0)
+        return OrderAck(
+            order_id=command.request.clOrdID,
+            status="Canceled",
+            orig_qty=0.0,
+            executed_qty=0.0,
         )
 
 
@@ -274,6 +290,43 @@ class _DbBackedOneLifecycleSource:
         )
 
 
+class _HeadOpenOnlySource:
+    def __init__(
+        self,
+        db: _PrivateDbHarness,
+        executor: _RecordingLiveExecutor,
+        *,
+        pair_name: str = "pair-a",
+    ) -> None:
+        self.db = db
+        self.executor = executor
+        self.pair_name = pair_name
+
+    async def pump(self, runtime) -> None:
+        await runtime.enqueue(
+            EggMove(
+                kind=EggMoveKind.HEAD_HOOKED,
+                occurred_at=datetime.now(timezone.utc),
+                symbol=runtime.symbol,
+                pair_name=self.pair_name,
+                event_id=f"test:{self.pair_name}:head-hooked",
+            )
+        )
+        head_command = await _wait_for_command(runtime, PlaceHeadCommand, self.pair_name)
+        head_client_id = _require_client_id(head_command)
+        head_order_id = await _wait_for_executor_order_id(self.executor, head_client_id)
+        self.db.write_order(
+            order_id=head_order_id,
+            client_order_id=head_client_id,
+            side="buy",
+            order_type="limit",
+            quantity="1",
+            price="100",
+        )
+        while runtime.running:
+            await asyncio.sleep(0.01)
+
+
 def _command_quantity(command: DragonSong) -> float | None:
     quantity = getattr(command.request, "orderQty", None)
     if quantity is None:
@@ -449,6 +502,110 @@ def test_db_backed_runtime_completes_one_lifecycle_with_amend_and_tail_fill(
     assert "UPDATE (pair-a#1): (closed--closed)" in caplog.text
     assert "TFP=" in caplog.text
     assert "TAIL_PENDING" not in caplog.text
+
+
+def test_head_timeout_cancels_unfilled_platform_ack(
+    tmp_path,
+    caplog,
+) -> None:
+    db = _PrivateDbHarness(tmp_path)
+    executor = _RecordingLiveExecutor()
+    pair = replace(sample_strategy()[0], timeout=0.001)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="head-timeout", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=executor,
+        public_source=_HeadOpenOnlySource(db, executor),
+        private_source=KrakenPrivateOrderPollingSource(
+            db.reader,
+            poll_seconds=0.01,
+            head_fill_reference_grace_seconds=0.5,
+        ),
+        simulate=False,
+        tail_visibility_timeout_seconds=0.1,
+    )
+
+    with caplog.at_level("INFO", logger="kola"):
+        result = asyncio.run(_run_runtime_for(runtime, seconds=0.35))
+
+    cancel_commands = [
+        command for command in result.commands if isinstance(command, CancelCommand)
+    ]
+    head_commands = [
+        command for command in result.commands if isinstance(command, PlaceHeadCommand)
+    ]
+    assert head_commands
+    assert cancel_commands
+    head_client_id = _require_client_id(head_commands[0])
+    assert cancel_commands[0].request.clOrdID == executor.order_ids_by_client[head_client_id]
+    assert cancel_commands[0].reason == "head_timeout"
+    assert "HEAD_ACK (pair-a#1):" in caplog.text
+    assert "HEAD_TIMEOUT (pair-a#1):" in caplog.text
+    assert "HEAD_CANCEL_SENT (pair-a#1):" in caplog.text
+
+
+def test_head_timeout_cancel_ack_terminates_unfilled_head_without_retries(
+    tmp_path,
+    caplog,
+) -> None:
+    db = _PrivateDbHarness(tmp_path)
+    executor = _CancelAckLiveExecutor()
+    pair = replace(sample_strategy()[0], timeout=0.001)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="head-timeout", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=executor,
+        public_source=_HeadOpenOnlySource(db, executor),
+        private_source=KrakenPrivateOrderPollingSource(
+            db.reader,
+            poll_seconds=0.01,
+            head_fill_reference_grace_seconds=0.5,
+        ),
+        simulate=False,
+        tail_visibility_timeout_seconds=0.1,
+    )
+
+    with caplog.at_level("INFO", logger="kola"):
+        result = asyncio.run(_run_runtime_for(runtime, seconds=0.45))
+
+    cancel_commands = [
+        command for command in result.commands if isinstance(command, CancelCommand)
+    ]
+    assert len(cancel_commands) == 1
+    pair_state = result.state.pairs["pair-a"]
+    assert pair_state.head_state == HeadState.FAILED
+    assert pair_state.tail_state == TailState.LATENT
+    assert pair_state.played_quantity == Decimal("0.0")
+    assert "HEAD_CANCELLED (pair-a#1): PQ=0.0" in caplog.text
+
+
+def test_entry_window_does_not_cancel_started_head_before_timeout(tmp_path) -> None:
+    db = _PrivateDbHarness(tmp_path)
+    executor = _RecordingLiveExecutor()
+    pair = replace(
+        sample_strategy()[0],
+        window=TimeWindow(start_minutes=0.0, end_minutes=0.001),
+        timeout=60,
+    )
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="entry-window", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=executor,
+        public_source=_HeadOpenOnlySource(db, executor),
+        private_source=KrakenPrivateOrderPollingSource(
+            db.reader,
+            poll_seconds=0.01,
+            head_fill_reference_grace_seconds=0.5,
+        ),
+        simulate=False,
+        tail_visibility_timeout_seconds=0.1,
+    )
+
+    result = asyncio.run(_run_runtime_for(runtime, seconds=0.25))
+
+    assert any(isinstance(command, PlaceHeadCommand) for command in result.commands)
+    assert not any(isinstance(command, CancelCommand) for command in result.commands)
+    assert result.state.pairs["pair-a"].head_state == HeadState.NEW
 
 
 def test_runtime_dispatches_different_pairs_concurrently() -> None:

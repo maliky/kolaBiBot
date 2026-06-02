@@ -109,3 +109,17 @@ def test_semio_open_price_bounds_are_fixed_large_intervals(tmp_path: Path) -> No
 
     assert strategy.pairs[0].head_price == (-1_000_000.0, -5.0)
     assert strategy.pairs[1].head_price == (5.0, 1_000_000.0)
+
+
+def test_fractional_timeout_and_extra_interval_spaces_parse(tmp_path: Path) -> None:
+    strategy = read_strategy_file(
+        _write_strategy(
+            tmp_path / "fractional.tsv",
+            ["FAST\t0   10\t1\t.5\t\tbuy\tL\t\tS-\t\tqAtDpD\t3\t8\t-   +\t"],
+        )
+    )
+
+    assert strategy.pairs[0].timeout == 0.5
+    assert strategy.pairs[0].window.start_minutes == 0.0
+    assert strategy.pairs[0].window.end_minutes == 10.0
+    assert strategy.pairs[0].head_price == (-1_000_000.0, 1_000_000.0)
