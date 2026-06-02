@@ -18,6 +18,7 @@ from time import sleep
 from typing import Any
 
 from sqlalchemy import and_, or_, select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.shared.core.runtime_types import (
@@ -109,6 +110,66 @@ class StrategyRuntimeState:
         return payload
 
 
+_MISSING_SCHEMA_EXCEPTIONS = (OperationalError, ProgrammingError)
+
+
+def _is_missing_schema_error(exc: BaseException) -> bool:
+    """Return true only for absent table/relation/column schema errors."""
+
+    original = getattr(exc, "orig", exc)
+    text = f"{type(original).__name__} {original} {exc}".lower()
+    return (
+        "no such table" in text
+        or "no such column" in text
+        or "undefinedtable" in text
+        or "undefined table" in text
+        or ("relation " in text and "does not exist" in text)
+        or ("column " in text and "does not exist" in text)
+    )
+
+
+def _missing_public_market_state(symbol: str, reason: str) -> PublicMarketState:
+    """Build the typed public not-ready state for absent public DB truth."""
+
+    return PublicMarketState(
+        symbol=symbol,
+        best_bid=None,
+        best_ask=None,
+        mid_price=None,
+        last_price=None,
+        mark_price=None,
+        index_price=None,
+        tick_size=None,
+        spread=None,
+        imbalance=None,
+        avg_bid=None,
+        avg_ask=None,
+        recorded_at=None,
+        source_timestamp=None,
+        age_seconds=None,
+        source_age_seconds=None,
+        indicators={},
+        ready=False,
+        reason=reason,
+    )
+
+
+def _missing_private_feed_state(stream_kind: str) -> PrivateFeedState:
+    """Build the typed private state used when the feeder has not bootstrapped DB."""
+
+    rest_reconciler = stream_kind == "rest_reconciler"
+    return PrivateFeedState(
+        stream_kind=stream_kind,
+        status="missing_schema",
+        updated_at=None,
+        last_heartbeat_at=None,
+        age_seconds=None,
+        ready=rest_reconciler,
+        last_error=None,
+        reason=None if rest_reconciler else f"{stream_kind} DB schema missing",
+    )
+
+
 class KrakenRuntimeStateClient:
     """Read strategy-facing public and private state from local SQLite stores."""
 
@@ -158,80 +219,76 @@ class KrakenRuntimeStateClient:
         """Load the latest public book snapshot and compact indicators."""
         target_symbol = symbol or self.symbol
         current_time = datetime.now(timezone.utc)
-        with self._market_sessionmaker() as session:
-            snapshot = latest_snapshot(
-                session,
-                target_symbol,
-                self.exchange,
-                self.environment,
-                self.market_type,
-            )
-            if snapshot is None:
+        try:
+            with self._market_sessionmaker() as session:
+                snapshot = latest_snapshot(
+                    session,
+                    target_symbol,
+                    self.exchange,
+                    self.environment,
+                    self.market_type,
+                )
+                if snapshot is None:
+                    return _missing_public_market_state(
+                        target_symbol,
+                        "missing public market snapshot",
+                    )
+                indicators = latest_indicator_values(
+                    session,
+                    target_symbol,
+                    self.exchange,
+                    self.environment,
+                    self.market_type,
+                )
+                public_book = _public_book_record_from_snapshot(snapshot, target_symbol)
+                tick_size = _instrument_tick_size(
+                    session,
+                    symbol=target_symbol,
+                    exchange=self.exchange,
+                    environment=self.environment,
+                    market_type=self.market_type,
+                )
+                public_indicators = _public_indicator_records(indicators, target_symbol)
+                freshest_local_time = _latest_public_timestamp(
+                    snapshot.local_timestamp,
+                    indicators,
+                )
+                age_seconds = _age_seconds(freshest_local_time, current_time)
+                source_age_seconds = _age_seconds(snapshot.source_timestamp, current_time)
+                ready = (
+                    age_seconds is not None
+                    and age_seconds <= self.max_public_age_seconds
+                )
+                reason = None if ready else "public market data is stale"
                 return PublicMarketState(
                     symbol=target_symbol,
-                    best_bid=None,
-                    best_ask=None,
-                    mid_price=None,
-                    last_price=None,
-                    mark_price=None,
-                    index_price=None,
-                    tick_size=None,
-                    spread=None,
-                    imbalance=None,
-                    avg_bid=None,
-                    avg_ask=None,
-                    recorded_at=None,
-                    source_timestamp=None,
-                    age_seconds=None,
-                    source_age_seconds=None,
-                    indicators={},
-                    ready=False,
-                    reason="missing public market snapshot",
+                    best_bid=public_book.best_bid,
+                    best_ask=public_book.best_ask,
+                    mid_price=public_book.mid_price,
+                    last_price=_indicator_value(indicators, "last_price"),
+                    mark_price=_indicator_value(indicators, "mark_price"),
+                    index_price=_indicator_value(indicators, "index_price"),
+                    tick_size=tick_size,
+                    spread=public_book.spread,
+                    imbalance=public_book.imbalance,
+                    avg_bid=public_book.avg_bid,
+                    avg_ask=public_book.avg_ask,
+                    recorded_at=public_book.recorded_at,
+                    source_timestamp=public_book.source_timestamp,
+                    age_seconds=age_seconds,
+                    source_age_seconds=source_age_seconds,
+                    indicators={
+                        record.name: record.value for record in public_indicators
+                    },
+                    ready=ready,
+                    reason=reason,
                 )
-            indicators = latest_indicator_values(
-                session,
+        except _MISSING_SCHEMA_EXCEPTIONS as exc:
+            if not _is_missing_schema_error(exc):
+                raise
+            return _missing_public_market_state(
                 target_symbol,
-                self.exchange,
-                self.environment,
-                self.market_type,
-            )
-            public_book = _public_book_record_from_snapshot(snapshot, target_symbol)
-            tick_size = _instrument_tick_size(
-                session,
-                symbol=target_symbol,
-                exchange=self.exchange,
-                environment=self.environment,
-                market_type=self.market_type,
-            )
-            public_indicators = _public_indicator_records(indicators, target_symbol)
-            freshest_local_time = _latest_public_timestamp(
-                snapshot.local_timestamp,
-                indicators,
-            )
-            age_seconds = _age_seconds(freshest_local_time, current_time)
-            source_age_seconds = _age_seconds(snapshot.source_timestamp, current_time)
-            ready = age_seconds is not None and age_seconds <= self.max_public_age_seconds
-            reason = None if ready else "public market data is stale"
-            return PublicMarketState(
-                symbol=target_symbol,
-                best_bid=public_book.best_bid,
-                best_ask=public_book.best_ask,
-                mid_price=public_book.mid_price,
-                last_price=_indicator_value(indicators, "last_price"),
-                mark_price=_indicator_value(indicators, "mark_price"),
-                index_price=_indicator_value(indicators, "index_price"),
-                tick_size=tick_size,
-                spread=public_book.spread,
-                imbalance=public_book.imbalance,
-                avg_bid=public_book.avg_bid,
-                avg_ask=public_book.avg_ask,
-                recorded_at=public_book.recorded_at,
-                source_timestamp=public_book.source_timestamp,
-                age_seconds=age_seconds,
-                source_age_seconds=source_age_seconds,
-                indicators={record.name: record.value for record in public_indicators},
-                ready=ready,
-                reason=reason,
+                "public market DB schema missing",
             )
 
     def fetch_runtime_state(self, symbol: str | None = None) -> StrategyRuntimeState:
@@ -459,10 +516,15 @@ class KrakenRuntimeStateClient:
             market_type=self.market_type,
             account_scope=self.account_scope,
         )
-        connection = latest_connection(session, config, stream_kind)
-        if connection is None and stream_kind == "private_ws":
-            # Compatibility fallback: split-profile critical stream keeps alias health.
-            connection = latest_connection(session, config, "private_ws_critical")
+        try:
+            connection = latest_connection(session, config, stream_kind)
+            if connection is None and stream_kind == "private_ws":
+                # Compatibility fallback: split-profile critical stream keeps alias health.
+                connection = latest_connection(session, config, "private_ws_critical")
+        except _MISSING_SCHEMA_EXCEPTIONS as exc:
+            if not _is_missing_schema_error(exc):
+                raise
+            return _missing_private_feed_state(stream_kind)
         if connection is None:
             if stream_kind == "rest_reconciler":
                 return PrivateFeedState(
@@ -527,18 +589,23 @@ class KrakenRuntimeStateClient:
 
     def _count_open_orders(self, session: Session, symbol: str) -> int:
         """Count strategy-relevant open orders for one symbol."""
-        rows = (
-            session.execute(
-                select(ExchangeOrder).where(
-                    ExchangeOrder.exchange == self.exchange,
-                    ExchangeOrder.environment == self.environment,
-                    ExchangeOrder.market_type == self.market_type,
-                    ExchangeOrder.symbol == symbol,
+        try:
+            rows = (
+                session.execute(
+                    select(ExchangeOrder).where(
+                        ExchangeOrder.exchange == self.exchange,
+                        ExchangeOrder.environment == self.environment,
+                        ExchangeOrder.market_type == self.market_type,
+                        ExchangeOrder.symbol == symbol,
+                    )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
+        except _MISSING_SCHEMA_EXCEPTIONS as exc:
+            if not _is_missing_schema_error(exc):
+                raise
+            return 0
         open_statuses = {"new", "open", "partiallyfilled", "partialfill"}
         order_records = [_private_order_record(row) for row in rows]
         return sum(
@@ -549,20 +616,25 @@ class KrakenRuntimeStateClient:
 
     def _count_fills(self, session: Session, symbol: str) -> int:
         """Count fills for one symbol."""
-        rows = (
-            session.execute(
-                select(ExchangeFill)
-                .join(ExchangeOrder)
-                .where(
-                    ExchangeOrder.exchange == self.exchange,
-                    ExchangeOrder.environment == self.environment,
-                    ExchangeOrder.market_type == self.market_type,
-                    ExchangeOrder.symbol == symbol,
+        try:
+            rows = (
+                session.execute(
+                    select(ExchangeFill)
+                    .join(ExchangeOrder)
+                    .where(
+                        ExchangeOrder.exchange == self.exchange,
+                        ExchangeOrder.environment == self.environment,
+                        ExchangeOrder.market_type == self.market_type,
+                        ExchangeOrder.symbol == symbol,
+                    )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
+        except _MISSING_SCHEMA_EXCEPTIONS as exc:
+            if not _is_missing_schema_error(exc):
+                raise
+            return 0
         fill_records = [_private_fill_record(symbol) for _ in rows]
         return len(fill_records)
 
@@ -579,7 +651,12 @@ class KrakenRuntimeStateClient:
             )
             .order_by(AccountPosition.local_timestamp.desc(), AccountPosition.id.desc())
         )
-        row = session.execute(stmt).scalars().first()
+        try:
+            row = session.execute(stmt).scalars().first()
+        except _MISSING_SCHEMA_EXCEPTIONS as exc:
+            if not _is_missing_schema_error(exc):
+                raise
+            return None
         return None if row is None else _private_position_record(row)
 
 

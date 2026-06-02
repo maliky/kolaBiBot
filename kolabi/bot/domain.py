@@ -178,7 +178,7 @@ class OrderPairSpec:
     window: TimeWindow
     try_num: int
     dr_pause: float | None
-    timeout: int | None
+    timeout: float | None
     head: HeadSpec
     head_price: NumberPair
     head_price_type: str
@@ -199,7 +199,7 @@ class OrderPairSpec:
         return self.dr_pause
 
     @property
-    def timeout_minutes(self) -> int | None:
+    def timeout_minutes(self) -> float | None:
         return self.timeout
 
     @property

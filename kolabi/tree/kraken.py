@@ -30,9 +30,19 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import Mapped, Session, mapped_column, relationship, sessionmaker
+from sqlalchemy.orm import (
+    Mapped,
+    Session,
+    mapped_column,
+    relationship,
+    sessionmaker,
+    synonym,
+)
 
-from kolabi.shared.kraken_futures import kraken_futures_environment
+from kolabi.shared.kraken_futures import (
+    kraken_futures_environment,
+    kraken_futures_public_db_url,
+)
 from kolabi.shared.logging import setup_logging
 from kolabi.shared.persistence import (
     Base,
@@ -55,8 +65,8 @@ class KrakenConfig:
     pair: str = "PI_XBTUSD"
     depth: int = 25
     ws_url: str = "wss://demo-futures.kraken.com/ws/v1"
-    db_url: str = "sqlite:///pub-futures-demo.sqlite"
-    private_db_url: str = "sqlite:///prv-futures-demo.sqlite"
+    db_url: str = "sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite"
+    private_db_url: str = "sqlite:///dbs/prv-futures-demo.sqlite"
     rest_url: str = "https://demo-futures.kraken.com/derivatives/api/v3"
     exchange: str = "kraken"
     environment: str = "demo"
@@ -644,6 +654,8 @@ class OrderBookSnapshot(Base):
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
+    symbol = synonym("pair")
+    local_timestamp = synonym("recorded_at")
     levels: Mapped[list["OrderBookLevel"]] = relationship(
         "OrderBookLevel",
         back_populates="snapshot",
@@ -1541,7 +1553,7 @@ def config_from_args(args: argparse.Namespace) -> KrakenConfig:
         depth=args.depth,
         ws_url=args.ws_url or env_cfg.public_ws_url,
         rest_url=args.rest_url or env_cfg.rest_url,
-        db_url=args.db_url or env_cfg.public_db_url,
+        db_url=args.db_url or kraken_futures_public_db_url(args.environment, args.pair),
         private_db_url=args.private_db_url or env_cfg.private_db_url,
         exchange=args.exchange,
         environment=args.environment,

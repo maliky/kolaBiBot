@@ -47,7 +47,7 @@ def order_pair_from_legacy_values(
     tps_run: NumberPair,
     essais: int | None,
     dr_pause: float | None,
-    timeout: int | None,
+    timeout: float | None,
     side: str,
     prix: NumberPair,
     q: int | None,
@@ -150,7 +150,12 @@ def normalize_legacy_row(row: pd.Series) -> dict[str, object]:
     """Convertit une ligne TSV legacy en champs intermediaires stables."""
 
     def handle_tuple(raw: str, atype: str | None = None) -> NumberPair:
-        el1, el2 = raw.strip().split(" ")
+        parts = raw.strip().split()
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid interval '{raw}'; expected exactly two whitespace-separated bounds."
+            )
+        el1, el2 = parts
         amount_type = atype or ""
         if "p%" in amount_type:
             el1 = str(-PERCENT_OPEN_BOUND) if el1 == "-" else el1
@@ -177,7 +182,7 @@ def normalize_legacy_row(row: pd.Series) -> dict[str, object]:
         "tps_run": handle_tuple(str(row.tps_run)),
         "essais": coerce_to("int", row.essais),
         "dr_pause": coerce_to("float", row.pause),
-        "timeout": coerce_to("int", row.tOut),
+        "timeout": coerce_to("float", row.tOut),
         "side": str(row.side).strip(),
         "prix": handle_tuple(str(row.prix), atype),
         "q": coerce_to("int", row["quantity"] if "quantity" in row else row.q),

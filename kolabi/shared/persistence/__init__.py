@@ -19,6 +19,15 @@ from .models import (
     RawExchangeEvent,
     TailTelemetry,
 )
+from .retention import (
+    PruneResult,
+    prune_account_balances,
+    prune_account_positions,
+    prune_exchange_rest_calls,
+    prune_private_ingest_audits,
+    prune_tail_telemetry,
+    prune_time_count,
+)
 
 __all__ = [
     "AccountBalance",
@@ -35,9 +44,16 @@ __all__ = [
     "OrderEvent",
     "OrderRun",
     "PrivateIngestAudit",
+    "PruneResult",
     "RawExchangeEvent",
     "TailTelemetry",
     "create_persistence_engine",
     "get_sessionmaker",
     "init_engine",
+    "prune_account_balances",
+    "prune_account_positions",
+    "prune_exchange_rest_calls",
+    "prune_private_ingest_audits",
+    "prune_tail_telemetry",
+    "prune_time_count",
 ]

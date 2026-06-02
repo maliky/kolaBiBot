@@ -314,6 +314,14 @@ class AccountBalance(Base):
     __tablename__ = "account_balances"
     __table_args__ = (
         Index("ix_account_balances_lookup", "exchange", "account_scope", "asset"),
+        Index(
+            "ix_account_balances_state_time",
+            "exchange",
+            "environment",
+            "account_scope",
+            "asset",
+            "local_timestamp",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -342,6 +350,16 @@ class AccountPosition(Base):
             "market_type",
             "account_scope",
             "symbol",
+        ),
+        Index(
+            "ix_account_positions_state_time",
+            "exchange",
+            "environment",
+            "market_type",
+            "account_scope",
+            "symbol",
+            "side",
+            "local_timestamp",
         ),
     )
 
@@ -427,6 +445,14 @@ class PrivateIngestAudit(Base):
     __table_args__ = (
         Index("ix_private_ingest_audits_stream_time", "stream_kind", "received_at"),
         Index(
+            "ix_private_ingest_audits_account_time",
+            "exchange",
+            "environment",
+            "market_type",
+            "account_scope",
+            "received_at",
+        ),
+        Index(
             "ix_private_ingest_audits_identity",
             "symbol",
             "client_order_id",
@@ -472,6 +498,14 @@ class ExchangeRestCall(Base):
             "created_at",
         ),
         Index(
+            "ix_exchange_rest_calls_account_time",
+            "exchange",
+            "environment",
+            "market_type",
+            "account_scope",
+            "created_at",
+        ),
+        Index(
             "ix_exchange_rest_calls_correlation",
             "exchange",
             "client_order_id",
@@ -513,6 +547,14 @@ class TailTelemetry(Base):
     __table_args__ = (
         Index("ix_tail_telemetry_pair_time", "pair_name", "recorded_at"),
         Index("ix_tail_telemetry_symbol_time", "symbol", "recorded_at"),
+        Index(
+            "ix_tail_telemetry_account_time",
+            "exchange",
+            "environment",
+            "market_type",
+            "account_scope",
+            "recorded_at",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

@@ -24,9 +24,9 @@ _KRAKEN_FUTURES_ENVIRONMENTS = {
         public_ws_url="wss://demo-futures.kraken.com/ws/v1",
         private_ws_url="wss://demo-futures.kraken.com/ws/v1",
         rest_url="https://demo-futures.kraken.com/derivatives/api/v3",
-        public_db_url="sqlite:///db/pub-futures-demo-PI_XBTUSD.sqlite",
-        private_db_url="sqlite:///db/prv-futures-demo.sqlite",
-        critical_private_db_url="sqlite:///db/prv-futures-demo-critical.sqlite",
+        public_db_url="sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite",
+        private_db_url="sqlite:///dbs/prv-futures-demo.sqlite",
+        critical_private_db_url="sqlite:///dbs/prv-futures-demo-critical.sqlite",
         api_key_env="KRAKEN_FUTURE_DEMO_API_KEY",
         api_secret_env="KRAKEN_FUTURE_DEMO_API_SECRET",
     ),
@@ -35,9 +35,9 @@ _KRAKEN_FUTURES_ENVIRONMENTS = {
         public_ws_url="wss://futures.kraken.com/ws/v1",
         private_ws_url="wss://futures.kraken.com/ws/v1",
         rest_url="https://futures.kraken.com/derivatives/api/v3",
-        public_db_url="sqlite:///db/pub-futures-live-PI_XBTUSD.sqlite",
-        private_db_url="sqlite:///db/prv-futures-live.sqlite",
-        critical_private_db_url="sqlite:///db/prv-futures-live-critical.sqlite",
+        public_db_url="sqlite:///dbs/pub-futures-live-PI_XBTUSD.sqlite",
+        private_db_url="sqlite:///dbs/prv-futures-live.sqlite",
+        critical_private_db_url="sqlite:///dbs/prv-futures-live-critical.sqlite",
         api_key_env="KRAKEN_FUTURE_API_KEY",
         api_secret_env="KRAKEN_FUTURE_API_SECRET",
     ),
@@ -54,7 +54,7 @@ def kraken_futures_public_db_url(environment: str, symbol: str) -> str:
 
     env_cfg = kraken_futures_environment(environment)
     safe_symbol = _db_safe_symbol(symbol.strip() or "PI_XBTUSD")
-    return f"sqlite:///db/pub-futures-{env_cfg.environment}-{safe_symbol}.sqlite"
+    return f"sqlite:///dbs/pub-futures-{env_cfg.environment}-{safe_symbol}.sqlite"
 
 
 def kraken_futures_audit_db_url(environment: str, account_scope: str = "default") -> str:
@@ -62,7 +62,7 @@ def kraken_futures_audit_db_url(environment: str, account_scope: str = "default"
 
     env_cfg = kraken_futures_environment(environment)
     safe_scope = _db_safe_symbol(account_scope.strip() or "default")
-    return f"sqlite:///db/audit-futures-{env_cfg.environment}-{safe_scope}.sqlite"
+    return f"sqlite:///dbs/audit-futures-{env_cfg.environment}-{safe_scope}.sqlite"
 
 
 def kraken_futures_telemetry_db_url(environment: str, account_scope: str = "default") -> str:
@@ -70,7 +70,7 @@ def kraken_futures_telemetry_db_url(environment: str, account_scope: str = "defa
 
     env_cfg = kraken_futures_environment(environment)
     safe_scope = _db_safe_symbol(account_scope.strip() or "default")
-    return f"sqlite:///db/telemetry-futures-{env_cfg.environment}-{safe_scope}.sqlite"
+    return f"sqlite:///dbs/telemetry-futures-{env_cfg.environment}-{safe_scope}.sqlite"
 
 
 def kraken_futures_environment(environment: str) -> KrakenFuturesEnvironment:

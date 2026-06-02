@@ -29,7 +29,7 @@ class DummyIndicatorClient:
 class KrakenDbIndicatorClient:
     """Lit les indicateurs compacts produits par le service KrakenTree."""
 
-    db_url: str = "sqlite:///pub-futures-demo.sqlite"
+    db_url: str = "sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite"
     exchange: str = "kraken"
     environment: str = "demo"
     market_type: str = "futures"
