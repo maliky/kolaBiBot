@@ -57,6 +57,7 @@ from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
     AmendTailCommand,
     CancelCommand,
+    CancelOrderCommandRequest,
     DragonSong,
     OrderDict,
     OrderQty,
@@ -65,6 +66,8 @@ from kolabi.shared.core.runtime_types import (
     PlaceTailCommand,
     Price,
     PrivateOrderRecord,
+    RuntimeCommandKind,
+    Symbol,
     to_decimal,
 )
 
@@ -194,6 +197,17 @@ class _TailAmendPending:
     exchange_order_id: str | None
     started_at: datetime
     deadline_at: datetime
+
+
+@dataclass(frozen=True)
+class _HeadFillDeadline:
+    pair_name: str
+    attempt_index: int
+    client_order_id: str | None
+    exchange_order_id: str | None
+    started_at: datetime
+    deadline_at: datetime
+    cancel_dispatched_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -616,6 +630,7 @@ class StrategyRuntime:
         self._head_order_lifecycle: dict[str, _OrderLifecycleSnapshot] = {}
         self._tail_order_lifecycle: dict[str, _OrderLifecycleSnapshot] = {}
         self._live_command_identities: dict[str, OrderIdentity] = {}
+        self._head_fill_deadlines: dict[_CommandSlot, _HeadFillDeadline] = {}
         self._pending_tail_visibility: dict[_CommandSlot, _TailVisibilityWindow] = {}
         self._pending_tail_amends: dict[_CommandSlot, _TailAmendPending] = {}
 
@@ -681,6 +696,7 @@ class StrategyRuntime:
         self._inflight_commands.clear()
         self._pending_commands.clear()
         self._pending_head_commands.clear()
+        self._head_fill_deadlines.clear()
         self._pending_tail_visibility.clear()
         self._pending_tail_amends.clear()
 
@@ -695,6 +711,7 @@ class StrategyRuntime:
                 if self._command_errors:
                     raise self._command_errors[0]
                 self._prune_live_command_identities()
+                self._check_head_fill_deadlines(current_time)
                 self._check_tail_visibility_deadlines(current_time)
                 self._check_tail_amend_deadlines(current_time)
                 repeat_commands = self.chronos.activate_ready_repeats(
@@ -729,6 +746,7 @@ class StrategyRuntime:
                 self._record_head_lifecycle(event)
                 commands = self.chronos.process_event(event)
                 self.state = self.chronos.state
+                self._sync_head_fill_deadline(event)
                 self._log_new_pending_repeats(previous_repeats)
                 self._log_chain_releases(previous_pairs)
                 self._dispatch_commands(commands)
@@ -791,6 +809,15 @@ class StrategyRuntime:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
+            if isinstance(prepared, CancelCommand):
+                _LOGGER.warning(
+                    "COMMAND_FAILED (%s#%s %s): %s",
+                    prepared.pair_name,
+                    self._command_slot(prepared).attempt_index,
+                    prepared.reason,
+                    _compact_error(exc),
+                )
+                return
             failure = _command_failure_event(
                 prepared,
                 symbol=self.symbol,
@@ -1047,6 +1074,38 @@ class StrategyRuntime:
             previous = previous_pairs.get(pair_name)
             if previous is None:
                 continue
+            if (
+                current.head_state == HeadState.FAILED
+                and previous.head_state != HeadState.FAILED
+            ):
+                identity = current.head_identity
+                played_qty = (
+                    str(current.played_quantity)
+                    if current.played_quantity is not None
+                    else "-"
+                )
+                update_signature = (
+                    str(current.attempt_index),
+                    current.head_state.value,
+                    played_qty,
+                    "-"
+                    if identity is None or identity.client_order_id is None
+                    else identity.client_order_id,
+                    "-"
+                    if identity is None or identity.exchange_order_id is None
+                    else identity.exchange_order_id,
+                )
+                if self._last_pair_updates.get(pair_name) != update_signature:
+                    self._last_pair_updates[pair_name] = update_signature
+                    _LOGGER.info(
+                        "HEAD_CANCELLED (%s#%s): PQ=%s HCID=%s HOID=%s",
+                        pair_name,
+                        update_signature[0],
+                        update_signature[2],
+                        update_signature[3],
+                        update_signature[4],
+                    )
+                continue
             if current.head_state not in {HeadState.LIVING, HeadState.CLOSED} and current.tail_state not in {
                 TailState.LIVING,
                 TailState.SUBMITTED,
@@ -1267,8 +1326,13 @@ class StrategyRuntime:
                     stale.append(key)
                     continue
             else:
-                # cancel correlation can be dropped once the tail is terminal.
-                if pair_state.tail_state in {None, TailState.CLOSED, TailState.FAILED}:
+                # Cancel correlation can be dropped once it cannot affect live exposure.
+                if pair_state.head_state in {HeadState.CLOSED, HeadState.FAILED} and pair_state.tail_state in {
+                    None,
+                    TailState.LATENT,
+                    TailState.CLOSED,
+                    TailState.FAILED,
+                }:
                     stale.append(key)
         for key in stale:
             self._live_command_identities.pop(key, None)
@@ -1430,6 +1494,108 @@ class StrategyRuntime:
             deadline_at=now + timedelta(seconds=self.tail_visibility_timeout_seconds),
         )
 
+    def _sync_head_fill_deadline(self, move: EggMove) -> None:
+        if move.role != OrderRole.HEAD:
+            return
+        pair_name = move.pair_name or resolve_pair_name(self.state, move)
+        if pair_name is None:
+            return
+        pair_state = self.state.pairs.get(pair_name)
+        if pair_state is None:
+            return
+        slot = _CommandSlot(
+            pair_name=pair_name,
+            attempt_index=pair_state.attempt_index,
+            role="head",
+        )
+        if pair_state.head_state in {HeadState.CLOSED, HeadState.FAILED}:
+            self._head_fill_deadlines.pop(slot, None)
+            return
+        if pair_state.head_state not in {HeadState.NEW, HeadState.LIVING}:
+            return
+        timeout_minutes = pair_state.pair.timeout_minutes
+        if timeout_minutes is None or timeout_minutes <= 0:
+            return
+        if slot in self._head_fill_deadlines:
+            return
+        identity = pair_state.head_identity
+        if identity is None:
+            return
+        started_at = _as_utc_aware(move.occurred_at)
+        deadline = _HeadFillDeadline(
+            pair_name=pair_name,
+            attempt_index=pair_state.attempt_index,
+            client_order_id=identity.client_order_id,
+            exchange_order_id=identity.exchange_order_id,
+            started_at=started_at,
+            deadline_at=started_at + timedelta(minutes=float(timeout_minutes)),
+        )
+        self._head_fill_deadlines[slot] = deadline
+        _LOGGER.info(
+            "HEAD_ACK (%s#%s): HCID=%s HOID=%s tOut_deadline=%s",
+            pair_name,
+            pair_state.attempt_index,
+            identity.client_order_id or "-",
+            identity.exchange_order_id or "-",
+            deadline.deadline_at.isoformat(),
+        )
+
+    def _check_head_fill_deadlines(self, now: datetime) -> None:
+        stale_slots: list[_CommandSlot] = []
+        updated: dict[_CommandSlot, _HeadFillDeadline] = {}
+        for slot, deadline in tuple(self._head_fill_deadlines.items()):
+            pair_state = self.state.pairs.get(deadline.pair_name)
+            if pair_state is None or pair_state.attempt_index != deadline.attempt_index:
+                stale_slots.append(slot)
+                continue
+            if pair_state.head_state in {HeadState.CLOSED, HeadState.FAILED}:
+                stale_slots.append(slot)
+                continue
+            if pair_state.head_state not in {HeadState.NEW, HeadState.LIVING}:
+                continue
+            if _as_utc_aware(now) < deadline.deadline_at:
+                continue
+            cancel_id = deadline.exchange_order_id or deadline.client_order_id
+            if not cancel_id:
+                _LOGGER.warning(
+                    "HEAD_TIMEOUT (%s#%s): cannot_cancel missing_identity waited=%ss",
+                    deadline.pair_name,
+                    deadline.attempt_index,
+                    f"{(_as_utc_aware(now) - deadline.started_at).total_seconds():.1f}",
+                )
+                continue
+            cancel_slot = _CommandSlot(
+                pair_name=deadline.pair_name,
+                attempt_index=deadline.attempt_index,
+                role="cancel",
+            )
+            if cancel_slot in self._inflight_commands:
+                continue
+            if (
+                deadline.cancel_dispatched_at is not None
+                and (_as_utc_aware(now) - deadline.cancel_dispatched_at).total_seconds()
+                < self._head_cancel_retry_seconds()
+            ):
+                continue
+            if deadline.cancel_dispatched_at is None:
+                _LOGGER.warning(
+                    "HEAD_TIMEOUT (%s#%s): waited=%ss HCID=%s HOID=%s",
+                    deadline.pair_name,
+                    deadline.attempt_index,
+                    f"{(_as_utc_aware(now) - deadline.started_at).total_seconds():.1f}",
+                    deadline.client_order_id or "-",
+                    deadline.exchange_order_id or "-",
+                )
+            command = _head_timeout_cancel_command(pair_state, self.symbol, cancel_id)
+            self._dispatch_commands((command,))
+            updated[slot] = replace(deadline, cancel_dispatched_at=_as_utc_aware(now))
+        for slot in stale_slots:
+            self._head_fill_deadlines.pop(slot, None)
+        self._head_fill_deadlines.update(updated)
+
+    def _head_cancel_retry_seconds(self) -> float:
+        return max(5.0, self.tail_visibility_timeout_seconds)
+
     def _check_tail_visibility_deadlines(self, now: datetime) -> None:
         stale_slots: list[_CommandSlot] = []
         delayed_slots: dict[_CommandSlot, _TailVisibilityWindow] = {}
@@ -1529,6 +1695,17 @@ class StrategyRuntime:
                 _fmt_compact_price(command.request.orderQty),
                 _fmt_compact_price(command.request.price),
                 _fmt_compact_price(command.request.stopPx),
+            )
+            return
+        if isinstance(command, CancelCommand):
+            label = "HEAD_CANCEL_SENT" if command.reason == "head_timeout" else "CANCEL_SENT"
+            _LOGGER.info(
+                "%s (%s#%s): CID=%s reason=%s",
+                label,
+                command.pair_name,
+                slot.attempt_index,
+                command.request.clOrdID,
+                command.reason,
             )
             return
         if not isinstance(command, AmendTailCommand):
@@ -1639,6 +1816,15 @@ class StrategyRuntime:
                     kind=EggMoveKind.TAIL_AMEND_REJECTED,
                 ),
             )
+        if isinstance(command, CancelCommand) and command.reason == "head_timeout":
+            timeout_cancel = _head_timeout_cancel_event_from_ack(
+                command,
+                ack,
+                symbol=self.symbol,
+                pair_state=self.state.pairs.get(command.pair_name),
+            )
+            if timeout_cancel is not None:
+                return (timeout_cancel,)
         if not self.simulate:
             # Live/demo lifecycle is DB-grounded; adapter ACKs are correlation only.
             return ()
@@ -1740,6 +1926,33 @@ def _pair_runtime_complete(
     return pair_state.tail_state in {TailState.CLOSED, TailState.FAILED}
 
 
+def _head_timeout_cancel_command(
+    pair_state: PairCycleState,
+    symbol: str,
+    cancel_id: str,
+) -> CancelCommand:
+    request = CancelOrderCommandRequest(
+        pair_name=pair_state.pair.name,
+        clOrdID=cancel_id,
+    )
+    return CancelCommand(
+        kind=RuntimeCommandKind.CANCEL,
+        symbol=Symbol(symbol),
+        pair_name=pair_state.pair.name,
+        request=request,
+        reason="head_timeout",
+        legacy_order=cast(
+            OrderDict,
+            {
+                "pair_name": pair_state.pair.name,
+                "ordType": "cancel",
+                "clOrdID": cancel_id,
+                "text": "head_timeout",
+            },
+        ),
+    )
+
+
 def _command_failure_event(
     command: DragonSong,
     *,
@@ -1834,6 +2047,56 @@ def _tail_amend_event_from_ack(
     )
 
 
+def _head_timeout_cancel_event_from_ack(
+    command: CancelCommand,
+    ack: OrderAck,
+    *,
+    symbol: str,
+    pair_state: PairCycleState | None,
+) -> EggMove | None:
+    if not _ack_is_zero_fill_cancel(ack):
+        return None
+    head_identity = None if pair_state is None else pair_state.head_identity
+    client_order_id = (
+        None if head_identity is None else head_identity.client_order_id
+    )
+    exchange_order_id = (
+        str(ack.order_id)
+        if ack.order_id
+        else None if head_identity is None else head_identity.exchange_order_id
+    )
+    reply: dict[str, object] = {
+        "ordStatus": "Canceled",
+        "execType": "Canceled",
+        "cumQty": 0.0,
+    }
+    if exchange_order_id:
+        reply["orderID"] = exchange_order_id
+    else:
+        reply["orderID"] = command.request.clOrdID
+    if client_order_id:
+        reply["clOrdID"] = client_order_id
+    if ack.orig_qty is not None:
+        reply["orderQty"] = float(to_decimal(ack.orig_qty))
+    elif pair_state is not None and pair_state.pair.head_quantity is not None:
+        reply["orderQty"] = float(to_decimal(pair_state.pair.head_quantity))
+    if ack.price is not None:
+        price = float(to_decimal(ack.price))
+        reply["price"] = price
+        reply["stopPx"] = price
+    if ack.side is not None:
+        reply["side"] = ack.side
+    return EggMove(
+        kind=EggMoveKind.NOT_PLAYED_CANCELED,
+        occurred_at=datetime.now(timezone.utc),
+        symbol=symbol,
+        pair_name=command.pair_name,
+        role=OrderRole.HEAD,
+        reply=reply,
+        is_private=False,
+    )
+
+
 def _command_request_quantity(command: DragonSong) -> Decimal | None:
     quantity = getattr(command.request, "orderQty", None)
     if quantity is None:
@@ -1889,6 +2152,15 @@ def _ack_is_rejected(ack: OrderAck) -> bool:
         "failed",
         "invalidprice",
     }
+
+
+def _ack_is_zero_fill_cancel(ack: OrderAck) -> bool:
+    status = ack.status.replace(" ", "").replace("_", "").replace("-", "").lower()
+    if status not in {"canceled", "cancelled", "notfound", "notfoundcancelled"}:
+        return False
+    if ack.executed_qty is None:
+        return False
+    return to_decimal(ack.executed_qty) == Decimal("0")
 
 
 def _record_matches_identity(record, identity: OrderIdentity) -> bool:
@@ -2028,10 +2300,16 @@ def _prices_close(
 
 def _record_timestamp(record) -> datetime | None:
     if record.local_timestamp is not None:
-        return datetime.fromisoformat(record.local_timestamp)
+        return _as_utc_aware(datetime.fromisoformat(record.local_timestamp))
     if record.source_timestamp is not None:
-        return datetime.fromisoformat(record.source_timestamp)
+        return _as_utc_aware(datetime.fromisoformat(record.source_timestamp))
     return None
+
+
+def _as_utc_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _played_quantity_from_request(

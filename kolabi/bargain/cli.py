@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from dataclasses import asdict
 from typing import Any, Sequence, cast
@@ -17,7 +18,12 @@ def build_parser() -> argparse.ArgumentParser:
     """Build a small exchange CLI for direct adapter operations."""
     parser = argparse.ArgumentParser(
         prog="python -m kolabi.bargain.cli",
-        usage="python -m kolabi.bargain.cli [--exchange EXCHANGE] [--symbol SYMBOL] [--environment {demo,live}] <command> [<args>]",
+        usage=(
+            "python -m kolabi.bargain.cli [--exchange EXCHANGE] [--symbol SYMBOL] "
+            "[--environment {demo,live}] [--account-scope ACCOUNT_SCOPE] "
+            "[--api-key-env API_KEY_ENV] [--api-secret-env API_SECRET_ENV] "
+            "<command> [<args>]"
+        ),
         description=(
             "Direct exchange adapter CLI for instrument checks, account reads, and order actions."
         ),
@@ -26,6 +32,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--exchange", choices=EXCHANGES, default="kraken", help="Target exchange adapter.")
     parser.add_argument("--symbol", default="PI_XBTUSD", help="Trading symbol / instrument id.")
     parser.add_argument("--environment", choices=("demo", "live"), default="demo", help="API environment.")
+    parser.add_argument(
+        "--account-scope",
+        default="default",
+        help="Logical account/persona label used for account-scoped persistence lanes.",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        help="Environment variable name containing the API key.",
+    )
+    parser.add_argument(
+        "--api-secret-env",
+        help="Environment variable name containing the API secret.",
+    )
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
@@ -184,9 +203,45 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_adapter(exchange: str, symbol: str, environment: str):
+def _env_scope_key(account_scope: str) -> str:
+    return (account_scope.strip() or "default").upper().replace("-", "_")
+
+
+def _kolabi_scoped_db_url(lane: str, account_scope: str) -> str | None:
+    lane_key = lane.upper()
+    if (account_scope.strip() or "default") == "default":
+        return os.environ.get(f"KOLABI_{lane_key}_DB_URL")
+    return os.environ.get(f"KOLABI_{_env_scope_key(account_scope)}_{lane_key}_DB_URL")
+
+
+def build_adapter(
+    exchange: str,
+    symbol: str,
+    environment: str,
+    *,
+    account_scope: str = "default",
+    api_key_env: str | None = None,
+    api_secret_env: str | None = None,
+):
     """Build the adapter for the selected exchange from environment credentials."""
-    config = load_exchange_config(exchange, symbol=symbol, environment=environment)
+    config = load_exchange_config(
+        exchange,
+        symbol=symbol,
+        environment=environment,
+        api_key_env=api_key_env,
+        api_secret_env=api_secret_env,
+    )
+    if exchange.lower() == "kraken":
+        config.adapter_kwargs["account_scope"] = account_scope
+        public_db_url = os.environ.get("KOLABI_MARKET_DB_URL")
+        account_db_url = _kolabi_scoped_db_url("ACCOUNT", account_scope)
+        audit_db_url = _kolabi_scoped_db_url("AUDIT", account_scope)
+        if public_db_url is not None:
+            config.adapter_kwargs["public_db_url"] = public_db_url
+        if account_db_url is not None:
+            config.adapter_kwargs["account_db_url"] = account_db_url
+        if audit_db_url is not None:
+            config.adapter_kwargs["audit_db_url"] = audit_db_url
     adapter_cls = get_adapter(exchange)
     return adapter_cls(
         api_key=config.api_key,
@@ -197,7 +252,15 @@ def build_adapter(exchange: str, symbol: str, environment: str):
     )
 
 
-def build_bot_service(exchange: str, symbol: str, environment: str):
+def build_bot_service(
+    exchange: str,
+    symbol: str,
+    environment: str,
+    *,
+    account_scope: str = "default",
+    api_key_env: str | None = None,
+    api_secret_env: str | None = None,
+):
     """Build BotService for admin actions that must flow through the bot path."""
     from kolabi.bot.service import BotConfig, BotService
 
@@ -206,6 +269,9 @@ def build_bot_service(exchange: str, symbol: str, environment: str):
             exchange=exchange,
             symbol=symbol,
             environment=environment,
+            account_scope=account_scope,
+            api_key_env=api_key_env,
+            api_secret_env=api_secret_env,
             require_ready=False,
             log_level="INFO",
         )
@@ -429,7 +495,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Point d'entree CLI pour tests de communication directs."""
     parser = build_parser()
     args = parser.parse_args(argv)
-    adapter = build_adapter(args.exchange, args.symbol, args.environment)
+    adapter = build_adapter(
+        args.exchange,
+        args.symbol,
+        args.environment,
+        account_scope=args.account_scope,
+        api_key_env=args.api_key_env,
+        api_secret_env=args.api_secret_env,
+    )
 
     if args.command == "instruments":
         instruments = adapter.list_instruments()
@@ -498,21 +571,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command == "cancel-all":
-        service = build_bot_service(args.exchange, args.symbol, args.environment)
+        service = build_bot_service(
+            args.exchange,
+            args.symbol,
+            args.environment,
+            account_scope=args.account_scope,
+            api_key_env=args.api_key_env,
+            api_secret_env=args.api_secret_env,
+        )
         print_json(
             {
                 "environment": args.environment,
+                "account_scope": args.account_scope,
                 "symbol": args.symbol,
                 "cancelled": [ack_to_payload(ack) for ack in service.cancel_all_orders()],
             }
         )
         return 0
     if args.command == "close-all":
-        service = build_bot_service(args.exchange, args.symbol, args.environment)
+        service = build_bot_service(
+            args.exchange,
+            args.symbol,
+            args.environment,
+            account_scope=args.account_scope,
+            api_key_env=args.api_key_env,
+            api_secret_env=args.api_secret_env,
+        )
         result = service.close_all_orders()
         print_json(
             {
                 "environment": args.environment,
+                "account_scope": args.account_scope,
                 "symbol": args.symbol,
                 "cancelled": [ack_to_payload(ack) for ack in result["cancelled"]],
                 "close_order": (
@@ -520,7 +609,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if result["close_ack"] is None
                     else ack_to_payload(cast(OrderAck, result["close_ack"]))
                 ),
+                "close_action": result.get("close_action"),
+                "close_skipped_reason": result.get("close_skipped_reason"),
                 "closed": bool(result["closed"]),
+                "cancel_errors": result.get("cancel_errors", []),
+                "audit_persistence_ok": result.get("audit_persistence_ok", True),
+                "audit_persistence_errors": result.get("audit_persistence_errors", []),
                 "position_before": position_to_payload(cast(Position, result["position_before"])),
                 "position_after": position_to_payload(cast(Position, result["position_after"])),
             }
