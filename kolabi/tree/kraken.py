@@ -405,7 +405,7 @@ class KrakenTree:
         self._latest_snapshot_id = snapshot.id
         self._last_snapshot_signature = pending.signature
         self._last_snapshot_flush_at = now
-        self.persist_indicators(pending, now)
+        self.persist_indicators(pending, now, include_ticker_prices=False)
         return snapshot
 
     def persist_market_snapshot(
@@ -442,11 +442,17 @@ class KrakenTree:
             session.refresh(snapshot)
             return snapshot
 
-    def persist_indicators(self, pending: PendingBook, now: datetime) -> int:
+    def persist_indicators(
+        self,
+        pending: PendingBook,
+        now: datetime,
+        *,
+        include_ticker_prices: bool = True,
+    ) -> int:
         """Persiste les indicateurs compacts normalises."""
         source_anchor = pending.source_timestamp or pending.received_at
         source_age = max((now - source_anchor).total_seconds(), 0.0)
-        ticker_prices = self._ticker_prices_due(now)
+        ticker_prices = self._ticker_prices_due(now) if include_ticker_prices else None
         indicators = build_indicator_rows(
             config=self.config,
             pending=pending,
