@@ -1,4 +1,12 @@
 import pytest
+from kolabi.shared.binance_futures import (
+    binance_futures_audit_db_url,
+    binance_futures_critical_db_url,
+    binance_futures_environment,
+    binance_futures_private_db_url,
+    binance_futures_public_db_url,
+    binance_futures_telemetry_db_url,
+)
 from kolabi.shared.config import load_exchange_config
 from kolabi.shared.kraken_futures import (
     kraken_futures_audit_db_url,
@@ -9,16 +17,16 @@ from kolabi.shared.kraken_futures import (
 
 
 def test_load_exchange_config_binance_defaults(monkeypatch) -> None:
-    monkeypatch.delenv("BINANCE_USE_TESTNET", raising=False)
-    monkeypatch.setenv("BINANCE_KEY", "key")
-    monkeypatch.setenv("BINANCE_SECRET", "secret")
+    monkeypatch.delenv("BINANCE_FUTURES_USE_DEMO", raising=False)
+    monkeypatch.setenv("BINANCE_FUTURES_DEMO_API_KEY", "key")
+    monkeypatch.setenv("BINANCE_FUTURES_DEMO_API_SECRET", "secret")
 
-    cfg = load_exchange_config("binance", symbol="BTCUSDT")
+    cfg = load_exchange_config("binance", symbol="BTCUSDT", environment="demo")
 
     assert cfg.api_key == "key"
-    assert cfg.base_url == "https://api.binance.com/api"
+    assert cfg.base_url == "https://testnet.binancefuture.com"
     assert cfg.symbol == "BTCUSDT"
-    assert cfg.adapter_kwargs == {}
+    assert cfg.adapter_kwargs["environment"] == "demo"
 
 
 def test_load_exchange_config_bitmex_testnet(monkeypatch) -> None:
@@ -35,10 +43,10 @@ def test_load_exchange_config_bitmex_testnet(monkeypatch) -> None:
 
 
 def test_load_exchange_config_missing_credentials(monkeypatch) -> None:
-    monkeypatch.delenv("BINANCE_KEY", raising=False)
-    monkeypatch.delenv("BINANCE_SECRET", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_DEMO_API_KEY", raising=False)
+    monkeypatch.delenv("BINANCE_FUTURES_DEMO_API_SECRET", raising=False)
     with pytest.raises(ValueError):
-        load_exchange_config("binance", symbol="BTCUSDT", env={})
+        load_exchange_config("binance", symbol="BTCUSDT", environment="demo", env={})
 
 
 def test_load_exchange_config_kraken_demo(monkeypatch) -> None:
@@ -114,4 +122,31 @@ def test_kraken_futures_audit_and_telemetry_paths_are_account_scoped() -> None:
     assert (
         kraken_futures_telemetry_db_url("demo", "advers")
         == "sqlite:///dbs/telemetry-futures-demo-advers.sqlite"
+    )
+
+
+def test_binance_futures_default_paths_are_exchange_scoped() -> None:
+    demo = binance_futures_environment("demo")
+
+    assert demo.rest_url == "https://testnet.binancefuture.com"
+    assert demo.api_key_env == "BINANCE_FUTURES_DEMO_API_KEY"
+    assert (
+        binance_futures_public_db_url("demo", "BTCUSDT")
+        == "sqlite:///dbs/pub-binance-futures-demo-BTCUSDT.sqlite"
+    )
+    assert (
+        binance_futures_private_db_url("demo", "advers")
+        == "sqlite:///dbs/prv-binance-futures-demo-advers.sqlite"
+    )
+    assert (
+        binance_futures_critical_db_url("demo", "advers")
+        == "sqlite:///dbs/prv-binance-futures-demo-advers-critical.sqlite"
+    )
+    assert (
+        binance_futures_audit_db_url("demo", "advers")
+        == "sqlite:///dbs/audit-binance-futures-demo-advers.sqlite"
+    )
+    assert (
+        binance_futures_telemetry_db_url("demo", "advers")
+        == "sqlite:///dbs/telemetry-binance-futures-demo-advers.sqlite"
     )

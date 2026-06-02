@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping
 
+from kolabi.shared.binance_futures import binance_futures_environment
 from kolabi.shared.kraken_futures import kraken_futures_environment
 
 
@@ -27,13 +28,19 @@ def _truthy(value: str | None) -> bool:
 
 _DEFAULTS: Dict[str, Dict[str, Any]] = {
     "binance": {
-        "base_url": "https://api.binance.com/api",
-        "test_base_url": "https://testnet.binance.vision/api",
-        "key_var": "BINANCE_KEY",
-        "secret_var": "BINANCE_SECRET",
-        "test_key_var": "BINANCE_TEST_KEY",
-        "test_secret_var": "BINANCE_TEST_SECRET",
-        "use_testnet_var": "BINANCE_USE_TESTNET",
+        "base_url": "https://fapi.binance.com",
+        "test_base_url": "https://testnet.binancefuture.com",
+        "key_var": "BINANCE_FUTURES_API_KEY",
+        "secret_var": "BINANCE_FUTURES_API_SECRET",
+        "test_key_var": "BINANCE_FUTURES_DEMO_API_KEY",
+        "test_secret_var": "BINANCE_FUTURES_DEMO_API_SECRET",
+        "use_testnet_var": "BINANCE_FUTURES_USE_DEMO",
+        "adapter_env": {
+            "account_db_url": "BINANCE_FUTURES_ACCOUNT_DB_URL",
+            "public_db_url": "BINANCE_FUTURES_PUBLIC_DB_URL",
+            "audit_db_url": "BINANCE_FUTURES_AUDIT_DB_URL",
+            "timeout": "BINANCE_FUTURES_TIMEOUT",
+        },
     },
     "bitmex": {
         "base_url": "https://www.bitmex.com/api/v1/",
@@ -99,6 +106,19 @@ def load_exchange_config(
         defaults["secret_var"] = kraken_env.api_secret_env
         defaults["test_key_var"] = kraken_env.api_key_env
         defaults["test_secret_var"] = kraken_env.api_secret_env
+    elif normalized == "binance":
+        binance_env = binance_futures_environment(environment or "demo")
+        if "testnet" not in overrides:
+            testnet = binance_env.environment == "demo"
+        else:
+            testnet = bool(overrides.pop("testnet"))
+        defaults = dict(defaults)
+        defaults["base_url"] = binance_env.rest_url
+        defaults["test_base_url"] = binance_env.rest_url
+        defaults["key_var"] = binance_env.api_key_env
+        defaults["secret_var"] = binance_env.api_secret_env
+        defaults["test_key_var"] = binance_env.api_key_env
+        defaults["test_secret_var"] = binance_env.api_secret_env
     else:
         testnet = overrides.pop("testnet", None)
         if testnet is None:
