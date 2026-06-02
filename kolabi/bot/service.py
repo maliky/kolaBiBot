@@ -30,6 +30,13 @@ from kolabi.bot.strategy_runtime import (
     StrategyRuntime,
     plan_strategy_once,
 )
+from kolabi.shared.binance_futures import (
+    binance_futures_audit_db_url,
+    binance_futures_critical_db_url,
+    binance_futures_private_db_url,
+    binance_futures_public_db_url,
+    binance_futures_telemetry_db_url,
+)
 from kolabi.shared.config import ExchangeConfig, load_exchange_config
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
@@ -193,17 +200,39 @@ class BotService:
                 config.environment,
                 config.account_scope,
             )
+        elif config.exchange.lower() == "binance":
+            market_db_url = market_db_url or binance_futures_public_db_url(
+                config.environment,
+                config.symbol,
+            )
+            account_db_url = account_db_url or binance_futures_private_db_url(
+                config.environment,
+                config.account_scope,
+            )
+            critical_account_db_url = (
+                critical_account_db_url
+                or binance_futures_critical_db_url(
+                    config.environment,
+                    config.account_scope,
+                )
+            )
+            audit_db_url = audit_db_url or binance_futures_audit_db_url(
+                config.environment,
+                config.account_scope,
+            )
+            telemetry_db_url = telemetry_db_url or binance_futures_telemetry_db_url(
+                config.environment,
+                config.account_scope,
+            )
         self.indicators: IndicatorClient = indicators or (
             KrakenDbIndicatorClient(
-                # > should probably use global constant here instead of string
                 db_url=market_db_url
                 or kraken_futures_public_db_url(config.environment, config.symbol),
+                exchange=config.exchange.lower(),
                 environment=config.environment,
-                # > Same here for the moment we swith to spot
                 market_type="futures",
             )
-            # > Note that kraken is not the only target for this bot.
-            if config.exchange.lower() == "kraken"
+            if config.exchange.lower() in {"kraken", "binance"}
             else DummyIndicatorClient()
         )
         self.recorder: OrderRecorder | None = (
@@ -219,7 +248,7 @@ class BotService:
         self._telemetry_db_url = telemetry_db_url
         self.runtime_state: KrakenRuntimeStateClient | None = None
         if (
-            config.exchange.lower() == "kraken"
+            config.exchange.lower() in {"kraken", "binance"}
             and market_db_url is not None
             and account_db_url is not None
         ):
@@ -257,15 +286,15 @@ class BotService:
         return payload
 
     def _wait_until_ready(self) -> None:
-        """Wait for fresh Kraken public/private state before starting the runtime."""
+        """Wait for fresh DB-grounded public/private state before starting runtime."""
         if (
             self.runtime_state is None
-            or self.config.exchange.lower() != "kraken"
             or not self.config.require_ready
         ):
             return
         self.logger.info(
-            "kraken runtime preflight symbol=%s env=%s market_db=%s account_db=%s critical_account_db=%s",
+            "%s runtime preflight symbol=%s env=%s market_db=%s account_db=%s critical_account_db=%s",
+            self.config.exchange.lower(),
             self.config.symbol,
             self.config.environment,
             self._market_db_url,
@@ -279,7 +308,8 @@ class BotService:
         if not state.ready:
             raise TimeoutError(self._format_wait_timeout(state))
         self.logger.info(
-            "kraken runtime ready symbol=%s public_age=%.2fs private_age=%.2fs",
+            "%s runtime ready symbol=%s public_age=%.2fs private_age=%.2fs",
+            self.config.exchange.lower(),
             state.symbol,
             state.public.age_seconds or 0.0,
             state.private_ws.age_seconds or 0.0,
@@ -306,7 +336,7 @@ class BotService:
                 f" --account-scope {self.config.account_scope}'"
             )
         return (
-            "Kraken runtime did not become ready within "
+            f"{self.config.exchange.capitalize()} runtime did not become ready within "
             f"{self.config.ready_timeout_seconds:.0f}s: {reasons} "
             f"(public_age={public_age} private_status={state.private_ws.status} "
             f"private_age={private_age} private_last_heartbeat={private_last_heartbeat} "
@@ -399,21 +429,22 @@ class BotService:
         )
 
     def _validate_pairs(self, pairs: Iterable[OrderPairSpec]) -> None:
-        """Valide les contraintes instrument Kraken avant envoi."""
-        if self.config.exchange.lower() != "kraken":
+        """Validate exchange-specific instrument and grammar constraints."""
+        exchange = self.config.exchange.lower()
+        if exchange not in {"kraken", "binance"}:
             return
         if self.exchange_config is None:
             self._ensure_exchange_config()
         assert self.exchange_config is not None
-        adapter_cls = get_adapter("kraken")
+        adapter_cls = get_adapter(exchange)
         adapter = cast(
             InstrumentRulesExchange,
             adapter_cls(
-            api_key=self.exchange_config.api_key,
-            api_secret=self.exchange_config.api_secret,
-            base_url=self.exchange_config.base_url,
-            symbol=self.exchange_config.symbol,
-            **self.exchange_config.adapter_kwargs,
+                api_key=self.exchange_config.api_key,
+                api_secret=self.exchange_config.api_secret,
+                base_url=self.exchange_config.base_url,
+                symbol=self.exchange_config.symbol,
+                **self.exchange_config.adapter_kwargs,
             ),
         )
         rules = adapter.instrument_rules(self.config.symbol)
@@ -424,6 +455,8 @@ class BotService:
             else 1.0
         )
         for pair in pairs:
+            if exchange == "binance":
+                _validate_binance_pair_grammar(pair)
             if (
                 pair.head_quantity_type == "qA"
                 and pair.head_quantity is not None
@@ -480,7 +513,7 @@ class BotService:
             api_key_env=self.config.api_key_env,
             api_secret_env=self.config.api_secret_env,
         )
-        if self.config.exchange.lower() == "kraken":
+        if self.config.exchange.lower() in {"kraken", "binance"}:
             if self._market_db_url is not None:
                 self.exchange_config.adapter_kwargs["public_db_url"] = (
                     self._market_db_url
@@ -994,6 +1027,27 @@ def _validate_order_prices(
         raise ValueError(f"Order pair '{pair_name}' trigger order needs a stopPx")
     if base in {"SL", "LT"} and price is None:
         raise ValueError(f"Order pair '{pair_name}' trigger-limit order needs a limit price")
+
+
+def _validate_binance_pair_grammar(pair: OrderPairSpec) -> None:
+    """Fail unsupported Binance grammar at preflight, before REST submission."""
+
+    for role, raw in (("head", pair.head.order_type), ("tail", pair.tail.order_type)):
+        code = parse_order_code(raw)
+        if code.base_key not in {"M", "L", "S"}:
+            raise ValueError(
+                f"Binance Futures does not support {code.base} {role} orders in v1; "
+                "use M, L, or S."
+            )
+        if code.price_suffix == "i":
+            raise ValueError(
+                f"Binance Futures does not support index-price triggers for {role} "
+                f"order type '{raw}'. Use last/contract or mark price."
+            )
+        if code.post_only and code.base_key != "L":
+            raise ValueError(
+                f"Binance Futures post-only is only supported on limit orders; got {raw}."
+            )
 
 
 @dataclass(frozen=True)
