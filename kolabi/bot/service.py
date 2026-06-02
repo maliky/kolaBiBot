@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Optional, Protocol, TypeVar, cast
@@ -52,10 +53,27 @@ from kolabi.shared.kraken_futures import (
     kraken_futures_telemetry_db_url,
 )
 from kolabi.shared.logging import setup_logging
+from kolabi.shared.pruning import DEFAULT_PRUNING, TimeCountPruning
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntimeState
 
 _LOGGER = logging.getLogger("kola")
 _T = TypeVar("_T")
+
+
+def _env_scope_key(account_scope: str) -> str:
+    """Return the env-var-safe account scope key used for Kolabi DB lanes."""
+
+    raw = account_scope.strip() or "default"
+    return "".join(ch if ch.isalnum() else "_" for ch in raw).upper()
+
+
+def _kolabi_scoped_db_url(lane: str, account_scope: str) -> str | None:
+    """Resolve KOLABI_* DB lane URLs without mixing scoped accounts by accident."""
+
+    lane_key = lane.upper()
+    if (account_scope.strip() or "default") == "default":
+        return os.environ.get(f"KOLABI_{lane_key}_DB_URL")
+    return os.environ.get(f"KOLABI_{_env_scope_key(account_scope)}_{lane_key}_DB_URL")
 
 
 class InstrumentRulesExchange(Protocol):
@@ -121,6 +139,12 @@ class BotConfig:
     max_active_pairs: int = 4
     rest_min_interval_seconds: float = 0.1
     rest_max_inflight: int = 1
+    rest_audit_retention_minutes: int = DEFAULT_PRUNING.rest_audit.retention_minutes
+    rest_audit_retention_limit: int = DEFAULT_PRUNING.rest_audit.retention_limit
+    tail_telemetry_retention_minutes: int = (
+        DEFAULT_PRUNING.tail_telemetry.retention_minutes
+    )
+    tail_telemetry_retention_limit: int = DEFAULT_PRUNING.tail_telemetry.retention_limit
 
 
 class BotService:
@@ -134,11 +158,23 @@ class BotService:
         self.config = config
         self.logger = setup_logging(config.log_level)
         self.exchange_config: ExchangeConfig | None = None
-        market_db_url = config.market_db_url
-        account_db_url = config.account_db_url
-        critical_account_db_url = config.critical_account_db_url
-        audit_db_url = config.audit_db_url
-        telemetry_db_url = config.telemetry_db_url
+        market_db_url = config.market_db_url or os.environ.get("KOLABI_MARKET_DB_URL")
+        account_db_url = config.account_db_url or _kolabi_scoped_db_url(
+            "ACCOUNT",
+            config.account_scope,
+        )
+        critical_account_db_url = (
+            config.critical_account_db_url
+            or _kolabi_scoped_db_url("CRITICAL", config.account_scope)
+        )
+        audit_db_url = config.audit_db_url or _kolabi_scoped_db_url(
+            "AUDIT",
+            config.account_scope,
+        )
+        telemetry_db_url = config.telemetry_db_url or _kolabi_scoped_db_url(
+            "TELEMETRY",
+            config.account_scope,
+        )
         if config.exchange.lower() == "kraken":
             env_cfg = kraken_futures_environment(config.environment)
             market_db_url = market_db_url or kraken_futures_public_db_url(
@@ -263,11 +299,18 @@ class BotService:
             else "unknown"
         )
         private_last_heartbeat = state.private_ws.last_heartbeat_at or "-"
+        hint = ""
+        if state.private_ws.status in {"missing", "missing_schema"}:
+            hint = (
+                " start_private='scripts/kolabidb private start"
+                f" --account-scope {self.config.account_scope}'"
+            )
         return (
             "Kraken runtime did not become ready within "
             f"{self.config.ready_timeout_seconds:.0f}s: {reasons} "
             f"(public_age={public_age} private_status={state.private_ws.status} "
-            f"private_age={private_age} private_last_heartbeat={private_last_heartbeat})"
+            f"private_age={private_age} private_last_heartbeat={private_last_heartbeat} "
+            f"account_scope={self.config.account_scope}{hint})"
         )
 
     def run_strategy(
@@ -309,6 +352,15 @@ class BotService:
                     PersistenceConfig(
                         self._telemetry_db_url,
                         sqlite_busy_timeout_seconds=0.5,
+                        tail_telemetry_pruning=TimeCountPruning(
+                            retention_minutes=(
+                                self.config.tail_telemetry_retention_minutes
+                            ),
+                            retention_limit=self.config.tail_telemetry_retention_limit,
+                            maintenance_seconds=(
+                                DEFAULT_PRUNING.tail_telemetry.maintenance_seconds
+                            ),
+                        ),
                     )
                 )
             ),
@@ -439,6 +491,12 @@ class BotService:
                 )
             if self._audit_db_url is not None:
                 self.exchange_config.adapter_kwargs["audit_db_url"] = self._audit_db_url
+            self.exchange_config.adapter_kwargs["rest_audit_retention_minutes"] = (
+                self.config.rest_audit_retention_minutes
+            )
+            self.exchange_config.adapter_kwargs["rest_audit_retention_limit"] = (
+                self.config.rest_audit_retention_limit
+            )
             self.exchange_config.adapter_kwargs["account_scope"] = (
                 self.config.account_scope
             )

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from sqlalchemy.exc import OperationalError
@@ -15,7 +16,9 @@ from kolabi.shared.persistence import (
     OrderRun,
     TailTelemetry,
     get_sessionmaker,
+    prune_tail_telemetry,
 )
+from kolabi.shared.pruning import DEFAULT_PRUNING, TimeCountPruning
 
 _LOGGER = logging.getLogger("kola")
 _SQLITE_LOCK_RETRIES = 3
@@ -25,12 +28,19 @@ _SQLITE_LOCK_SLEEP_SECONDS = 0.2
 @dataclass
 class PersistenceConfig:
     db_url: str = "sqlite:///kolabi_bot.db"
+    sqlite_busy_timeout_seconds: float | None = None
+    tail_telemetry_pruning: TimeCountPruning = field(
+        default_factory=lambda: DEFAULT_PRUNING.tail_telemetry
+    )
 
 
 class OrderRecorder:
     def __init__(self, config: PersistenceConfig) -> None:
         self.config = config
-        self._sessionmaker = get_sessionmaker(config.db_url)
+        self._sessionmaker = get_sessionmaker(
+            config.db_url,
+            sqlite_busy_timeout_seconds=config.sqlite_busy_timeout_seconds,
+        )
 
     def start_run(self, pair: OrderPairSpec, indicators: Dict[str, Any]) -> OrderRun:
         session: Session = self._sessionmaker()
@@ -69,7 +79,11 @@ class OrderRecorder:
 class TailTelemetryRecorder:
     def __init__(self, config: PersistenceConfig) -> None:
         self.config = config
-        self._sessionmaker = get_sessionmaker(config.db_url)
+        self._sessionmaker = get_sessionmaker(
+            config.db_url,
+            sqlite_busy_timeout_seconds=config.sqlite_busy_timeout_seconds,
+        )
+        self._last_tail_prune_monotonic = 0.0
 
     def record_rows(self, rows: tuple[TailTelemetryRow, ...]) -> None:
         if not rows:
@@ -101,6 +115,7 @@ class TailTelemetryRecorder:
                     ]
                 )
                 session.commit()
+                self._prune_tail_telemetry_if_due(session)
                 return
             except OperationalError as exc:
                 session.rollback()
@@ -118,6 +133,27 @@ class TailTelemetryRecorder:
                 raise
             finally:
                 session.close()
+
+    def _prune_tail_telemetry_if_due(self, session: Session) -> None:
+        pruning = self.config.tail_telemetry_pruning
+        now_monotonic = time.monotonic()
+        if now_monotonic - self._last_tail_prune_monotonic < max(
+            1.0,
+            pruning.maintenance_seconds,
+        ):
+            return
+        self._last_tail_prune_monotonic = now_monotonic
+        try:
+            prune_tail_telemetry(
+                session,
+                retention_minutes=pruning.retention_minutes,
+                retention_limit=pruning.retention_limit,
+                now=datetime.now(timezone.utc),
+            )
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            _LOGGER.warning("tail telemetry pruning skipped error=%s", _compact_error(exc))
 
 
 def _is_sqlite_locked_error(exc: BaseException) -> bool:

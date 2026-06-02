@@ -31,7 +31,9 @@ from kolabi.shared.persistence import (
     ExchangeOrder,
     ExchangeRestCall,
     create_persistence_engine,
+    prune_exchange_rest_calls,
 )
+from kolabi.shared.pruning import DEFAULT_PRUNING
 from kolabi.tree.account import sign_rest_auth
 
 _LOGGER = logging.getLogger("kola")
@@ -83,6 +85,11 @@ class KrakenFuturesAdapter(ExchangeABC):
         public_db_url: str | None = None,
         audit_db_url: str | None = None,
         account_scope: str = "default",
+        rest_audit_retention_minutes: int = DEFAULT_PRUNING.rest_audit.retention_minutes,
+        rest_audit_retention_limit: int = DEFAULT_PRUNING.rest_audit.retention_limit,
+        rest_audit_maintenance_seconds: float = (
+            DEFAULT_PRUNING.rest_audit.maintenance_seconds
+        ),
         timeout: float = 10.0,
         postOnly: bool = False,
         session: requests.Session | None = None,
@@ -98,6 +105,12 @@ class KrakenFuturesAdapter(ExchangeABC):
         self.account_db_url = account_db_url or env_cfg.private_db_url
         self.public_db_url = public_db_url or env_cfg.public_db_url
         self.account_scope = account_scope or "default"
+        self.rest_audit_retention_minutes = max(0, int(rest_audit_retention_minutes))
+        self.rest_audit_retention_limit = max(0, int(rest_audit_retention_limit))
+        self.rest_audit_maintenance_seconds = max(
+            1.0,
+            float(rest_audit_maintenance_seconds),
+        )
         self.audit_db_url = audit_db_url or _default_audit_db_url(
             environment=environment,
             account_scope=self.account_scope,
@@ -128,6 +141,7 @@ class KrakenFuturesAdapter(ExchangeABC):
             class_=Session,
         )
         self.rest_audit_errors: list[str] = []
+        self._last_rest_audit_prune_monotonic = 0.0
         Base.metadata.create_all(self._engine)
         Base.metadata.create_all(self._audit_engine)
         Base.metadata.create_all(self._public_engine)
@@ -341,6 +355,7 @@ class KrakenFuturesAdapter(ExchangeABC):
                         )
                     )
                     session.commit()
+                    self._prune_rest_audit_if_due(session)
                     return
                 except OperationalError as exc:
                     session.rollback()
@@ -395,6 +410,30 @@ class KrakenFuturesAdapter(ExchangeABC):
             retry,
             error,
         )
+
+    def _prune_rest_audit_if_due(self, session: Session) -> None:
+        now_monotonic = time.monotonic()
+        if (
+            now_monotonic - self._last_rest_audit_prune_monotonic
+            < self.rest_audit_maintenance_seconds
+        ):
+            return
+        self._last_rest_audit_prune_monotonic = now_monotonic
+        try:
+            prune_exchange_rest_calls(
+                session,
+                exchange="kraken",
+                environment=self.environment,
+                market_type="futures",
+                account_scope=self.account_scope,
+                retention_minutes=self.rest_audit_retention_minutes,
+                retention_limit=self.rest_audit_retention_limit,
+                now=datetime.now(timezone.utc),
+            )
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            _LOGGER.warning("rest call audit pruning skipped error=%s", _compact_error(exc))
 
     def _ticker(self) -> _Ticker:
         payload = self._request("GET", f"/tickers/{self.symbol}")

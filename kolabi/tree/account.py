@@ -34,7 +34,11 @@ from kolabi.shared.persistence import (
     ExchangeOrder,
     PrivateIngestAudit,
     RawExchangeEvent,
+    prune_account_balances,
+    prune_account_positions,
+    prune_private_ingest_audits,
 )
+from kolabi.shared.pruning import DEFAULT_PRUNING
 from kolabi.tree.kraken import build_engine
 
 JsonMapT = Mapping[str, Any]
@@ -45,7 +49,7 @@ JsonDictT = dict[str, Any]
 class AccountStreamConfig:
     """Configuration de la memoire privee ordre/compte."""
 
-    db_url: str = "sqlite:///db/prv-futures-demo.sqlite"
+    db_url: str = "sqlite:///dbs/prv-futures-demo.sqlite"
     critical_db_url: str | None = None
     exchange: str = "kraken"
     environment: str = "demo"
@@ -84,8 +88,16 @@ class AccountStreamConfig:
     position_write_min_interval_seconds: float = 60.0
     sqlite_busy_timeout_seconds: float = 30.0
     critical_mirror_busy_timeout_seconds: float = 1.0
-    raw_retention_minutes: int = 1440
-    raw_retention_limit: int = 100000
+    raw_retention_minutes: int = DEFAULT_PRUNING.raw_events.retention_minutes
+    raw_retention_limit: int = DEFAULT_PRUNING.raw_events.retention_limit
+    state_retention_minutes: int = DEFAULT_PRUNING.account_state.retention_minutes
+    state_retention_limit: int = DEFAULT_PRUNING.account_state.retention_limit
+    ingest_audit_retention_minutes: int = (
+        DEFAULT_PRUNING.private_ingest_audit.retention_minutes
+    )
+    ingest_audit_retention_limit: int = (
+        DEFAULT_PRUNING.private_ingest_audit.retention_limit
+    )
     log_level: str = "INFO"
 
 
@@ -319,8 +331,30 @@ def upgrade_private_schema(engine: Any) -> None:
             )
         if "account_balances" in tables:
             ensure_columns(connection, "account_balances", {"raw_payload": "JSON"})
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_account_balances_state_time "
+                    "ON account_balances "
+                    "(exchange, environment, account_scope, asset, local_timestamp, id)"
+                )
+            )
         if "account_positions" in tables:
             ensure_columns(connection, "account_positions", {"raw_payload": "JSON"})
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_account_positions_state_time "
+                    "ON account_positions "
+                    "(exchange, environment, market_type, account_scope, symbol, side, local_timestamp, id)"
+                )
+            )
+        if "private_ingest_audits" in tables:
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_private_ingest_audits_account_time "
+                    "ON private_ingest_audits "
+                    "(exchange, environment, market_type, account_scope, received_at, id)"
+                )
+            )
         if "raw_exchange_events" in tables:
             added_raw_columns = ensure_columns(
                 connection,
@@ -656,8 +690,8 @@ class AccountStateStore:
             session.commit()
         return tuple(results)
 
-    def prune_raw_events_now(self, *, stream_kind: str) -> None:
-        """Apply raw retention outside the critical ingest path."""
+    def prune_private_storage_now(self, *, stream_kind: str) -> None:
+        """Apply retention outside the critical ingest path."""
         now = datetime.now(timezone.utc)
         with self.sessionmaker() as session:
             prune_raw_events(
@@ -668,7 +702,42 @@ class AccountStateStore:
                 now=now,
                 stream_kind=stream_kind,
             )
+            prune_private_ingest_audits(
+                session,
+                exchange=self.config.exchange,
+                environment=self.config.environment,
+                market_type=self.config.market_type,
+                account_scope=self.config.account_scope,
+                retention_minutes=self.config.ingest_audit_retention_minutes,
+                retention_limit=self.config.ingest_audit_retention_limit,
+                now=now,
+            )
+            prune_account_balances(
+                session,
+                exchange=self.config.exchange,
+                environment=self.config.environment,
+                account_scope=self.config.account_scope,
+                retention_minutes=self.config.state_retention_minutes,
+                retention_limit=self.config.state_retention_limit,
+                sample_interval_seconds=self.config.balance_write_min_interval_seconds,
+                now=now,
+            )
+            prune_account_positions(
+                session,
+                exchange=self.config.exchange,
+                environment=self.config.environment,
+                market_type=self.config.market_type,
+                account_scope=self.config.account_scope,
+                retention_minutes=self.config.state_retention_minutes,
+                retention_limit=self.config.state_retention_limit,
+                sample_interval_seconds=self.config.position_write_min_interval_seconds,
+                now=now,
+            )
             session.commit()
+
+    def prune_raw_events_now(self, *, stream_kind: str) -> None:
+        """Compatibility wrapper for older tests and callers."""
+        self.prune_private_storage_now(stream_kind=stream_kind)
 
     def _find_order_by_client_id_in_session(
         self,
@@ -1448,6 +1517,7 @@ class KrakenFuturesPrivateStream:
             self.profile.name,
             ",".join(self.profile.feeds),
         )
+        self._run_startup_maintenance()
         while self._running:
             try:
                 await self.run_once()
@@ -1470,6 +1540,16 @@ class KrakenFuturesPrivateStream:
                     self.profile.name,
                 )
                 await asyncio.sleep(self.config.reconnect_seconds)
+
+    def _run_startup_maintenance(self) -> None:
+        try:
+            self.store.prune_private_storage_now(stream_kind=self.profile.stream_kind)
+        except Exception as exc:
+            self.logger.warning(
+                "kraken_account startup maintenance skipped profile=%s error=%s",
+                self.profile.name,
+                exc,
+            )
 
     @staticmethod
     def _is_shutdown_error(exc: Exception) -> bool:
@@ -1582,7 +1662,7 @@ class KrakenFuturesPrivateStream:
         interval = max(1, self.config.maintenance_seconds)
         while self._running:
             await asyncio.sleep(interval)
-            self.store.prune_raw_events_now(stream_kind=self.profile.stream_kind)
+            self.store.prune_private_storage_now(stream_kind=self.profile.stream_kind)
 
     async def _drain_ingest_queue(self, queue: asyncio.Queue[IngestMessage]) -> None:
         if self.profile.is_critical:
@@ -3170,6 +3250,30 @@ def build_parser() -> argparse.ArgumentParser:
             help="Maximum raw private events kept per stream identity; 0 disables count cleanup.",
         )
         cmd.add_argument(
+            "--state-retention-minutes",
+            type=int,
+            default=AccountStreamConfig.state_retention_minutes,
+            help="Private balance/position state retention window in minutes; 0 disables time cleanup.",
+        )
+        cmd.add_argument(
+            "--state-retention-limit",
+            type=int,
+            default=AccountStreamConfig.state_retention_limit,
+            help="Maximum sampled balance/position rows kept per state identity; 0 disables count cleanup.",
+        )
+        cmd.add_argument(
+            "--ingest-audit-retention-minutes",
+            type=int,
+            default=AccountStreamConfig.ingest_audit_retention_minutes,
+            help="Private ingest audit retention window in minutes; 0 disables time cleanup.",
+        )
+        cmd.add_argument(
+            "--ingest-audit-retention-limit",
+            type=int,
+            default=AccountStreamConfig.ingest_audit_retention_limit,
+            help="Maximum private ingest audit rows kept per account DB; 0 disables count cleanup.",
+        )
+        cmd.add_argument(
             "--rest-reconcile-seconds",
             type=float,
             default=AccountStreamConfig.rest_reconcile_seconds,
@@ -3237,6 +3341,10 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
         ),
         raw_retention_minutes=args.raw_retention_minutes,
         raw_retention_limit=args.raw_retention_limit,
+        state_retention_minutes=args.state_retention_minutes,
+        state_retention_limit=args.state_retention_limit,
+        ingest_audit_retention_minutes=args.ingest_audit_retention_minutes,
+        ingest_audit_retention_limit=args.ingest_audit_retention_limit,
         log_level=args.log_level,
     )
 

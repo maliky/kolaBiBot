@@ -14,6 +14,7 @@ from kolabi.bot.tsv import (
     strategy_from_run_once_args,
     strategy_to_pretty_dict,
 )
+from kolabi.shared.pruning import DEFAULT_PRUNING
 
 
 class RawTextDefaultsFormatter(
@@ -48,15 +49,39 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
         "--audit-db-url",
         help=(
             "Optional REST audit DB URL. Defaults to "
-            "sqlite:///db/audit-futures-<env>-<account-scope>.sqlite."
+            "sqlite:///dbs/audit-futures-<env>-<account-scope>.sqlite."
         ),
     )
     parser.add_argument(
         "--telemetry-db-url",
         help=(
             "Optional bot telemetry DB URL. Defaults to "
-            "sqlite:///db/telemetry-futures-<env>-<account-scope>.sqlite."
+            "sqlite:///dbs/telemetry-futures-<env>-<account-scope>.sqlite."
         ),
+    )
+    parser.add_argument(
+        "--rest-audit-retention-minutes",
+        type=int,
+        default=DEFAULT_PRUNING.rest_audit.retention_minutes,
+        help="REST audit retention window in minutes; 0 disables time cleanup.",
+    )
+    parser.add_argument(
+        "--rest-audit-retention-limit",
+        type=int,
+        default=DEFAULT_PRUNING.rest_audit.retention_limit,
+        help="Maximum REST audit rows kept per audit DB; 0 disables count cleanup.",
+    )
+    parser.add_argument(
+        "--tail-telemetry-retention-minutes",
+        type=int,
+        default=DEFAULT_PRUNING.tail_telemetry.retention_minutes,
+        help="Tail telemetry retention window in minutes; 0 disables time cleanup.",
+    )
+    parser.add_argument(
+        "--tail-telemetry-retention-limit",
+        type=int,
+        default=DEFAULT_PRUNING.tail_telemetry.retention_limit,
+        help="Maximum tail telemetry rows kept per telemetry DB; 0 disables count cleanup.",
     )
     parser.add_argument(
         "--account-scope",
@@ -316,6 +341,26 @@ def build_service(args: argparse.Namespace) -> BotService:
             max_active_pairs=getattr(args, "max_active_pairs", 4),
             rest_min_interval_seconds=getattr(args, "rest_min_interval", 0.1),
             rest_max_inflight=getattr(args, "rest_max_inflight", 1),
+            rest_audit_retention_minutes=getattr(
+                args,
+                "rest_audit_retention_minutes",
+                DEFAULT_PRUNING.rest_audit.retention_minutes,
+            ),
+            rest_audit_retention_limit=getattr(
+                args,
+                "rest_audit_retention_limit",
+                DEFAULT_PRUNING.rest_audit.retention_limit,
+            ),
+            tail_telemetry_retention_minutes=getattr(
+                args,
+                "tail_telemetry_retention_minutes",
+                DEFAULT_PRUNING.tail_telemetry.retention_minutes,
+            ),
+            tail_telemetry_retention_limit=getattr(
+                args,
+                "tail_telemetry_retention_limit",
+                DEFAULT_PRUNING.tail_telemetry.retention_limit,
+            ),
         )
     )
 
@@ -396,6 +441,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Optional critical private DB URL for order/fill lifecycle. "
             "Defaults from Kraken Futures environment."
         ),
+    )
+    preflight_parser.add_argument(
+        "--account-scope",
+        default="default",
+        help="Logical account/persona label for scoped private DB env lanes.",
     )
     preflight_parser.add_argument(
         "--ready-timeout-seconds",
@@ -511,6 +561,7 @@ def preflight_command(args: argparse.Namespace) -> int:
             market_db_url=args.market_db_url,
             account_db_url=args.account_db_url,
             critical_account_db_url=getattr(args, "critical_account_db_url", None),
+            account_scope=getattr(args, "account_scope", "default"),
             require_ready=True,
             ready_timeout_seconds=args.ready_timeout_seconds,
             ready_poll_seconds=args.ready_poll_seconds,
