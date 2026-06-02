@@ -275,7 +275,222 @@ options:
   --log-level LOG_LEVEL
 #+end_example
 
-* tree.kraken public db
+* DB kolabidb helper
+#+BEGIN_SRC bash  -i
+scripts/kolabidb public start --pair PI_XBTUSD
+
+scripts/kolabidb private start --account-scope default
+
+scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+
+scripts/kolabidb private status --account-scope advers
+scripts/kolabidb private logs --account-scope advers
+#+END_SRC
+
+* PostgreSQL local DB lanes
+
+- PostgreSQL is the default =kolabidb= backend.
+- Use SQLite explicitly with =--backend sqlite= when you want disposable file-backed smoke tests.
+- The host already has =postgres:16= available.
+- The compose file uses =127.0.0.1:15433= to avoid the existing Tusis PostgreSQL on =127.0.0.1:15432=.
+- PostgreSQL files live under =dbs/postgres= so local DB state is visible beside SQLite fallback files.
+- Main and adversarial accounts use separate private, critical, audit, and telemetry databases.
+- Both accounts share the public market database.
+
+Pros of storing PostgreSQL under =dbs/postgres=:
+- It is easy to inspect, back up, and reset.
+- It matches the repo-local DB helper mental model.
+- It keeps all local DB state out of the project root.
+
+Cons:
+- Docker no longer owns the storage as an opaque named volume.
+- Host file ownership may show the Postgres container UID.
+- Manual deletion is easier, so =dbs/postgres/= is ignored by Git.
+
+Prepare the local PostgreSQL environment file before starting the container. The file feeds both Docker Compose interpolation and the Kolabi host commands:
+
+#+begin_src bash
+cp docker/postgres/kolabi-postgres.env.example .env.postgres
+set -a
+. ./.env.postgres
+set +a
+#+end_src
+
+The local =.env.postgres= file is ignored by Git. If you change the local PostgreSQL password, URL-encode special characters before placing them in =KOLABI_PG=.
+
+Start PostgreSQL:
+
+#+begin_src bash
+docker-compose -f docker-compose.postgres.yml up -d
+docker-compose -f docker-compose.postgres.yml ps
+#+end_src
+
+Reset the local PostgreSQL files only when you want a disposable fresh DB:
+
+#+begin_src bash
+docker-compose -f docker-compose.postgres.yml down
+rm -rf dbs/postgres
+mkdir -p dbs/postgres
+docker-compose -f docker-compose.postgres.yml up -d
+#+end_src
+
+Use the helper when you want PostgreSQL to feel like the SQLite background feeder workflow. Feeder logs still live under =./logs=; container logs come from the =postgres= target:
+
+#+begin_src bash
+scripts/kolabidb postgres start
+scripts/kolabidb postgres status
+scripts/kolabidb postgres logs
+scripts/kolabidb public start --pair PI_XBTUSD
+scripts/kolabidb private start
+scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+scripts/kolabidb public logs
+scripts/kolabidb private logs
+scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
+#+end_src
+
+Start the shared public market feeder:
+
+#+begin_src bash
+python -m kolabi.tree.kraken run \
+  --pair PI_XBTUSD \
+  --environment demo \
+  --db-url "$KOLABI_MARKET_DB_URL" \
+  --private-db-url "$KOLABI_ACCOUNT_DB_URL"
+#+end_src
+
+Start the main private account feeder:
+
+#+begin_src bash
+python -m kolabi.tree.account run \
+  --environment demo \
+  --account-scope default \
+  --account-db-url "$KOLABI_ACCOUNT_DB_URL" \
+  --critical-db-url "$KOLABI_CRITICAL_DB_URL"
+#+end_src
+
+Start the adversarial private account feeder:
+
+#+begin_src bash
+python -m kolabi.tree.account run \
+  --environment demo \
+  --account-scope advers \
+  --account-db-url "$KOLABI_ADVERS_ACCOUNT_DB_URL" \
+  --critical-db-url "$KOLABI_ADVERS_CRITICAL_DB_URL" \
+  --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY \
+  --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+#+end_src
+
+Run the main bot against PostgreSQL:
+
+#+begin_src bash
+python -m kolabi.bot run \
+  --strategy orders/rep_xbt.tsv \
+  --exchange kraken \
+  --symbol PI_XBTUSD \
+  --environment demo \
+  --market-db-url "$KOLABI_MARKET_DB_URL" \
+  --account-db-url "$KOLABI_ACCOUNT_DB_URL" \
+  --critical-db-url "$KOLABI_CRITICAL_DB_URL" \
+  --audit-db-url "$KOLABI_AUDIT_DB_URL" \
+  --telemetry-db-url "$KOLABI_TELEMETRY_DB_URL"
+#+end_src
+
+Run the adversarial bot against PostgreSQL:
+
+#+begin_src bash
+python -m kolabi.bot run \
+  --strategy orders/advers.tsv \
+  --exchange kraken \
+  --symbol PI_XBTUSD \
+  --environment demo \
+  --account-scope advers \
+  --market-db-url "$KOLABI_MARKET_DB_URL" \
+  --account-db-url "$KOLABI_ADVERS_ACCOUNT_DB_URL" \
+  --critical-db-url "$KOLABI_ADVERS_CRITICAL_DB_URL" \
+  --audit-db-url "$KOLABI_ADVERS_AUDIT_DB_URL" \
+  --telemetry-db-url "$KOLABI_ADVERS_TELEMETRY_DB_URL" \
+  --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY \
+  --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+#+end_src
+
+Check readiness with PostgreSQL:
+
+#+begin_src bash
+python -m kolabi.bot preflight \
+  --exchange kraken \
+  --symbol PI_XBTUSD \
+  --environment demo \
+  --market-db-url "$KOLABI_MARKET_DB_URL" \
+  --account-db-url "$KOLABI_ACCOUNT_DB_URL" \
+  --critical-db-url "$KOLABI_CRITICAL_DB_URL"
+#+end_src
+
+
+#+BEGIN_SRC bash  :results output
+scripts/kolabidb -h
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+Usage:
+  scripts/kolabidb [--dry-run] public   start|status|stop|reload|logs [options]
+  scripts/kolabidb [--dry-run] private  start|status|stop|reload|logs [options]
+  scripts/kolabidb [--dry-run] postgres start|status|stop|reload|logs [options]
+
+Targets:
+  public      Kraken public market-data DB feeder, one DB per instrument.
+  private     Kraken private account/order DB feeder. Reuses the public DB by default.
+  postgres    Local PostgreSQL container from docker-compose.postgres.yml.
+
+Actions:
+  start       Start the selected feeder in the background.
+  status      Print PID/log status for the selected feeder.
+  stop        Stop the selected feeder. TERM first, then KILL after the timeout.
+  reload      Stop then start. This is a restart; the Python feeders have no live reload.
+  logs        Tail the selected feeder log from ./logs.
+
+Public options:
+  --pair SYMBOL                 Futures product id. Default: PI_XBTUSD.
+  --environment demo|live       Kraken endpoint family. Default: demo.
+  --db-url URL                  Public DB URL override. Default comes from the selected backend.
+  --private-db-url URL          Private DB URL used by the public feeder for correlation.
+
+Private options:
+  --account-scope NAME          Logical account/persona label stored with private rows.
+                                Default: default. Example: advers for the adversarial account.
+  --account-db-url URL          Private account DB URL override. Default comes from the selected backend.
+  --critical-db-url URL         Critical open_orders/fills DB URL. Default follows account DB naming.
+  --api-key-env NAME            Environment variable containing the Kraken API key.
+  --api-secret-env NAME         Environment variable containing the Kraken API secret.
+  --public reuse|spawn          For private start/reload, reuse existing public DB feeder or start one too.
+                                Default: reuse.
+
+Common options:
+  --backend postgres|sqlite    DB lane defaults to use for public/private feeders. Default: postgres.
+  --postgres                   Shortcut for --backend postgres.
+  --env-file PATH              PostgreSQL env file loaded for --backend postgres and postgres target.
+                               Default: .env.postgres.
+  --log-level LEVEL             Python log level. Default: INFO.
+  --tail-lines N                Lines printed before following logs. Default: 80.
+  --stop-timeout-seconds N      Grace seconds before KILL on stop. Default: 10.
+  -h, --help                    Show this help and exit.
+
+Examples:
+  scripts/kolabidb public start --pair PI_XBTUSD
+  scripts/kolabidb private start
+  scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
+  scripts/kolabidb --backend sqlite private start
+  scripts/kolabidb postgres logs
+  scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  scripts/kolabidb private start --public spawn --pair PI_XBTUSD
+
+Systemctl-shaped equivalents:
+  scripts/kolabidb public status      # like: systemctl --user status kolabidb-public-postgres-demo-PI_XBTUSD
+  scripts/kolabidb public stop        # like: systemctl --user stop   kolabidb-public-postgres-demo-PI_XBTUSD
+  scripts/kolabidb private logs       # like: journalctl --user -u    kolabidb-private-postgres-demo-default -f
+#+end_example
+
+** tree.kraken public db
 
 - Command: =python -m kolabi.tree.kraken=
 - Role: public Kraken Futures market-data DB service (orderbook snapshots and indicators)
@@ -293,7 +508,7 @@ Shared options:
 |------------------------------------+-------------------------------------------|
 | =--pair=                           | Futures product id, for example PI_XBTUSD |
 | =--environment {demo,live}=        | endpoint family                           |
-| =--db-url=                         | public SQLite DB location                 |
+| =--db-url=                         | public SQLite DB location, instrument-scoped by default |
 | =--private-db-url=                 | private DB location used for correlation  |
 | =--ws-url=                         | override public websocket URL             |
 | =--trace-ws=                       | print websocket payload traces            |
@@ -310,7 +525,7 @@ python -m kolabi.tree.kraken probe --environment demo --pair PI_XBTUSD --seconds
 python -m kolabi.tree.kraken status --environment demo --pair PI_XBTUSD
 #+end_src
 
-* tree.account private db
+** tree.account private db
 
 - Command: =python -m kolabi.tree.account=
 - Role: private Kraken Futures account/order state service
@@ -326,7 +541,8 @@ Shared options:
 
 | Option                      | Meaning                                 |
 |-----------------------------+-----------------------------------------|
-| =--db-url=                  | private SQLite DB location              |
+| =--account-db-url=          | private SQLite DB location              |
+| =--critical-db-url=         | critical open_orders/fills DB location  |
 | =--exchange=                | exchange label stored in DB             |
 | =--environment {demo,live}= | endpoint family                         |
 | =--market-type=             | market label stored in DB               |
@@ -343,6 +559,52 @@ Examples:
 python -m kolabi.tree.account run --environment demo
 python -m kolabi.tree.account reconcile --environment demo
 python -m kolabi.tree.account status --environment demo
+#+end_src
+
+* kolabidb helper
+
+- Command: =scripts/kolabidb=
+- Role: repo-local helper for starting and stopping public/private DB feeders in the background, plus local PostgreSQL container control
+- Logs: all helper-managed processes append to =./logs/kolabidb-*.log=
+- PostgreSQL container logs: =scripts/kolabidb postgres logs=
+- Runtime PIDs: helper state lives under =.run/kolabidb/=
+
+#+begin_example
+Usage:
+  scripts/kolabidb [--dry-run] public   start|status|stop|reload|logs [options]
+  scripts/kolabidb [--dry-run] private  start|status|stop|reload|logs [options]
+  scripts/kolabidb [--dry-run] postgres start|status|stop|reload|logs [options]
+#+end_example
+
+Important options:
+
+| Option                    | Meaning |
+|---------------------------+---------|
+| =-h, --help=              | print helper usage and examples |
+| =--backend postgres\vert sqlite= | choose PostgreSQL lane defaults or SQLite file defaults; default is PostgreSQL |
+| =--env-file=              | PostgreSQL env file, default =.env.postgres= |
+| =--pair=                  | instrument for public DB naming, for example =PI_XBTUSD= |
+| =--public reuse\vert spawn= | private start reuses an existing public feeder by default; =spawn= starts one too |
+| =--account-scope=         | logical private account/persona label, for example =default= or =advers= |
+| =--account-db-url=        | explicit private DB URL |
+| =--critical-db-url=       | explicit critical private DB URL |
+| =--api-key-env=           | environment variable name containing the API key |
+| =--api-secret-env=        | environment variable name containing the API secret |
+
+Examples:
+
+#+begin_src bash
+scripts/kolabidb public start --pair PI_XBTUSD
+scripts/kolabidb private start
+scripts/kolabidb private start --public spawn --pair PI_XBTUSD
+scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+scripts/kolabidb private status
+scripts/kolabidb private logs
+scripts/kolabidb private stop
+scripts/kolabidb postgres start
+scripts/kolabidb postgres logs
+scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
+scripts/kolabidb --backend sqlite private logs
 #+end_src
 
 * bot run

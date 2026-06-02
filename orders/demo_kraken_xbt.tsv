@@ -10,140 +10,136 @@ name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	
 
 # --- Core order types ---
 
-# SCENARIO CORE_BUY_M: Given price drops by at least 5 USD; When buy market head is allowed; Then place a last-price reduce-only sell stop tail.
+# Given price drops by at least 5 USD; When buy market head is allowed; Then place a last-price reduce-only sell stop tail.
 CORE_BUY_M	0 60	1	4		buy	M		S-		qAtDpD	1	8	- -5	
 
-# SCENARIO CORE_SELL_M: Given price rises by at least 5 USD; When sell market head is allowed; Then place a last-price reduce-only buy stop tail.
+# Given price rises by at least 5 USD; When sell market head is allowed; Then place a last-price reduce-only buy stop tail.
 CORE_SELL_M	0 60	1	4		sell	M		S-		qAtDpD	2	8	5 +	
 
-# SCENARIO CORE_BUY_L_POST: Given price drops by at least 5 USD; When buy post-only limit head rests; Then protect with a reduce-only stop.
+# Given price drops by at least 5 USD; When buy post-only limit head rests; Then protect with a reduce-only stop.
 CORE_BUY_L_POST	0 60	1	4		buy	L!		S-		qAtDpD	3	8	- -5	
 
-# SCENARIO CORE_SELL_L_POST: Given price rises by at least 5 USD; When sell post-only limit head rests; Then protect with a reduce-only stop.
+# Given price rises by at least 5 USD; When sell post-only limit head rests; Then protect with a reduce-only stop.
 CORE_SELL_L_POST	0 60	1	4		sell	L!		S-		qAtDpD	4	8	5 +	
 
-# --- Head limit price-source suffix matrix ---
-
-# SCENARIO HEAD_L_LAST: Given last price drops by at least 5 USD; When buy Ll head hooks; Then place a last-price reduce-only sell stop.
+# Given last price drops by at least 5 USD; When buy Ll head hooks; Then place a last-price reduce-only sell stop.
 HEAD_L_LAST	0 60	1	4		buy	Ll		S-		qAtDpD	5	8	- -5	
 
-# SCENARIO HEAD_L_MARK: Given mark price drops by at least 5 USD; When buy Lm head hooks; Then place a last-price reduce-only sell stop.
+# Given mark price drops by at least 5 USD; When buy Lm head hooks; Then place a last-price reduce-only sell stop.
 HEAD_L_MARK	0 60	1	4		buy	Lm		S-		qAtDpD	7	8	- -5	
 
-# SCENARIO HEAD_L_INDEX: Given index price drops by at least 5 USD; When buy Li head hooks; Then place a last-price reduce-only sell stop.
+# Given index price drops by at least 5 USD; When buy Li head hooks; Then place a last-price reduce-only sell stop.
 HEAD_L_INDEX	0 60	1	4		buy	Li		S-		qAtDpD	11	8	- -5	
 
 # --- Head stop/touch trigger-source suffix matrix ---
 
-# SCENARIO HEAD_S_LAST: Given last price rises by at least 5 USD; When sell Sl stop head triggers; Then protect with a buy stop.
+# Given last price rises by at least 5 USD; When sell Sl stop head triggers; Then protect with a buy stop.
 HEAD_S_LAST	0 60	1	4		sell	Sl		S-		qAtDpD	6	8	5 +	
 
-# SCENARIO HEAD_S_MARK: Given mark price rises by at least 5 USD; When sell Sm stop head triggers; Then protect with a buy stop.
+# Given mark price rises by at least 5 USD; When sell Sm stop head triggers; Then protect with a buy stop.
 HEAD_S_MARK	0 60	1	4		sell	Sm		S-		qAtDpD	8	8	5 +	
 
-# SCENARIO HEAD_S_INDEX: Given index price rises by at least 5 USD; When sell Si stop head triggers; Then protect with a buy stop.
+# Given index price rises by at least 5 USD; When sell Si stop head triggers; Then protect with a buy stop.
 HEAD_S_INDEX	0 60	1	4		sell	Si		S-		qAtDpD	12	8	5 +	
 
-# SCENARIO HEAD_SL_LAST: Given last price rises by at least 5 USD; When sell SLl stop-limit head triggers with 0.5 USD offset; Then protect with a buy stop.
+# Given last price rises by at least 5 USD; When sell SLl stop-limit head triggers with 0.5 USD offset; Then protect with a buy stop.
 HEAD_SL_LAST	0 60	1	4		sell	SLl	0.5	S-		qAtDpD	14	8	5 +	
 
-# SCENARIO HEAD_SL_MARK: Given mark price rises by at least 5 USD; When sell SLm stop-limit head triggers with 0.5 USD offset; Then protect with a buy stop.
+# Given mark price rises by at least 5 USD; When sell SLm stop-limit head triggers with 0.5 USD offset; Then protect with a buy stop.
 HEAD_SL_MARK	0 60	1	4		sell	SLm	0.5	S-		qAtDpD	16	8	5 +	
 
-# SCENARIO HEAD_SL_INDEX: Given index price rises by at least 5 USD; When sell SLi stop-limit head triggers with 0.5 USD offset; Then protect with a buy stop.
+# Given index price rises by at least 5 USD; When sell SLi stop-limit head triggers with 0.5 USD offset; Then protect with a buy stop.
 HEAD_SL_INDEX	0 60	1	4		sell	SLi	0.5	S-		qAtDpD	20	8	5 +	
 
-# SCENARIO HEAD_MT_LAST: Given last price drops by at least 5 USD; When buy MTl market-if-touched head triggers; Then protect with a sell stop.
+# Given last price drops by at least 5 USD; When buy MTl market-if-touched head triggers; Then protect with a sell stop.
 HEAD_MT_LAST	0 60	1	4		buy	MTl		S-		qAtDpD	13	8	- -5	
 
-# SCENARIO HEAD_MT_MARK: Given mark price drops by at least 5 USD; When buy MTm market-if-touched head triggers; Then protect with a sell stop.
+# Given mark price drops by at least 5 USD; When buy MTm market-if-touched head triggers; Then protect with a sell stop.
 HEAD_MT_MARK	0 60	1	4		buy	MTm		S-		qAtDpD	15	8	- -5	
 
-# SCENARIO HEAD_MT_INDEX: Given index price drops by at least 5 USD; When buy MTi market-if-touched head triggers; Then protect with a sell stop.
+# Given index price drops by at least 5 USD; When buy MTi market-if-touched head triggers; Then protect with a sell stop.
 HEAD_MT_INDEX	0 60	1	4		buy	MTi		S-		qAtDpD	19	8	- -5	
 
-# SCENARIO HEAD_LT_LAST: Given last price drops by at least 5 USD; When buy LTl limit-if-touched head triggers with 0.5 USD offset; Then protect with a sell stop.
+# Given last price drops by at least 5 USD; When buy LTl limit-if-touched head triggers with 0.5 USD offset; Then protect with a sell stop.
 HEAD_LT_LAST	0 60	1	4		buy	LTl	0.5	S-		qAtDpD	21	8	- -5	
 
-# SCENARIO HEAD_LT_MARK: Given mark price drops by at least 5 USD; When buy LTm limit-if-touched head triggers with 0.5 USD offset; Then protect with a sell stop.
+# Given mark price drops by at least 5 USD; When buy LTm limit-if-touched head triggers with 0.5 USD offset; Then protect with a sell stop.
 HEAD_LT_MARK	0 60	1	4		buy	LTm	0.5	S-		qAtDpD	23	8	- -5	
 
-# SCENARIO HEAD_LT_INDEX: Given index price drops by at least 5 USD; When buy LTi limit-if-touched head triggers with 0.5 USD offset; Then protect with a sell stop.
+# Given index price drops by at least 5 USD; When buy LTi limit-if-touched head triggers with 0.5 USD offset; Then protect with a sell stop.
 HEAD_LT_INDEX	0 60	1	4		buy	LTi	0.5	S-		qAtDpD	27	8	- -5	
 
 # --- Tail trigger-source suffix matrix ---
 
-# SCENARIO TAIL_S_LAST: Given buy limit head fills after a 5 USD drop; When tail Sl- is placed; Then sell stop uses last trigger and reduce-only.
+# Given buy limit head fills after a 5 USD drop; When tail Sl- is placed; Then sell stop uses last trigger and reduce-only.
 TAIL_S_LAST	0 60	1	4		buy	L		Sl-		qAtDpD	29	8	- -5	
 
-# SCENARIO TAIL_S_MARK: Given buy limit head fills after a 5 USD drop; When tail Sm- is placed; Then sell stop uses mark trigger and reduce-only.
+# Given buy limit head fills after a 5 USD drop; When tail Sm- is placed; Then sell stop uses mark trigger and reduce-only.
 TAIL_S_MARK	0 60	1	4		buy	L		Sm-		qAtDpD	31	8	- -5	
 
-# SCENARIO TAIL_S_INDEX: Given buy limit head fills after a 5 USD drop; When tail Si- is placed; Then sell stop uses index trigger and reduce-only.
+# Given buy limit head fills after a 5 USD drop; When tail Si- is placed; Then sell stop uses index trigger and reduce-only.
 TAIL_S_INDEX	0 60	1	4		buy	L		Si-		qAtDpD	35	8	- -5	
 
-# SCENARIO TAIL_SL_LAST: Given sell limit head fills after a 5 USD rise; When tail SLl- is placed with 0.5 USD limit offset; Then buy stop-limit uses last trigger and reduce-only.
+# Given sell limit head fills after a 5 USD rise; When tail SLl- is placed with 0.5 USD limit offset; Then buy stop-limit uses last trigger and reduce-only.
 TAIL_SL_LAST	0 60	1	4		sell	L		SLl-	0.5	qAtDpD	22	8	5 +	
 
-# SCENARIO TAIL_SL_MARK: Given sell limit head fills after a 5 USD rise; When tail SLm- is placed with 0.5 USD limit offset; Then buy stop-limit uses mark trigger and reduce-only.
+# Given sell limit head fills after a 5 USD rise; When tail SLm- is placed with 0.5 USD limit offset; Then buy stop-limit uses mark trigger and reduce-only.
 TAIL_SL_MARK	0 60	1	4		sell	L		SLm-	0.5	qAtDpD	24	8	5 +	
 
-# SCENARIO TAIL_SL_INDEX: Given sell limit head fills after a 5 USD rise; When tail SLi- is placed with 0.5 USD limit offset; Then buy stop-limit uses index trigger and reduce-only.
+# Given sell limit head fills after a 5 USD rise; When tail SLi- is placed with 0.5 USD limit offset; Then buy stop-limit uses index trigger and reduce-only.
 TAIL_SL_INDEX	0 60	1	4		sell	L		SLi-	0.5	qAtDpD	28	8	5 +	
 
-# SCENARIO TAIL_MT_LAST: Given buy limit head fills after a 5 USD drop; When tail MTl- is placed; Then sell market-if-touched uses last trigger and reduce-only.
+# Given buy limit head fills after a 5 USD drop; When tail MTl- is placed; Then sell market-if-touched uses last trigger and reduce-only.
 TAIL_MT_LAST	0 60	1	4		buy	L		MTl-		qAtDpD	37	8	- -5	
 
-# SCENARIO TAIL_MT_MARK: Given buy limit head fills after a 5 USD drop; When tail MTm- is placed; Then sell market-if-touched uses mark trigger and reduce-only.
+# Given buy limit head fills after a 5 USD drop; When tail MTm- is placed; Then sell market-if-touched uses mark trigger and reduce-only.
 TAIL_MT_MARK	0 60	1	4		buy	L		MTm-		qAtDpD	39	8	- -5	
 
-# SCENARIO TAIL_MT_INDEX: Given buy limit head fills after a 5 USD drop; When tail MTi- is placed; Then sell market-if-touched uses index trigger and reduce-only.
+# Given buy limit head fills after a 5 USD drop; When tail MTi- is placed; Then sell market-if-touched uses index trigger and reduce-only.
 TAIL_MT_INDEX	0 60	1	4		buy	L		MTi-		qAtDpD	43	8	- -5	
 
-# SCENARIO TAIL_LT_LAST: Given sell limit head fills after a 5 USD rise; When tail LTl- is placed with 0.5 USD limit offset; Then buy limit-if-touched uses last trigger and reduce-only.
+# Given sell limit head fills after a 5 USD rise; When tail LTl- is placed with 0.5 USD limit offset; Then buy limit-if-touched uses last trigger and reduce-only.
 TAIL_LT_LAST	0 60	1	4		sell	L		LTl-	0.5	qAtDpD	30	8	5 +	
 
-# SCENARIO TAIL_LT_MARK: Given sell limit head fills after a 5 USD rise; When tail LTm- is placed with 0.5 USD limit offset; Then buy limit-if-touched uses mark trigger and reduce-only.
+# Given sell limit head fills after a 5 USD rise; When tail LTm- is placed with 0.5 USD limit offset; Then buy limit-if-touched uses mark trigger and reduce-only.
 TAIL_LT_MARK	0 60	1	4		sell	L		LTm-	0.5	qAtDpD	32	8	5 +	
 
-# SCENARIO TAIL_LT_INDEX: Given sell limit head fills after a 5 USD rise; When tail LTi- is placed with 0.5 USD limit offset; Then buy limit-if-touched uses index trigger and reduce-only.
+# Given sell limit head fills after a 5 USD rise; When tail LTi- is placed with 0.5 USD limit offset; Then buy limit-if-touched uses index trigger and reduce-only.
 TAIL_LT_INDEX	0 60	1	4		sell	L		LTi-	0.5	qAtDpD	36	8	5 +	
 
 # --- Amount and price interpretation coverage ---
 
-# SCENARIO AT_QA_TD_PCT: Given price drops by at least 0.05 percent; When buy limit head fills; Then nominal reduce-only stop tail is placed.
+# Given price drops by at least 0.05 percent; When buy limit head fills; Then nominal reduce-only stop tail is placed.
 AT_QA_TD_PCT	0 60	1	4		buy	L		S-		qAtDp%	45	8	- -0.05	
 
-# SCENARIO AT_QA_TD_PA: Given absolute XBT price is above zero; When buy limit head fills; Then nominal reduce-only stop tail is placed.
+# Given absolute XBT price is above zero; When buy limit head fills; Then nominal reduce-only stop tail is placed.
 AT_QA_TD_PA	0 60	1	4		buy	L		S-		qAtDpA	47	8	- +	
 
-# SCENARIO AT_QA_TP_PD: Given price drops by at least 5 USD; When buy limit head fills; Then percent-distance reduce-only stop tail is placed.
+# Given price drops by at least 5 USD; When buy limit head fills; Then percent-distance reduce-only stop tail is placed.
 AT_QA_TP_PD	0 60	1	4		buy	L		S-		qAt%pD	49	0.02	- -5	
 
-# SCENARIO AT_QA_TA_PD: Given price drops by at least 5 USD; When buy limit head fills; Then absolute-price reduce-only stop tail is placed.
-AT_QA_TA_PD	0 60	1	4		buy	L		S-		qAtApD	51	3500	- -5	
+# Given price drops by at least 5 USD; When buy limit head fills; Then absolute-price reduce-only stop tail is placed.
+AT_QA_TA_PD	0 60	1	4		buy	L		S-		qAtApD	51	73855	- -5	
 
-# SCENARIO AT_QP_TD_PD: Given price rises by at least 5 USD; When sell limit head fills with percentage quantity semantics; Then nominal reduce-only stop tail is placed.
+# Given price rises by at least 5 USD; When sell limit head fills with percentage quantity semantics; Then nominal reduce-only stop tail is placed.
 AT_QP_TD_PD	0 60	1	4		sell	L		S-		q%tDpD	38	8	5 +	
 
-# --- Runtime, repeat, and chain coverage ---
-
-# SCENARIO NOW_MARKET: Given price drops by at least 2 USD; When buy market head hooks immediately; Then place a tight reduce-only stop.
+# Given price drops by at least 2 USD; When buy market head hooks immediately; Then place a tight reduce-only stop.
 NOW_MARKET	0 60	1	4		buy	M		S-		qAtDpD	53	6	- -2	
 
-# SCENARIO DELAY_MARKET: Given activation starts after 2 minutes; When price drops by at least 2 USD; Then buy market and place a tight reduce-only stop.
+# Given activation starts after 2 minutes; When price drops by at least 2 USD; Then buy market and place a tight reduce-only stop.
 DELAY_MARKET	2 60	1	4		buy	M		S-		qAtDpD	55	6	- -2	
 
-# SCENARIO SHORT_WINDOW: Given only 1 minute of validity; When price rises by at least 2 USD; Then sell market if still inside the window.
+# Given only 1 minute of validity; When price rises by at least 2 USD; Then sell market if still inside the window.
 SHORT_WINDOW	0 1	1	4		sell	M		S-		qAtDpD	40	6	2 +	
 
-# SCENARIO REPEAT_FAST: Given 20 minutes and 3 attempts; When price drops by at least 5 USD; Then repeat after terminal close while the window remains open.
+# Given 20 minutes and 3 attempts; When price drops by at least 5 USD; Then repeat after terminal close while the window remains open.
 REPEAT_FAST	0 20	3	4	0.2	buy	M		S-		qAtDpD	57	8	- -5	
 
-# SCENARIO CHAIN_PARENT: Given 20 minutes and 2 attempts; When price rises by at least 5 USD; Then sell market and release CHAIN_CHILD after successful close.
+# Given 20 minutes and 2 attempts; When price rises by at least 5 USD; Then sell market and release CHAIN_CHILD after successful close.
 CHAIN_PARENT	0 20	2	4	0.5	sell	M		S-		qAtDpD	42	8	5 +	
 
-# SCENARIO CHAIN_CHILD: Given CHAIN_PARENT has freshly closed; When price drops by at least 4 USD after release; Then buy market and consume only that close edge.
+# Given CHAIN_PARENT has freshly closed; When price drops by at least 4 USD after release; Then buy market and consume only that close edge.
 CHAIN_CHILD	0 20	2	4	0.5	buy	M		S-		qAtDpD	59	8	- -4	CHAIN_PARENT
 
 # --- Rejected grammar examples kept as comments ---

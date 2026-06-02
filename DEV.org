@@ -696,20 +696,20 @@ Demo and live databases are separated. Public and private databases are also sep
 
 | Purpose      | Demo DB                         | Live DB                         |
 |--------------+----------------------------------+----------------------------------|
-| Public book  | sqlite:///db/pub-futures-demo-PI_XBTUSD.sqlite | sqlite:///db/pub-futures-live-PI_XBTUSD.sqlite |
-| Private data | sqlite:///db/prv-futures-demo.sqlite | sqlite:///db/prv-futures-live.sqlite |
-| Critical private data | sqlite:///db/prv-futures-demo-critical.sqlite | sqlite:///db/prv-futures-live-critical.sqlite |
+| Public book  | sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite | sqlite:///dbs/pub-futures-live-PI_XBTUSD.sqlite |
+| Private data | sqlite:///dbs/prv-futures-demo.sqlite | sqlite:///dbs/prv-futures-live.sqlite |
+| Critical private data | sqlite:///dbs/prv-futures-demo-critical.sqlite | sqlite:///dbs/prv-futures-live-critical.sqlite |
 
 The public service stores market-book snapshots.
-Public DB files are instrument-scoped. For example, =PI_ADAUSD= defaults to =sqlite:///db/pub-futures-demo-PI_ADAUSD.sqlite=.
+Public DB files are instrument-scoped. For example, =PI_ADAUSD= defaults to =sqlite:///dbs/pub-futures-demo-PI_ADAUSD.sqlite=.
 The private service stores orders, fills, balances, positions, margin fields, and connection health.
 Private DB files are account-scope scoped, not instrument-scoped. =--account-scope= is the logical account/persona label stored with private rows, for example =default= or =advers=.
 Bot-side REST audit and tail telemetry use separate low-priority lanes so they cannot lock the private account DB during order/fill lifecycle decisions:
 
 | Lane       | Default demo URL                                      | Purpose                                        |
 |------------+-------------------------------------------------------+------------------------------------------------|
-| Audit      | sqlite:///db/audit-futures-demo-default.sqlite        | Forensic REST send/amend/cancel audit rows     |
-| Telemetry  | sqlite:///db/telemetry-futures-demo-default.sqlite    | Bot tail metrics and non-critical diagnostics  |
+| Audit      | sqlite:///dbs/audit-futures-demo-default.sqlite       | Forensic REST send/amend/cancel audit rows     |
+| Telemetry  | sqlite:///dbs/telemetry-futures-demo-default.sqlite   | Bot tail metrics and non-critical diagnostics  |
 
 The runtime flags are =--audit-db-url= and =--telemetry-db-url=. These lanes are not platform truth. If they are locked or unavailable, exchange commands and lifecycle state must continue.
 
@@ -719,33 +719,157 @@ If SQLite lock contention persists under multi-pair stress, the next SQLite step
 
 ** PostgreSQL persistence replacement plan
 
-PostgreSQL is the preferred backend for long-running concurrent bots and multi-account tests. It removes SQLite's single-writer file lock and lets the current SQLAlchemy models use normal multi-connection transactions. It does not remove the need for lane separation: critical lifecycle truth, broad account state, audit, and telemetry should remain logically separated so low-priority writes cannot obscure operator reasoning.
+PostgreSQL is the default =kolabidb= backend for long-running concurrent bots and multi-account tests. It removes SQLite's single-writer file lock and lets the current SQLAlchemy models use normal multi-connection transactions. It does not remove the need for lane separation: critical lifecycle truth, broad account state, audit, and telemetry should remain logically separated so low-priority writes cannot obscure operator reasoning. SQLite remains available explicitly with =--backend sqlite= and stores files under =dbs/=.
 
-Local Docker target:
+Host findings:
+- This host already has =postgres:16= locally.
+- Existing Tusis development PostgreSQL exposes =127.0.0.1:15432->5432=, so Kolabi uses =15433= by default.
+- Existing Tusis containers use =PGDATA=/var/lib/postgresql/data/pgdata= and =pg_isready= for health.
+
+Kolabi Docker files:
+- =docker-compose.postgres.yml= defines service =kolabi-db= with =postgres:16=, host port =127.0.0.1:${KOLABI_POSTGRES_PORT:-15433}=, and a bind mount at =./dbs/postgres:/var/lib/postgresql/data=.
+- =docker/postgres/init/001-create-databases.sql= creates separate lane databases for the main bot and the adversarial bot/account.
+- =psycopg[binary]= is a runtime dependency because SQLAlchemy PostgreSQL URLs use the =postgresql+psycopg= driver.
+
+Pros of storing PostgreSQL files under =dbs/postgres=:
+- The DB location is visible beside the SQLite fallback files.
+- Backups, local resets, and disk-usage checks are straightforward.
+- The repo-local helper can manage all DB lanes with one mental model.
+
+Cons:
+- Docker no longer owns the storage path as an opaque named volume.
+- File ownership may appear as the Postgres container UID on the host.
+- Accidental manual deletion is easier, so =dbs/postgres/= must stay ignored by Git.
+
+Databases created on first volume initialisation:
+| Lane | Main bot DB | Adversarial bot DB |
+|------+-------------+--------------------|
+| Public market | kolabi_market | shared kolabi_market |
+| Private account | kolabi_account | kolabi_account_advers |
+| Critical private | kolabi_critical | kolabi_critical_advers |
+| REST audit | kolabi_audit | kolabi_audit_advers |
+| Bot telemetry | kolabi_telemetry | kolabi_telemetry_advers |
+
+Prepare the local PostgreSQL environment file before starting the container. The file feeds both Docker Compose interpolation and the Kolabi host commands:
 
 #+begin_src bash
-docker run --name kolabi-postgres \
-  -e POSTGRES_USER=kolabi \
-  -e POSTGRES_PASSWORD=kolabi \
-  -e POSTGRES_DB=kolabi \
-  -p 5432:5432 \
-  -v kolabi-postgres-data:/var/lib/postgresql/data \
-  -d postgres:16
+cp docker/postgres/kolabi-postgres.env.example .env.postgres
+set -a
+. ./.env.postgres
+set +a
 #+end_src
 
-Repository integration plan:
-- Add an optional =docker-compose.postgres.yml= with the same credentials and volume.
-- Add =psycopg[binary]= to the development/runtime dependency set used for SQLAlchemy PostgreSQL URLs.
-- Keep the existing URL flags unchanged: =--market-db-url=, =--account-db-url=, =--critical-db-url=, =--audit-db-url=, and =--telemetry-db-url=.
-- Use URL examples like =postgresql+psycopg://kolabi:kolabi@localhost:5432/kolabi= for all lanes during the first pass; later split schemas if operational clarity requires it.
-- Initialise tables through the existing SQLAlchemy metadata path before running feeders. No behavioural migration is required for an empty test DB.
-- Smoke test sequence: start PostgreSQL, start public feeder with a PostgreSQL =--db-url=, start private feeder with PostgreSQL =--account-db-url= and =--critical-db-url=, run =rep_xbt.tsv= with PostgreSQL audit/telemetry URLs, then compare lifecycle logs and row counts against the SQLite run.
-- Acceptance: no =database is locked= errors, order/fill lifecycle still comes from the critical private lane, audit failures remain non-fatal, and existing SQLite defaults still work for local smoke tests.
+The local =.env.postgres= file is ignored by Git. If the local password changes, URL-encode special characters before placing them in =KOLABI_PG=.
+
+Start PostgreSQL:
+
+#+begin_src bash
+docker-compose -f docker-compose.postgres.yml up -d
+docker-compose -f docker-compose.postgres.yml ps
+#+end_src
+
+If =dbs/postgres= already existed before the init SQL was added, the init script will not rerun. For a disposable local test DB, reset it with:
+
+#+begin_src bash
+docker-compose -f docker-compose.postgres.yml down
+rm -rf dbs/postgres
+mkdir -p dbs/postgres
+docker-compose -f docker-compose.postgres.yml up -d
+#+end_src
+
+Helper equivalents keep the same feel as the old SQLite helper while separating PostgreSQL feeder logs and PID files. PostgreSQL is the default backend:
+
+#+begin_src bash
+scripts/kolabidb postgres start
+scripts/kolabidb postgres status
+scripts/kolabidb postgres logs
+scripts/kolabidb public start --pair PI_XBTUSD
+scripts/kolabidb private start
+scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+scripts/kolabidb public logs
+scripts/kolabidb private logs
+scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
+#+end_src
+
+Start the shared public market DB feeder:
+
+#+begin_src bash
+python -m kolabi.tree.kraken run \
+  --pair PI_XBTUSD \
+  --environment demo \
+  --db-url "$KOLABI_MARKET_DB_URL" \
+  --private-db-url "$KOLABI_ACCOUNT_DB_URL"
+#+end_src
+
+Start the main private account DB feeder:
+
+#+begin_src bash
+python -m kolabi.tree.account run \
+  --environment demo \
+  --account-scope default \
+  --account-db-url "$KOLABI_ACCOUNT_DB_URL" \
+  --critical-db-url "$KOLABI_CRITICAL_DB_URL"
+#+end_src
+
+Start the adversarial bot/account private DB feeder:
+
+#+begin_src bash
+python -m kolabi.tree.account run \
+  --environment demo \
+  --account-scope advers \
+  --account-db-url "$KOLABI_ADVERS_ACCOUNT_DB_URL" \
+  --critical-db-url "$KOLABI_ADVERS_CRITICAL_DB_URL" \
+  --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY \
+  --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+#+end_src
+
+Run the main strategy with PostgreSQL lanes:
+
+#+begin_src bash
+python -m kolabi.bot run \
+  --strategy orders/rep_xbt.tsv \
+  --exchange kraken \
+  --symbol PI_XBTUSD \
+  --environment demo \
+  --market-db-url "$KOLABI_MARKET_DB_URL" \
+  --account-db-url "$KOLABI_ACCOUNT_DB_URL" \
+  --critical-db-url "$KOLABI_CRITICAL_DB_URL" \
+  --audit-db-url "$KOLABI_AUDIT_DB_URL" \
+  --telemetry-db-url "$KOLABI_TELEMETRY_DB_URL"
+#+end_src
+
+Run the adversarial strategy with PostgreSQL lanes:
+
+#+begin_src bash
+python -m kolabi.bot run \
+  --strategy orders/advers.tsv \
+  --exchange kraken \
+  --symbol PI_XBTUSD \
+  --environment demo \
+  --account-scope advers \
+  --market-db-url "$KOLABI_MARKET_DB_URL" \
+  --account-db-url "$KOLABI_ADVERS_ACCOUNT_DB_URL" \
+  --critical-db-url "$KOLABI_ADVERS_CRITICAL_DB_URL" \
+  --audit-db-url "$KOLABI_ADVERS_AUDIT_DB_URL" \
+  --telemetry-db-url "$KOLABI_ADVERS_TELEMETRY_DB_URL" \
+  --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY \
+  --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+#+end_src
+
+Acceptance:
+- No =database is locked= errors.
+- Main and adversarial private lanes remain separated.
+- Both bots share the public market lane.
+- Order/fill lifecycle still comes from the critical private lane.
+- Audit and telemetry writes remain non-critical.
+- SQLite fallback remains available with =--backend sqlite=.
+
+Queued writer note: the queued writer remains compatible with PostgreSQL, but is deferred until PostgreSQL testing shows whether audit/telemetry still need buffering. If implemented later, keep it as an edge adapter only; reducers, Isis, Chronos, and pair semantics must not know about queues or writer threads.
 
 Local inspection commands:
 #+BEGIN_SRC bash  -i
 # list tables
-sqlite3 db/pub-futures-demo-PI_XBTUSD.sqlite '.tables'
+sqlite3 dbs/pub-futures-demo-PI_XBTUSD.sqlite '.tables'
 #+END_SRC
 
 #+RESULTS:
@@ -757,7 +881,7 @@ sqlite3 db/pub-futures-demo-PI_XBTUSD.sqlite '.tables'
 
 #+begin_src bash
 # inspect all cached instrument rules
-sqlite3 db/pub-futures-demo-PI_XBTUSD.sqlite \
+sqlite3 dbs/pub-futures-demo-PI_XBTUSD.sqlite \
   "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments ORDER BY symbol;"
 #+end_src
 
@@ -767,7 +891,7 @@ sqlite3 db/pub-futures-demo-PI_XBTUSD.sqlite \
 
 #+BEGIN_SRC bash  -i
 # inspect one instrument
-sqlite3 db/pub-futures-demo-PI_XBTUSD.sqlite \
+sqlite3 dbs/pub-futures-demo-PI_XBTUSD.sqlite \
   "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments WHERE symbol = 'PI_XBTUSD';"
 #+END_SRC
 

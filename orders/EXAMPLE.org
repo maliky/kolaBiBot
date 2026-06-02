@@ -52,6 +52,13 @@ Time fields are minutes:
 - 4d = =5760=.
 - 7d is about =10000=.
 
+* Repeat
+#+BEGIN_SRC bash  -i
+python -m kolabi.bot run-once -m B5M -t 0 1440 -O 120 -n 5 -p 0.1 -c buy -a qAtDpD -x -0 +0 -q 2 -T 5 -o M -y S-
+
+#Buy five at market after drop 5
+python -m kolabi.bot run-once -m B5M-D5 -t 0 1440 -O 120 -n 5 -p 0.1667 -c buy -a qAt%pD -x -5.5 -5.0 -q 1 -T 1.5 -o M -y S-
+#+END_SRC
 * Individual Order Type Commands
 
 These commands focus on one head order type at a time.  They all use the same symbol and demo environment so differences stay visible.

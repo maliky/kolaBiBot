@@ -9,6 +9,9 @@ Docs/*
 archives/
 FinancialNoise*
 .codex
+.run/
+dbs/postgres/
+!dbs/.gitkeep
 run.sh
 notes.org
 *cache*

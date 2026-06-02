@@ -7,10 +7,10 @@ name	tps_run	essais	tOut	pause	side	oType	oDelta	tType	tDelta	atype	quantity	tp	
 # Tail rule: qAtDpD + tp=5 means a relative trailing stop 5 USD from the filled head price.
 
 # SCENARIO CHAIN_BUY_STOP_PLUS10: Given no dependency; When the strategy starts; Then place a last-price buy stop 10 USD above current price and protect the filled long with a reduce-only sell stop 5 USD below fill. Repeat up to 3 attempts during the day.
-CHAIN_BUY_STOP_PLUS10	0 1440	3	120	0.2	buy	Sl	10	S-		qAtDpD	61	5	- +	
+CHAIN_BUY_STOP_PLUS10	0 1440	2	120	0.2	buy	Sl	10	S-		qAtDpD	61	5	- +	
 
 # SCENARIO CHAIN_SELL_AFTER_LONG_TAIL: Given CHAIN_BUY_STOP_PLUS10 tail closed; When released; Then sell at market and protect the filled short with a reduce-only buy stop 5 USD above fill. Repeat up to 3 releases during the day.
-CHAIN_SELL_AFTER_LONG_TAIL	0 1440	3	120	0.2	sell	M		S-		qAtDpD	62	5	- +	CHAIN_BUY_STOP_PLUS10-tail-closed
+CHAIN_SELL_AFTER_LONG_TAIL	0 1440	2	120	0.2	sell	M		S-		qAtDpD	62	5	- +	CHAIN_BUY_STOP_PLUS10-tail-closed
 
 # SCENARIO CHAIN_BUY_AFTER_SHORT_TAIL: Given CHAIN_SELL_AFTER_LONG_TAIL tail closed; When released; Then buy at market and protect the filled long with a reduce-only sell stop 5 USD below fill. Repeat up to 3 releases during the day.
-CHAIN_BUY_AFTER_SHORT_TAIL	0 1440	3	120	0.2	buy	M		S-		qAtDpD	63	5	- +	CHAIN_SELL_AFTER_LONG_TAIL-tail-closed
+CHAIN_BUY_AFTER_SHORT_TAIL	0 1440	2	120	0.2	buy	M		S-		qAtDpD	63	5	- +	CHAIN_SELL_AFTER_LONG_TAIL-tail-closed
