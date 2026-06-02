@@ -83,9 +83,9 @@ def resolve_head_order_prices(
 
     The `prix` interval is the hook condition. It is not a limit price. Once the
     hook fires, order placement is anchored to the same market reference source
-    that the order type selects, with optional `oDelta` only adjusting plain
-    limit heads. Stop-limit/touch-limit heads keep `oDelta` for the adapter's
-    limit-price boundary.
+    that the order type selects.  ``oDelta`` defaults to nominal USD distance;
+    when the head carries ``o%`` it is materialised as a percentage of the same
+    reference before any exchange command is built.
     """
     code = parse_order_code(pair.head.order_type)
     if code.base_key == "M":
@@ -97,6 +97,12 @@ def resolve_head_order_prices(
         return decimal_to_float(_plain_limit_head_price(pair, reference)), None
     if code.base_key == "S":
         return None, decimal_to_float(_stop_head_price(pair, reference))
+    if code.base_key in {"SL", "LT"}:
+        price = _trigger_limit_head_price(pair, reference)
+        return (
+            None if price is None else decimal_to_float(price),
+            decimal_to_float(reference),
+        )
     if code.base_key in {"SL", "MT", "LT"}:
         return None, decimal_to_float(reference)
     return None, None
@@ -112,7 +118,7 @@ def reference_price(side: Side, market: MarketLike) -> float:
 def _plain_limit_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal:
     if pair.head.delta is None:
         return reference
-    distance = abs(to_decimal(pair.head.delta))
+    distance = _head_delta_distance(pair, reference)
     if pair.head.side == Side.BUY:
         return reference - distance
     return reference + distance
@@ -121,10 +127,26 @@ def _plain_limit_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal:
 def _stop_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal:
     if pair.head.delta is None:
         return reference
-    distance = abs(to_decimal(pair.head.delta))
+    distance = _head_delta_distance(pair, reference)
     if pair.head.side == Side.BUY:
         return reference + distance
     return reference - distance
+
+
+def _trigger_limit_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal | None:
+    if pair.head.delta is None:
+        return None
+    distance = _head_delta_distance(pair, reference)
+    if pair.head.side == Side.BUY:
+        return reference + distance
+    return reference - distance
+
+
+def _head_delta_distance(pair: OrderPairSpec, reference: Decimal) -> Decimal:
+    delta = abs(to_decimal(pair.head.delta or 0))
+    if pair.head.delta_type.lower() == "o%":
+        return reference * delta / Decimal("100")
+    return delta
 
 
 def executable_head_reference_price(

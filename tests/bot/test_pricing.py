@@ -65,6 +65,60 @@ def test_head_limit_mark_suffix_uses_mark_reference() -> None:
     assert reference == 120.0
 
 
+def test_sell_limit_percent_offset_materialises_above_mark_reference() -> None:
+    pair = replace(
+        _pair("Lm!"),
+        head=HeadSpec(
+            side=Side.SELL,
+            order_type="Lm!",
+            delta=1.5,
+            delta_type="o%",
+        ),
+        head_price=(-1_000_000.0, 1_000_000.0),
+        amount_type="qAtDpDo%",
+    )
+
+    price, stop_price = resolve_head_order_prices(
+        pair,
+        _Market(
+            best_bid=99.0,
+            best_ask=101.0,
+            mid_price=100.0,
+            mark_price=1000.0,
+        ),
+    )
+
+    assert price == 1015.0
+    assert stop_price is None
+
+
+def test_buy_limit_percent_offset_materialises_below_mark_reference() -> None:
+    pair = replace(
+        _pair("Lm!"),
+        head=HeadSpec(
+            side=Side.BUY,
+            order_type="Lm!",
+            delta=1.5,
+            delta_type="o%",
+        ),
+        head_price=(-1_000_000.0, 1_000_000.0),
+        amount_type="qAtDpDo%",
+    )
+
+    price, stop_price = resolve_head_order_prices(
+        pair,
+        _Market(
+            best_bid=99.0,
+            best_ask=101.0,
+            mid_price=100.0,
+            mark_price=1000.0,
+        ),
+    )
+
+    assert price == 985.0
+    assert stop_price is None
+
+
 def test_head_limit_suffix_drives_price_condition() -> None:
     pair = _pair("Lm")
     now = datetime.now(timezone.utc)

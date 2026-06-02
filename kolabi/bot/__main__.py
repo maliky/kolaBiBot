@@ -221,7 +221,7 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         "-d",
         type=float,
         default=None,
-        help="Difference between trigger price and order price.",
+        help="Head offset. Nominal by default; use aType token o%% for percent offset.",
     )
     parser.add_argument(
         "--tDelta",
@@ -274,9 +274,9 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         type=str,
         default="p%q%t%",
         help=(
-            "Compatibility interpretation of prix, quantity, and tailPrice. "
-            "Use pD/p%%/pA for price, q%%/qA for quantity, t%%/tD/tA for tail. "
-            "Example: qAt%%pD means absolute quantity, percent tail, differential prices."
+            "Compatibility interpretation of prix, quantity, tailPrice, and optional oDelta. "
+            "Use pD/p%%/pA for price, q%%/qA for quantity, t%%/tD/tA for tail, oD/o%% for head offset. "
+            "Example: qAt%%pDo%% means absolute quantity, percent tail, differential prices, percent head offset."
         ),
     )
     parser.add_argument(

@@ -96,12 +96,17 @@ def head_place_request(
         ),
         clOrdID=client_order_id,
         execInst=_head_exec_inst(pair.head.order_type),
-        oDelta=(
-            None
-            if pair.head.delta is None
-            else cast(PriceOffset, to_decimal(pair.head.delta))
-        ),
+        oDelta=_head_exchange_offset(pair),
     )
+
+
+def _head_exchange_offset(pair: OrderPairSpec) -> PriceOffset | None:
+    """Return only exchange-native nominal offsets for head placement."""
+    if pair.head.delta is None:
+        return None
+    if pair.head.delta_type.lower() == "o%":
+        return None
+    return cast(PriceOffset, to_decimal(pair.head.delta))
 
 
 def resolve_tail_quantity(state: PairCycleState) -> Decimal | int | None:

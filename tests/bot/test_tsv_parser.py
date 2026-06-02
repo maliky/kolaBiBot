@@ -30,6 +30,30 @@ def test_head_limit_price_suffix_is_valid(tmp_path: Path) -> None:
 
     assert strategy.pairs[0].head.order_type == "Lm"
     assert strategy.pairs[0].head_price == (-1_000_000.0, -5.0)
+    assert strategy.pairs[0].head.delta_type == "oD"
+
+
+def test_head_percent_offset_type_is_valid(tmp_path: Path) -> None:
+    strategy = read_strategy_file(
+        _write_strategy(
+            tmp_path / "valid.tsv",
+            ["BUY_LM\t0 60\t1\t4\t\tbuy\tLm!\t1.5\tS-\t\tqAtDpDo%\t3\t8\t- +\t"],
+        )
+    )
+
+    assert strategy.pairs[0].head.order_type == "Lm!"
+    assert strategy.pairs[0].head.delta == 1.5
+    assert strategy.pairs[0].head.delta_type == "o%"
+
+
+def test_invalid_head_offset_type_fails_clearly(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Invalid o token"):
+        read_strategy_file(
+            _write_strategy(
+                tmp_path / "invalid.tsv",
+                ["BAD_O\t0 60\t1\t4\t\tbuy\tLm!\t1.5\tS-\t\tqAtDpDoA\t3\t8\t- +\t"],
+            )
+        )
 
 
 def test_market_head_price_suffix_fails_clearly(tmp_path: Path) -> None:

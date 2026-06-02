@@ -190,6 +190,47 @@ def test_place_head_uses_materialised_limit_price() -> None:
     assert command.request.price == Decimal("73500.5")
 
 
+def test_place_head_percent_offset_does_not_forward_raw_delta() -> None:
+    state = sample_state()
+    state = PairCycleState(
+        pair=OrderPairSpec(
+            name="pair-a",
+            window=state.pair.window,
+            try_num=state.pair.try_num,
+            dr_pause=state.pair.dr_pause,
+            timeout=state.pair.timeout,
+            head=HeadSpec(
+                side=Side.SELL,
+                order_type="Lm!",
+                delta=1.5,
+                delta_type="o%",
+            ),
+            head_price=state.pair.head_price,
+            head_price_type=state.pair.head_price_type,
+            head_quantity=state.pair.head_quantity,
+            head_quantity_type=state.pair.head_quantity_type,
+            tail=state.pair.tail,
+            tail_price_spec=state.pair.tail_price_spec,
+            tail_price_spec_type=state.pair.tail_price_spec_type,
+            amount_type="qAtDpDo%",
+        ),
+        head_state=state.head_state,
+        tail_state=state.tail_state,
+        played_quantity=state.played_quantity,
+        head_order_price=Decimal("1015.0"),
+    )
+
+    command = plan_runtime_commands(
+        state,
+        (PairIntent(PairIntentKind.PLACE_HEAD),),
+        symbol=Symbol("PI_XBTUSD"),
+    )[0]
+
+    assert isinstance(command, PlaceHeadCommand)
+    assert command.request.price == Decimal("1015.0")
+    assert command.request.oDelta is None
+
+
 def test_place_head_uses_materialised_trigger_price() -> None:
     state = sample_state()
     state = PairCycleState(

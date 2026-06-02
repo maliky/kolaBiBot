@@ -61,6 +61,7 @@ def order_pair_from_legacy_values(
 ) -> OrderPairSpec:
     """Normalise une ligne legacy vers une paire canonique."""
     head_quantity_type, tail_price_type, head_price_type = split_amount_type(atype)
+    head_delta_type = extract_head_delta_type(atype)
     normalized_side = normalize_side(side)
     validate_order_code(oType, role="head")
     validate_order_code(tType, role="tail")
@@ -77,6 +78,7 @@ def order_pair_from_legacy_values(
             side=normalized_side,
             order_type=oType.strip(),
             delta=oDelta,
+            delta_type=head_delta_type,
         ),
         head_price=prix,
         head_price_type=head_price_type,
@@ -198,6 +200,11 @@ def split_amount_type(atype: str) -> tuple[str, str, str]:
     return quantity_type, tail_type, price_type
 
 
+def extract_head_delta_type(atype: str) -> str:
+    """Extract optional head offset semantics from the legacy compact type."""
+    return _extract_optional_typed_token(atype.strip(), "o", default="oD")
+
+
 def _extract_typed_token(raw: str, prefix: str) -> str:
     """Trouve le token d'un prefixe legacy dans atype."""
     start = raw.find(prefix)
@@ -207,6 +214,18 @@ def _extract_typed_token(raw: str, prefix: str) -> str:
         raise ValueError(f"Incomplete {prefix} token in amount type '{raw}'.")
     suffix = raw[start + 1]
     if suffix in {"A", "D", "%"}:
+        return f"{prefix}{suffix}"
+    raise ValueError(f"Invalid {prefix} token in amount type '{raw}'.")
+
+
+def _extract_optional_typed_token(raw: str, prefix: str, *, default: str) -> str:
+    start = raw.find(prefix)
+    if start < 0:
+        return default
+    if start + 1 >= len(raw):
+        raise ValueError(f"Incomplete {prefix} token in amount type '{raw}'.")
+    suffix = raw[start + 1]
+    if prefix == "o" and suffix in {"D", "%"}:
         return f"{prefix}{suffix}"
     raise ValueError(f"Invalid {prefix} token in amount type '{raw}'.")
 

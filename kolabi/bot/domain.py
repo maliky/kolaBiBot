@@ -162,6 +162,7 @@ class HeadSpec:
     side: Side
     order_type: str
     delta: float | None = None
+    delta_type: str = "oD"
 
 
 @dataclass(frozen=True)
