@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from kolabi.bot.chronos import PendingRepeat
 from kolabi.bot.domain import (
@@ -579,6 +579,97 @@ def test_head_timeout_cancel_ack_terminates_unfilled_head_without_retries(
     assert "HEAD_CANCELLED (pair-a#1): PQ=0.0" in caplog.text
 
 
+def test_head_timeout_cancel_ack_without_cumqty_terminates_unfilled_head(
+    tmp_path,
+) -> None:
+    class SparseCancelAckExecutor(_CancelAckLiveExecutor):
+        async def execute(self, command: DragonSong) -> OrderAck:
+            ack = await super().execute(command)
+            if isinstance(command, CancelCommand):
+                return OrderAck(
+                    order_id=ack.order_id,
+                    status=ack.status,
+                    orig_qty=ack.orig_qty,
+                    executed_qty=None,
+                    side=ack.side,
+                )
+            return ack
+
+    db = _PrivateDbHarness(tmp_path)
+    executor = SparseCancelAckExecutor()
+    pair = replace(sample_strategy()[0], timeout=0.001)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="head-timeout", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=executor,
+        public_source=_HeadOpenOnlySource(db, executor),
+        private_source=KrakenPrivateOrderPollingSource(
+            db.reader,
+            poll_seconds=0.01,
+            head_fill_reference_grace_seconds=0.5,
+        ),
+        simulate=False,
+        tail_visibility_timeout_seconds=0.1,
+    )
+
+    result = asyncio.run(_run_runtime_for(runtime, seconds=0.45))
+
+    cancel_commands = [
+        command for command in result.commands if isinstance(command, CancelCommand)
+    ]
+    assert len(cancel_commands) == 1
+    pair_state = result.state.pairs["pair-a"]
+    assert pair_state.head_state == HeadState.FAILED
+    assert pair_state.tail_state == TailState.LATENT
+    assert pair_state.played_quantity == Decimal("0.0")
+
+
+def test_head_timeout_notfound_without_cumqty_does_not_terminate_head(
+    tmp_path,
+    caplog,
+) -> None:
+    class SparseNotFoundAckExecutor(_CancelAckLiveExecutor):
+        async def execute(self, command: DragonSong) -> OrderAck:
+            ack = await super().execute(command)
+            if isinstance(command, CancelCommand):
+                return OrderAck(
+                    order_id=ack.order_id,
+                    status="NotFound",
+                    orig_qty=ack.orig_qty,
+                    executed_qty=None,
+                    side=ack.side,
+                )
+            return ack
+
+    db = _PrivateDbHarness(tmp_path)
+    executor = SparseNotFoundAckExecutor()
+    pair = replace(sample_strategy()[0], timeout=0.001)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="head-timeout", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=executor,
+        public_source=_HeadOpenOnlySource(db, executor),
+        private_source=KrakenPrivateOrderPollingSource(
+            db.reader,
+            poll_seconds=0.01,
+            head_fill_reference_grace_seconds=0.5,
+        ),
+        simulate=False,
+        tail_visibility_timeout_seconds=0.1,
+    )
+
+    with caplog.at_level("INFO", logger="kola"):
+        result = asyncio.run(_run_runtime_for(runtime, seconds=0.45))
+
+    cancel_commands = [
+        command for command in result.commands if isinstance(command, CancelCommand)
+    ]
+    assert len(cancel_commands) == 1
+    pair_state = result.state.pairs["pair-a"]
+    assert pair_state.head_state == HeadState.NEW
+    assert "HEAD_CANCELLED (pair-a#1):" not in caplog.text
+
+
 def test_entry_window_does_not_cancel_started_head_before_timeout(tmp_path) -> None:
     db = _PrivateDbHarness(tmp_path)
     executor = _RecordingLiveExecutor()
@@ -882,13 +973,14 @@ def test_runtime_serialises_tail_amends_per_pair_but_not_across_pairs() -> None:
         pending = runtime._pending_commands[
             _CommandSlot(pair_name="pair-a", attempt_index=1, role="tail")
         ]
-        pending_price = pending[-1].request.newPrice
+        pending_request = cast(AmendOrderCommandRequest, pending[-1].request)
+        pending_price = pending_request.newPrice
         inflight_count = len(runtime._inflight_commands)
         pending_count = len(pending)
         executor.release.set()
         await asyncio.sleep(0.01)
         await runtime.stop()
-        return inflight_count, pending_count, pending_price
+        return inflight_count, pending_count, None if pending_price is None else to_decimal(pending_price)
 
     inflight_count, pending_count, pending_price = asyncio.run(_run())
 
@@ -1260,7 +1352,7 @@ def test_head_fill_reference_wait_is_not_required_after_tail_is_anchored() -> No
         reply={"cumQty": 1.0, "orderQty": 1.0},
         is_private=True,
     )
-    source = KrakenPrivateOrderPollingSource(object())
+    source = KrakenPrivateOrderPollingSource(cast(Any, object()))
 
     assert source._must_wait_for_private_fill_reference(move, anchored, OrderRole.HEAD) is False
 
@@ -1504,6 +1596,10 @@ def test_public_polling_emits_market_ticks_for_living_tails() -> None:
         def all_pairs_terminal(self) -> bool:
             return bool(self.events)
 
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
         async def enqueue(self, event: EggMove) -> None:
             self.events.append(event)
 
@@ -1572,6 +1668,10 @@ def test_public_polling_does_not_deduplicate_changed_tail_reference() -> None:
         @property
         def all_pairs_terminal(self) -> bool:
             return len(self.events) >= 2
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
 
         async def enqueue(self, event: EggMove) -> None:
             self.events.append(event)
@@ -1861,7 +1961,7 @@ def test_repeat_activation_waits_for_fresh_head_price_baseline() -> None:
                         "pair-a": replace(
                             pair_state,
                             head_trigger_reference_price=to_decimal(
-                                reply["reference_price"]
+                                cast(Any, reply["reference_price"])
                             ),
                             head_trigger_reference_source=str(
                                 reply["reference_source"]

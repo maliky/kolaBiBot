@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 from dataclasses import dataclass
-from typing import Awaitable, Callable, TypeVar
+from typing import Awaitable, Callable, TypeVar, assert_never
 
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
@@ -204,4 +204,4 @@ def _flight_priority(command: DragonSong) -> int:
         return 2
     if isinstance(command, PlaceHeadCommand):
         return 3
-    return 9
+    assert_never(command)

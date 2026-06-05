@@ -302,6 +302,7 @@ def head_identity_from_move(
         role="head",
         client_order_id=str(client_order_id) if client_order_id is not None else None,
         exchange_order_id=str(order_id) if order_id is not None else None,
+        symbol=move.symbol or state.pair.symbol,
     )
 
 
@@ -320,6 +321,7 @@ def tail_identity_from_move(
         role="tail",
         client_order_id=str(client_order_id) if client_order_id is not None else None,
         exchange_order_id=str(order_id) if order_id is not None else None,
+        symbol=move.symbol or state.pair.symbol,
     )
 
 

@@ -5,7 +5,14 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
-from kolabi.bot.domain import HeadState, OrderIdentity, PairCycleState, TailState
+import pytest
+from kolabi.bot.domain import (
+    HeadState,
+    OrderIdentity,
+    PairCycleState,
+    StrategySpec,
+    TailState,
+)
 from kolabi.bot.indicators import DummyIndicatorClient
 from kolabi.bot.service import AdapterExchangePort, BotConfig, BotService
 from kolabi.bot.strategy_runtime import StrategyRunResult, StrategyRuntime
@@ -115,6 +122,50 @@ def test_bot_service_uses_scoped_kolabi_db_env_lanes(monkeypatch) -> None:
     assert service._critical_account_db_url == "postgresql+psycopg://x/advers_critical"
     assert service._audit_db_url == "postgresql+psycopg://x/advers_audit"
     assert service._telemetry_db_url == "postgresql+psycopg://x/advers_telemetry"
+
+
+def test_bot_service_dry_run_preserves_pair_symbols() -> None:
+    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    strategy = StrategySpec(
+        name="multi-symbol",
+        pairs=(
+            replace(base_pair, name="xbt", symbol="PI_XBTUSD"),
+            replace(base_pair, name="eth", symbol="PI_ETHUSD"),
+        ),
+    )
+    service = BotService(
+        BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False),
+        indicators=DummyIndicatorClient({"ma": 42}),
+    )
+
+    result = service.run_strategy(strategy, dry_run=True)
+
+    assert {str(command.symbol) for command in result.commands} == {
+        "PI_XBTUSD",
+        "PI_ETHUSD",
+    }
+    assert service._required_symbols == ("PI_ETHUSD", "PI_XBTUSD")
+
+
+def test_bot_service_requires_shared_market_db_for_active_multi_symbol_strategy(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("KOLABI_MARKET_DB_URL", raising=False)
+    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    strategy = StrategySpec(
+        name="multi-symbol",
+        pairs=(
+            replace(base_pair, name="xbt", symbol="PI_XBTUSD"),
+            replace(base_pair, name="eth", symbol="PI_ETHUSD"),
+        ),
+    )
+    service = BotService(
+        BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False),
+        indicators=DummyIndicatorClient({"ma": 42}),
+    )
+
+    with pytest.raises(ValueError, match="shared market DB URL"):
+        service.run_strategy(strategy, dry_run=False, simulate=False)
 
 
 def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) -> None:
@@ -424,6 +475,34 @@ def test_interrupt_cleanup_resolves_tail_exchange_id_from_client_id(monkeypatch)
     assert summary["close_orders"] == 1
     assert summary["position_before_qty"] == initial_position
     assert summary["position_after_qty"] == 0.0
+
+
+def test_runtime_error_triggers_live_cleanup_before_reraising(monkeypatch) -> None:
+    service = BotService(BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False))
+    cleanup_calls: list[object] = []
+
+    class FailingRuntime:
+        async def run(self) -> StrategyRunResult:
+            raise RuntimeError("head fill reference price missing")
+
+    def cleanup(runtime: object) -> dict[str, object]:
+        cleanup_calls.append(runtime)
+        return {
+            "pairs": 1,
+            "tail_cancelled": 1,
+            "close_orders": 1,
+            "position_before_qty": 2.0,
+            "position_after_qty": 0.0,
+            "errors": 0,
+        }
+
+    monkeypatch.setattr(service, "cleanup_interrupted_pairs", cleanup)
+    runtime = FailingRuntime()
+
+    with pytest.raises(RuntimeError, match="head fill reference"):
+        service._run_runtime_with_cleanup(runtime, simulate=False)  # type: ignore[arg-type]
+
+    assert cleanup_calls == [runtime]
 
 
 def test_wait_timeout_message_includes_runtime_diagnostics() -> None:

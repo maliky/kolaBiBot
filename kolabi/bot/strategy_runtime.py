@@ -357,7 +357,8 @@ class KrakenPrivateOrderPollingSource:
     async def pump(self, runtime: RuntimeQueueLike) -> None:
         while runtime.running:
             now = datetime.now(timezone.utc)
-            fresh_records: list[_PendingPrivateRecord] = []
+            candidates = tuple(self._pending_records)
+            self._pending_records = []
             for symbol in _active_runtime_symbols(runtime):
                 cursor = self._cursor_for(symbol, runtime.state.launched_at)
                 records = self.client.fetch_private_orders_since(
@@ -398,12 +399,10 @@ class KrakenPrivateOrderPollingSource:
                             fill_records,
                             identity_fills,
                         )
-                self._advance_cursor(cursor, records=records, fill_records=fill_records)
-                fresh_records.extend(
+                candidates = candidates + tuple(
                     _PendingPrivateRecord(record=record, first_seen_at=now)
                     for record in records
-                )
-                fresh_records.extend(
+                ) + tuple(
                     _PendingPrivateRecord(
                         record=record,
                         first_seen_at=now,
@@ -411,7 +410,48 @@ class KrakenPrivateOrderPollingSource:
                     )
                     for record in fill_records
                 )
-            await self._emit_private_records(runtime, now, tuple(fresh_records))
+                self._advance_cursor(cursor, records, fill_records)
+            for pending_record in candidates:
+                record = pending_record.record
+                resolved = runtime.pair_state_for_record(record)
+                if resolved is None:
+                    self._pending_records.append(pending_record)
+                    continue
+                pair_state, role = resolved
+                fact = private_order_fact_from_record(
+                    record,
+                    pair_name=pair_state.pair.name,
+                )
+                move = head_move_from_private_fact(fact)
+                move = replace(move, role=role)
+                move = self._with_reference_price(
+                    move,
+                    pair_state,
+                    _pair_symbol(pair_state, runtime.symbol),
+                )
+                if self._must_wait_for_private_fill_reference(move, pair_state, role):
+                    if self._reference_price_from_move(move) is None:
+                        elapsed_seconds = max(
+                            0.0,
+                            (now - pending_record.first_seen_at).total_seconds(),
+                        )
+                        if elapsed_seconds < self.head_fill_reference_grace_seconds:
+                            self._pending_records.append(pending_record)
+                            continue
+                        order_id = record.exchange_order_id or "-"
+                        client_id = record.client_order_id or "-"
+                        raise RuntimeError(
+                            "head fill reference price missing for relative tail after grace window: "
+                            f"pair={pair_state.pair.name} clOrdID={client_id} "
+                            f"orderID={order_id} grace_seconds={self.head_fill_reference_grace_seconds:g}"
+                        )
+                event_id = (
+                    self._private_record_event_id(
+                        record,
+                        is_fill=pending_record.is_fill,
+                    )
+                )
+                await runtime.enqueue(replace(move, event_id=event_id))
             if _runtime_sources_should_stop(runtime):
                 return
             await asyncio.sleep(self.poll_seconds)
@@ -429,7 +469,6 @@ class KrakenPrivateOrderPollingSource:
     @staticmethod
     def _advance_cursor(
         cursor: _PrivateCursor,
-        *,
         records: tuple[PrivateOrderRecord, ...],
         fill_records: tuple[PrivateOrderRecord, ...],
     ) -> None:
@@ -443,54 +482,6 @@ class KrakenPrivateOrderPollingSource:
             if occurred_at is not None:
                 cursor.after_fill_timestamp = occurred_at
             cursor.after_fill_id = record.local_id
-
-    async def _emit_private_records(
-        self,
-        runtime: RuntimeQueueLike,
-        now: datetime,
-        fresh_records: tuple[_PendingPrivateRecord, ...],
-    ) -> None:
-        candidates = tuple(self._pending_records) + fresh_records
-        self._pending_records = []
-        for pending_record in candidates:
-            record = pending_record.record
-            resolved = runtime.pair_state_for_record(record)
-            if resolved is None:
-                self._pending_records.append(pending_record)
-                continue
-            pair_state, role = resolved
-            fact = private_order_fact_from_record(
-                record,
-                pair_name=pair_state.pair.name,
-            )
-            move = head_move_from_private_fact(fact)
-            move = replace(move, role=role)
-            move = self._with_reference_price(
-                move,
-                pair_state,
-                _pair_symbol(pair_state, runtime.symbol),
-            )
-            if self._must_wait_for_private_fill_reference(move, pair_state, role):
-                if self._reference_price_from_move(move) is None:
-                    elapsed_seconds = max(
-                        0.0,
-                        (now - pending_record.first_seen_at).total_seconds(),
-                    )
-                    if elapsed_seconds < self.head_fill_reference_grace_seconds:
-                        self._pending_records.append(pending_record)
-                        continue
-                    order_id = record.exchange_order_id or "-"
-                    client_id = record.client_order_id or "-"
-                    raise RuntimeError(
-                        "head fill reference price missing for relative tail after grace window: "
-                        f"pair={pair_state.pair.name} clOrdID={client_id} "
-                        f"orderID={order_id} grace_seconds={self.head_fill_reference_grace_seconds:g}"
-                    )
-            event_id = self._private_record_event_id(
-                record,
-                is_fill=pending_record.is_fill,
-            )
-            await runtime.enqueue(replace(move, event_id=event_id))
 
     @staticmethod
     def _active_identity_sets(
@@ -1136,7 +1127,7 @@ class StrategyRuntime:
                     if current.played_quantity is not None
                     else "-"
                 )
-                update_signature = (
+                head_cancel_signature = (
                     str(current.attempt_index),
                     current.head_state.value,
                     played_qty,
@@ -1147,15 +1138,15 @@ class StrategyRuntime:
                     if identity is None or identity.exchange_order_id is None
                     else identity.exchange_order_id,
                 )
-                if self._last_pair_updates.get(pair_name) != update_signature:
-                    self._last_pair_updates[pair_name] = update_signature
+                if self._last_pair_updates.get(pair_name) != head_cancel_signature:
+                    self._last_pair_updates[pair_name] = head_cancel_signature
                     _LOGGER.info(
                         "HEAD_CANCELLED (%s#%s): PQ=%s HCID=%s HOID=%s",
                         pair_name,
-                        update_signature[0],
-                        update_signature[2],
-                        update_signature[3],
-                        update_signature[4],
+                        head_cancel_signature[0],
+                        head_cancel_signature[2],
+                        head_cancel_signature[3],
+                        head_cancel_signature[4],
                     )
                 continue
             if current.head_state not in {HeadState.LIVING, HeadState.CLOSED} and current.tail_state not in {
@@ -1778,6 +1769,8 @@ class StrategyRuntime:
         if pair_state is None:
             return
         now = datetime.now(timezone.utc)
+        if command.request.newPrice is None:
+            return
         desired_stop = to_decimal(command.request.newPrice)
         confirmed_stop = _confirmed_tail_stop(pair_state)
         ref_source = "-"
@@ -1811,7 +1804,7 @@ class StrategyRuntime:
 
     def _log_new_pending_repeats(
         self,
-        previous_repeats: dict[str, object],
+        previous_repeats: Mapping[str, object],
     ) -> None:
         for pair_name, pending in self.chronos.pending_repeats.items():
             if previous_repeats.get(pair_name) == pending:
@@ -2241,9 +2234,9 @@ def _ack_is_rejected(ack: OrderAck) -> bool:
 
 def _ack_is_zero_fill_cancel(ack: OrderAck) -> bool:
     status = ack.status.replace(" ", "").replace("_", "").replace("-", "").lower()
-    if status not in {"canceled", "cancelled", "notfound", "notfoundcancelled"}:
-        return False
     if ack.executed_qty is None:
+        return status in {"canceled", "cancelled"}
+    if status not in {"canceled", "cancelled", "notfound", "notfoundcancelled"}:
         return False
     return to_decimal(ack.executed_qty) == Decimal("0")
 

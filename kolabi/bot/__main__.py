@@ -170,7 +170,7 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--rest-max-inflight",
         type=int,
-        default=1,
+        default=2,
         help="Maximum live REST commands concurrently waiting on the platform; use 0 for unlimited.",
     )
 
@@ -340,7 +340,7 @@ def build_service(args: argparse.Namespace) -> BotService:
             max_reconcile_age_seconds=args.max_reconcile_age_seconds,
             max_active_pairs=getattr(args, "max_active_pairs", 4),
             rest_min_interval_seconds=getattr(args, "rest_min_interval", 0.1),
-            rest_max_inflight=getattr(args, "rest_max_inflight", 1),
+            rest_max_inflight=getattr(args, "rest_max_inflight", 2),
             rest_audit_retention_minutes=getattr(
                 args,
                 "rest_audit_retention_minutes",

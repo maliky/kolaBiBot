@@ -89,7 +89,8 @@ def _pair_symbol(pair: OrderPairSpec, default_symbol: str) -> str:
 
 
 def _strategy_symbols(strategy: StrategySpec) -> tuple[str, ...]:
-    return tuple(sorted({str(pair.symbol) for pair in strategy.pairs if pair.symbol}))
+    symbols = tuple(sorted({str(pair.symbol) for pair in strategy.pairs if pair.symbol}))
+    return symbols
 
 
 class InstrumentRulesExchange(Protocol):
@@ -154,7 +155,7 @@ class BotConfig:
     tail_visibility_timeout_seconds: float = 20.0
     max_active_pairs: int = 4
     rest_min_interval_seconds: float = 0.1
-    rest_max_inflight: int = 1
+    rest_max_inflight: int = 2
     rest_audit_retention_minutes: int = DEFAULT_PRUNING.rest_audit.retention_minutes
     rest_audit_retention_limit: int = DEFAULT_PRUNING.rest_audit.retention_limit
     tail_telemetry_retention_minutes: int = (
@@ -336,10 +337,7 @@ class BotService:
             state.private_ws.age_seconds or 0.0,
         )
 
-    def _format_wait_timeouts(
-        self,
-        states: tuple[StrategyRuntimeState, ...],
-    ) -> str:
+    def _format_wait_timeouts(self, states: tuple[StrategyRuntimeState, ...]) -> str:
         return " | ".join(self._format_wait_timeout(state) for state in states)
 
     def _format_wait_timeout(self, state: StrategyRuntimeState) -> str:
@@ -384,7 +382,7 @@ class BotService:
     ) -> StrategyRunResult:
         """Execute the active typed runtime path in the foreground."""
         strategy = self._materialize_strategy_symbols(strategy)
-        self._required_symbols = _strategy_symbols(strategy)
+        self._required_symbols = _strategy_symbols(strategy) or (self.config.symbol,)
         if not dry_run and not simulate:
             self._validate_multi_symbol_market_db(strategy)
         pair_list = list(strategy.pairs)
@@ -442,21 +440,59 @@ class BotService:
         )
         if dry_run:
             return plan_strategy_once(strategy=strategy, symbol=self.config.symbol)
+        return self._run_runtime_with_cleanup(runtime, simulate=simulate)
+
+    def _run_runtime_with_cleanup(
+        self,
+        runtime: StrategyRuntime,
+        *,
+        simulate: bool,
+    ) -> StrategyRunResult:
+        """Run the async runtime and unwind live exposure on operator/runtime aborts."""
+
         try:
             return asyncio.run(runtime.run())
         except KeyboardInterrupt:
-            if not simulate:
-                cleanup = self.cleanup_interrupted_pairs(runtime)
-                self.logger.info(
-                    "interrupt cleanup pairs=%s tail_cancelled=%s close_orders=%s qty_before=%s qty_after=%s errors=%s",
-                    cleanup["pairs"],
-                    cleanup["tail_cancelled"],
-                    cleanup["close_orders"],
-                    cleanup["position_before_qty"],
-                    cleanup["position_after_qty"],
-                    cleanup["errors"],
-                )
+            self._cleanup_runtime_after_abort(runtime, simulate=simulate, reason="interrupt")
             raise
+        except Exception:
+            self._cleanup_runtime_after_abort(
+                runtime,
+                simulate=simulate,
+                reason="runtime_error",
+            )
+            raise
+
+    def _cleanup_runtime_after_abort(
+        self,
+        runtime: StrategyRuntime,
+        *,
+        simulate: bool,
+        reason: str,
+    ) -> None:
+        """Best-effort platform cleanup without hiding the original abort."""
+
+        if simulate:
+            return
+        try:
+            cleanup = self.cleanup_interrupted_pairs(runtime)
+        except Exception as exc:
+            self.logger.warning(
+                "%s cleanup failed error=%s",
+                reason,
+                _compact_admin_error(exc),
+            )
+            return
+        self.logger.info(
+            "%s cleanup pairs=%s tail_cancelled=%s close_orders=%s qty_before=%s qty_after=%s errors=%s",
+            reason,
+            cleanup["pairs"],
+            cleanup["tail_cancelled"],
+            cleanup["close_orders"],
+            cleanup["position_before_qty"],
+            cleanup["position_after_qty"],
+            cleanup["errors"],
+        )
 
     def run_orders(self, pairs: Iterable[OrderPairSpec], *, dry_run: bool = False, simulate: bool = False) -> StrategyRunResult:
         """Compatibilite: accepte directement une liste de paires canoniques."""
@@ -554,7 +590,7 @@ class BotService:
             verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
             verify_poll_seconds=self.config.tail_verify_poll_seconds,
             run_blocking_calls_in_thread=True,
-            verify_tail_on_place=False,
+            verify_tail_on_place=True,
         )
         return OgunExecutor(
             port,
@@ -996,6 +1032,7 @@ class SymbolRoutingExchangePort(ExchangePort):
 
     async def cancel(self, command: CancelCommand) -> OrderAck:
         return await self._port(command.symbol).cancel(command)
+
 
 def _matching_tail_trigger_order(
     orders: list[dict[str, Any]],

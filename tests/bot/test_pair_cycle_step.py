@@ -526,6 +526,7 @@ def test_closed_pair_accepts_tail_submission_identity() -> None:
         role="tail",
         client_order_id="CID-T",
         exchange_order_id="OID-T",
+        symbol="PI_XBTUSD",
     )
     assert intents == ()
 

@@ -112,6 +112,9 @@ def test_private_order_poller_emits_head_confirmation_from_db(tmp_path) -> None:
         @property
         def all_pairs_terminal(self) -> bool: ...
 
+        @property
+        def should_keep_sources_alive(self) -> bool: ...
+
         async def enqueue(self, event: object) -> None: ...
 
         def pair_state_for_record(
@@ -141,6 +144,10 @@ def test_private_order_poller_emits_head_confirmation_from_db(tmp_path) -> None:
 
         @property
         def all_pairs_terminal(self) -> bool:
+            return False
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
             return False
 
         async def enqueue(self, event) -> None:
@@ -223,6 +230,10 @@ def test_private_order_poller_waits_for_private_fill_reference_price() -> None:
         def all_pairs_terminal(self) -> bool:
             return False
 
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
         async def enqueue(self, event) -> None:
             emitted.append(cast(EggMove, event))
             self.running = False
@@ -293,6 +304,10 @@ def test_private_order_poller_prefers_fill_price_for_reference_price() -> None:
         def all_pairs_terminal(self) -> bool:
             return False
 
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
         async def enqueue(self, event) -> None:
             emitted.append(cast(EggMove, event))
             self.running = False
@@ -358,6 +373,10 @@ def test_private_order_poller_retries_fresh_unmatched_head_fill() -> None:
 
         @property
         def all_pairs_terminal(self) -> bool:
+            return False
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
             return False
 
         async def enqueue(self, event) -> None:
@@ -432,6 +451,10 @@ def test_private_order_poller_matches_tail_identity_as_tail_role() -> None:
         def all_pairs_terminal(self) -> bool:
             return False
 
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
         async def enqueue(self, event) -> None:
             emitted.append(cast(EggMove, event))
             self.running = False
@@ -495,6 +518,10 @@ def test_private_order_poller_emits_snapshot_tombstone_for_tail() -> None:
         def all_pairs_terminal(self) -> bool:
             return False
 
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
         async def enqueue(self, event) -> None:
             emitted.append(cast(EggMove, event))
             self.running = False
@@ -556,6 +583,10 @@ def test_private_order_poller_emits_from_fill_stream_when_order_stream_empty() -
 
         @property
         def all_pairs_terminal(self) -> bool:
+            return False
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
             return False
 
         async def enqueue(self, event) -> None:

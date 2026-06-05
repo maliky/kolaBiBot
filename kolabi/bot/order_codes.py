@@ -55,9 +55,10 @@ def parse_order_code(raw: str) -> OrderCode:
         base, base_key = long_base
         return OrderCode(raw=cleaned, base=base, base_key=base_key)
 
-    base = next((candidate for candidate in SHORT_BASES if cleaned.startswith(candidate)), None)
-    if base is None:
+    base_candidate = next((candidate for candidate in SHORT_BASES if cleaned.startswith(candidate)), None)
+    if base_candidate is None:
         raise ValueError(f"unsupported order type '{raw}'")
+    base = base_candidate
 
     rest = cleaned[len(base) :]
     price_suffix: str | None = None

@@ -166,7 +166,7 @@ def head_hooked_event(
     head_order_price: Decimal | int | float | str | None = None,
     head_order_stop_price: Decimal | int | float | str | None = None,
 ) -> EggMove:
-    reply = {}
+    reply: dict[str, object] = {}
     if reference_price is not None:
         reply["reference_price"] = float(to_decimal(reference_price))
         reply["reference_source"] = reference_source or "unknown"
@@ -302,6 +302,7 @@ def confirmed_head_from_private_fact(fact: PrivateOrderFact) -> ConfirmedOrder:
             role="head",
             client_order_id=fact.client_order_id,
             exchange_order_id=fact.order_id,
+            symbol=fact.symbol,
         ),
         state=state,
         reason=reason,
