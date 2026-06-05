@@ -219,6 +219,29 @@ def test_handle_message_ignores_non_book_events(tmp_path):
     assert tree.latest_status()["status"] == "empty"
 
 
+def test_handle_message_skips_absurd_book_but_keeps_raw_payload(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+    tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
+    payload = {
+        "feed": "book_snapshot",
+        "product_id": "PI_XBTUSD",
+        "timestamp": 1778025600000,
+        "seq": 12,
+        "asks": [{"price": 73773.0, "qty": 1.0}],
+        "bids": [{"price": 3500.0, "qty": 1.0}],
+    }
+
+    with caplog.at_level("WARNING"):
+        result = tree.handle_message(json.dumps(payload))
+
+    assert result is None
+    assert "invalid_book" in caplog.text
+    assert tree.latest_status()["status"] == "empty"
+    with Session(tree.engine) as session:
+        rows = session.execute(select(RawExchangeEvent)).scalars().all()
+    assert len(rows) == 1
+
+
 def test_extract_book_payload_ignores_book_subscribe_ack():
     parsed = extract_book_payload(
         {
@@ -250,6 +273,14 @@ def test_calculate_metrics_uses_top_book_prices_for_spread():
     assert metrics.avg_bid == 98.5
     assert metrics.spread == 1
     assert metrics.mid_price == 99.5
+
+
+def test_calculate_metrics_rejects_absurd_demo_book_spread():
+    with pytest.raises(ValueError, match="absurd book spread"):
+        calculate_metrics(
+            asks=[(73773.0, 1.0)],
+            bids=[(3500.0, 1.0)],
+        )
 
 
 def test_normal_mgf_uses_normal_distribution_formula():

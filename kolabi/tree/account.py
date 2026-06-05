@@ -98,6 +98,7 @@ class AccountStreamConfig:
     ingest_audit_retention_limit: int = (
         DEFAULT_PRUNING.private_ingest_audit.retention_limit
     )
+    forensic_shield_critical: bool = True
     log_level: str = "INFO"
 
 
@@ -693,25 +694,35 @@ class AccountStateStore:
     def prune_private_storage_now(self, *, stream_kind: str) -> None:
         """Apply retention outside the critical ingest path."""
         now = datetime.now(timezone.utc)
+        shield_forensics = (
+            self.config.forensic_shield_critical
+            and stream_kind_uses_critical_db(stream_kind)
+        )
         with self.sessionmaker() as session:
-            prune_raw_events(
-                session,
-                config=self.config,
-                retention_minutes=self.config.raw_retention_minutes,
-                retention_limit=self.config.raw_retention_limit,
-                now=now,
-                stream_kind=stream_kind,
-            )
-            prune_private_ingest_audits(
-                session,
-                exchange=self.config.exchange,
-                environment=self.config.environment,
-                market_type=self.config.market_type,
-                account_scope=self.config.account_scope,
-                retention_minutes=self.config.ingest_audit_retention_minutes,
-                retention_limit=self.config.ingest_audit_retention_limit,
-                now=now,
-            )
+            if shield_forensics:
+                logging.getLogger(__name__).info(
+                    "FORENSIC_SHIELD stream=%s raw_events=kept private_ingest_audits=kept",
+                    stream_kind,
+                )
+            else:
+                prune_raw_events(
+                    session,
+                    config=self.config,
+                    retention_minutes=self.config.raw_retention_minutes,
+                    retention_limit=self.config.raw_retention_limit,
+                    now=now,
+                    stream_kind=stream_kind,
+                )
+                prune_private_ingest_audits(
+                    session,
+                    exchange=self.config.exchange,
+                    environment=self.config.environment,
+                    market_type=self.config.market_type,
+                    account_scope=self.config.account_scope,
+                    retention_minutes=self.config.ingest_audit_retention_minutes,
+                    retention_limit=self.config.ingest_audit_retention_limit,
+                    now=now,
+                )
             prune_account_balances(
                 session,
                 exchange=self.config.exchange,
@@ -3274,6 +3285,14 @@ def build_parser() -> argparse.ArgumentParser:
             help="Maximum private ingest audit rows kept per account DB; 0 disables count cleanup.",
         )
         cmd.add_argument(
+            "--allow-critical-forensic-prune",
+            action="store_true",
+            help=(
+                "Allow retention maintenance to prune critical open_orders/fills "
+                "raw events and ingest audits. By default they are shielded."
+            ),
+        )
+        cmd.add_argument(
             "--rest-reconcile-seconds",
             type=float,
             default=AccountStreamConfig.rest_reconcile_seconds,
@@ -3345,6 +3364,7 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
         state_retention_limit=args.state_retention_limit,
         ingest_audit_retention_minutes=args.ingest_audit_retention_minutes,
         ingest_audit_retention_limit=args.ingest_audit_retention_limit,
+        forensic_shield_critical=not args.allow_critical_forensic_prune,
         log_level=args.log_level,
     )
 

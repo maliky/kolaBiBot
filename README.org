@@ -171,7 +171,7 @@ kolabi/
    |- account.py                  # private Kraken Futures account and order service
    `- service.py                  # shared service helpers for tree modules
 
-Orders/                       # example strategy definitions
+orders/                       # example strategy definitions
 |- demo_ada.tsv                 # compact contract and order-type examples
 |- xbt_bk.tsv                   # broader strategy regression file
 `- pi_xbtusd_sell_plus1_tail_0p5.tsv
@@ -194,9 +194,9 @@ Read order for the core code:
 
 * Bot CLI usage
 -------------
-Run strategies stored in TSV files (e.g. =Orders/demo_ada.tsv=) directly via:
+Run strategies stored in TSV files (e.g. =orders/demo_ada.tsv=) directly via:
 #+BEGIN_SRC bash  -i
-python -m kolabi.bot run --strategy Orders/demo_ada.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
+python -m kolabi.bot run --strategy orders/demo_ada.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
 
 python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 1 1 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run
 #+END_SRC

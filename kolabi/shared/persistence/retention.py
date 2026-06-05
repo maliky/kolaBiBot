@@ -3,9 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from sqlalchemy import delete, select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from kolabi.shared.persistence.models import (
@@ -44,11 +45,11 @@ def prune_time_count(
     deleted = 0
     if retention_minutes > 0:
         cutoff = now - timedelta(minutes=retention_minutes)
-        result = session.execute(
+        result = cast(CursorResult[Any], session.execute(
             delete(model)
             .where(*filters, time_column < cutoff)
             .execution_options(synchronize_session=False)
-        )
+        ))
         deleted += int(result.rowcount or 0)
     if retention_limit > 0:
         keep_ids = (
@@ -57,11 +58,11 @@ def prune_time_count(
             .order_by(time_column.desc(), model.id.desc())
             .limit(retention_limit)
         )
-        result = session.execute(
+        result = cast(CursorResult[Any], session.execute(
             delete(model)
             .where(*filters, model.id.notin_(keep_ids))
             .execution_options(synchronize_session=False)
-        )
+        ))
         deleted += int(result.rowcount or 0)
     return PruneResult(deleted_rows=deleted)
 
@@ -296,11 +297,11 @@ def _prune_sampled_state(
     deleted = 0
     for start in range(0, len(delete_ids), 1000):
         chunk = delete_ids[start : start + 1000]
-        result = session.execute(
+        result = cast(CursorResult[Any], session.execute(
             delete(model)
             .where(model.id.in_(chunk), model.id.notin_(keep_ids))
             .execution_options(synchronize_session=False)
-        )
+        ))
         deleted += int(result.rowcount or 0)
     return PruneResult(deleted_rows=deleted)
 

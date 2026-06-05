@@ -460,6 +460,9 @@ Private options:
                                 Default: default. Example: advers for the adversarial account.
   --account-db-url URL          Private account DB URL override. Default comes from the selected backend.
   --critical-db-url URL         Critical open_orders/fills DB URL. Default follows account DB naming.
+  --allow-critical-forensic-prune
+                                Allow retention pruning of critical open_orders/fills raw events and ingest audits.
+                                Default: disabled, so critical lifecycle evidence is shielded.
   --api-key-env NAME            Environment variable containing the Kraken API key.
   --api-secret-env NAME         Environment variable containing the Kraken API secret.
   --public reuse|spawn          For private start/reload, reuse existing public DB feeder or start one too.
@@ -547,6 +550,7 @@ Shared options:
 | =--environment {demo,live}= | endpoint family                         |
 | =--market-type=             | market label stored in DB               |
 | =--account-scope=           | logical account scope                   |
+| =--allow-critical-forensic-prune= | permit retention pruning of critical raw/audit lifecycle evidence |
 | =--ws-url=                  | override private websocket URL          |
 | =--rest-url=                | override private REST base URL          |
 | =--api-key-env=             | API key environment variable            |
@@ -630,7 +634,7 @@ usage: kolabi.bot run [-h] --strategy STRATEGY [--exchange EXCHANGE]
 options:
   -h, --help            show this help message and exit
   --strategy, -s STRATEGY
-                        Path to TSV strategy file (e.g. Orders/demo_ada.tsv)
+                      Path to TSV strategy file (e.g. orders/demo_ada.tsv)
   --exchange EXCHANGE
   --symbol SYMBOL
   --environment {demo,live}
@@ -668,9 +672,9 @@ options:
 *** Examples:
 
 #+begin_src bash
-python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
+python -m kolabi.bot run --strategy orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
 
-python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+python -m kolabi.bot run --strategy orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
 #+end_src
 
 ** bot run-once
@@ -864,5 +868,5 @@ python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XAbs -t 0
     python -m kolabi.tree.kraken run --environment demo --pair PI_XBTUSD
     python -m kolabi.tree.account run --environment demo
     python -m kolabi.bot preflight --environment demo --exchange kraken --symbol PI_XBTUSD
-    python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+    python -m kolabi.bot run --strategy orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
 #+end_src

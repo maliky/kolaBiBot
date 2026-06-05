@@ -1,6 +1,16 @@
 #+TITLE: kolaBiBot
 #+OPTIONS: toc:2 num:nil
 
+* <2026-06-02 mar. 18:28> multip platefomr
+-  v1 should target derivatives/perpetuals only.
+- every platform should have the same DB-grounded architecture from day one
+- For now we forget about coinbase and bitmex.  we only create the adapter for Binance
+- Platform-specific symbols be written directly in TSV files. We should not have canonical symbols a mapping table.  The reason is to be able to have one TSV table calling synbole for different plateform. In fact it is important that symbols for same instrument do not colide.
+- Unsupported grammar should fail at parse/preflight time
+- The process shouls still run exactly one platform per bot invocation for now. In the future we will have cross-platform strategies but not at this phase.
+ 
+
+
 * <2026-05-28 Thu 10:05>
 
 ** DONE plan
@@ -295,16 +305,17 @@ Private DB update
 #+end_src
 
 ** DONE Multi-instrument TSV support on one platform
-   CLOSED: [2026-06-02 mar. 22:19]
+   CLOSED: [2026-06-05 ven.]
 
 Goal: allow one TSV file to contain several instruments while keeping one platform per bot run.
 
 Implementation status:
-- =OrderPairSpec= now carries optional =symbol= and TSV files may add the final =symbol= column.
-- =BotService= materializes effective symbols, validates duplicate pair names, checks readiness for every active symbol, and requires a shared market DB for active multi-symbol runs.
-- =StrategyRuntime= public polling groups pairs by symbol; private polling keeps per-symbol order/fill cursors; private record matching rejects wrong-symbol rows.
-- =SymbolRoutingExchangePort= dispatches place/amend/cancel commands to symbol-bound adapters while keeping one platform/account scope per bot invocation.
-- Existing dry-run and old TSV files without =symbol= remain backward compatible.
+- =OrderPairSpec= and =OrderIdentity= carry optional =symbol=.
+- TSV files may add an optional final =symbol= column after =hook=; old TSV files stay valid.
+- =BotService= materializes effective symbols, validates duplicate pair names, validates instrument rules per symbol, and requires a shared market DB for active multi-symbol runs.
+- =StrategyRuntime= groups public polling by active symbol, keeps private order/fill cursors per symbol, and rejects wrong-symbol private rows.
+- =SymbolRoutingExchangePort= routes place, amend, and cancel commands to symbol-bound adapters while keeping one platform and account scope per process.
+- Reducer identities preserve symbol once order lifecycle events confirm head or tail identity.
 
 Former state:
 - =kolabi.bot run= receives one global =--exchange=, =--environment=, and =--symbol=.
@@ -721,6 +732,8 @@ Bot-side REST audit and tail telemetry use separate low-priority lanes so they c
 
 The runtime flags are =--audit-db-url= and =--telemetry-db-url=. These lanes are not platform truth. If they are locked or unavailable, exchange commands and lifecycle state must continue.
 
+Critical order/fill forensic shielding is enabled by default. Private-feed maintenance must not prune raw =private_ws= or =private_ws_critical= payloads, nor their ingest audit rows, unless the operator passes =--allow-critical-forensic-prune=. Account state, REST audit, and tail telemetry stay bounded by their own retention knobs because they are diagnostic or sampled lanes, not lifecycle ground truth.
+
 ** Queued writer option
 
 If SQLite lock contention persists under multi-pair stress, the next SQLite step is a per-lane queued writer: one writer thread owns one SQLAlchemy sessionmaker per DB lane, producers enqueue immutable row payloads, and the writer flushes batches in order. This keeps Chronos/Ogun non-blocking and preserves the functional boundary because reducers still emit values, not DB side effects.
@@ -949,9 +962,9 @@ sqlite3 dbs/pub-futures-demo-PI_XBTUSD.sqlite \
   python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo amend --order-id YOUR_ORDER_ID --price 80010 --qty 2
 
   #  Run a TSV strategy on demo:
-  python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+  python -m kolabi.bot run --strategy orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
   #  Dry run:
-  python -m kolabi.bot run --strategy Orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment live --dry-run
+  python -m kolabi.bot run --strategy orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment live --dry-run
 
 
 #+end_src
@@ -961,7 +974,7 @@ sqlite3 dbs/pub-futures-demo-PI_XBTUSD.sqlite \
 The simplest reusable bot-tail example is stored in:
 
 #+begin_example
-Orders/pi_xbtusd_sell_plus1_tail_0p5.tsv
+orders/pi_xbtusd_sell_plus1_tail_0p5.tsv
 #+end_example
 
 It describes:
@@ -973,7 +986,7 @@ It describes:
 Run it with:
 
 #+begin_src bash
-python -m kolabi.bot run --strategy Orders/pi_xbtusd_sell_plus1_tail_0p5.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+python -m kolabi.bot run --strategy orders/pi_xbtusd_sell_plus1_tail_0p5.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
 #+end_src
 
 ** Cost Commands

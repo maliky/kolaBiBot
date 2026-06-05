@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from kolabi.shared.persistence import (
@@ -43,6 +43,10 @@ from kolabi.tree.account import (
 )
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+
+def _result_items(result: dict[str, object], key: str) -> list[Any]:
+    return cast(list[Any], result[key])
 
 
 def test_account_state_status_is_empty_before_events(tmp_path):
@@ -1366,6 +1370,93 @@ def test_private_storage_maintenance_prunes_duplicate_state_and_audits(tmp_path)
     assert len(audits) == 2
 
 
+def test_critical_private_storage_shields_raw_and_ingest_audits(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+    store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            raw_retention_minutes=0,
+            raw_retention_limit=1,
+            ingest_audit_retention_minutes=0,
+            ingest_audit_retention_limit=1,
+        )
+    )
+    received_at = datetime(2026, 5, 31, 10, 0, tzinfo=timezone.utc)
+    for seq in range(3):
+        store.ingest_message(
+            {"feed": "open_orders", "seq": str(seq), "orders": []},
+            stream_kind="private_ws_critical",
+            is_critical=True,
+            received_at=received_at + timedelta(seconds=seq),
+        )
+
+    with caplog.at_level(logging.INFO):
+        store.prune_private_storage_now(stream_kind="private_ws_critical")
+
+    with Session(store.engine) as session:
+        raw_rows = (
+            session.execute(
+                select(RawExchangeEvent).order_by(RawExchangeEvent.received_at.asc())
+            )
+            .scalars()
+            .all()
+        )
+        audits = (
+            session.execute(
+                select(PrivateIngestAudit).order_by(PrivateIngestAudit.received_at.asc())
+            )
+            .scalars()
+            .all()
+        )
+
+    assert [row.exchange_sequence for row in raw_rows] == ["0", "1", "2"]
+    assert [row.row_count for row in audits] == [0, 0, 0]
+    assert "FORENSIC_SHIELD stream=private_ws_critical" in caplog.text
+
+
+def test_critical_private_storage_prunes_when_forensic_prune_is_allowed(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+    store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            raw_retention_minutes=0,
+            raw_retention_limit=1,
+            ingest_audit_retention_minutes=0,
+            ingest_audit_retention_limit=1,
+            forensic_shield_critical=False,
+        )
+    )
+    received_at = datetime(2026, 5, 31, 10, 0, tzinfo=timezone.utc)
+    for seq in range(3):
+        store.ingest_message(
+            {"feed": "open_orders", "seq": str(seq), "orders": []},
+            stream_kind="private_ws_critical",
+            is_critical=True,
+            received_at=received_at + timedelta(seconds=seq),
+        )
+
+    store.prune_private_storage_now(stream_kind="private_ws_critical")
+
+    with Session(store.engine) as session:
+        raw_rows = (
+            session.execute(
+                select(RawExchangeEvent).order_by(RawExchangeEvent.received_at.asc())
+            )
+            .scalars()
+            .all()
+        )
+        audits = (
+            session.execute(
+                select(PrivateIngestAudit).order_by(PrivateIngestAudit.received_at.asc())
+            )
+            .scalars()
+            .all()
+        )
+
+    assert [row.exchange_sequence for row in raw_rows] == ["2"]
+    assert len(audits) == 1
+
+
 def test_raw_event_consecutive_duplicate_is_collapsed_with_counter(tmp_path):
     db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
@@ -1505,6 +1596,8 @@ def test_account_parser_uses_critical_db_url_only() -> None:
 
     assert args.db_url == "sqlite:///account.sqlite"
     assert args.critical_db_url == "sqlite:///critical.sqlite"
+    config = account_module.config_from_args(args)
+    assert config.forensic_shield_critical is True
     with pytest.raises(SystemExit):
         parser.parse_args(
             [
@@ -1513,6 +1606,20 @@ def test_account_parser_uses_critical_db_url_only() -> None:
                 "sqlite:///critical.sqlite",
             ]
         )
+
+
+def test_account_parser_can_explicitly_allow_critical_forensic_prune() -> None:
+    parser = account_module.build_parser()
+
+    args = parser.parse_args(
+        [
+            "run",
+            "--allow-critical-forensic-prune",
+        ]
+    )
+
+    config = account_module.config_from_args(args)
+    assert config.forensic_shield_critical is False
 
 
 def test_map_balances_and_positions_are_persisted(tmp_path):
@@ -1592,9 +1699,9 @@ def test_unchanged_balance_snapshots_are_throttled(tmp_path):
     with Session(store.engine) as session:
         rows = session.execute(select(AccountBalance)).scalars().all()
     assert len(rows) == 2
-    assert len(first["balances"]) == 1
-    assert len(second["balances"]) == 0
-    assert len(third["balances"]) == 1
+    assert len(_result_items(first, "balances")) == 1
+    assert len(_result_items(second, "balances")) == 0
+    assert len(_result_items(third, "balances")) == 1
 
 
 def test_changed_balance_snapshot_bypasses_throttle(tmp_path):
@@ -1623,7 +1730,7 @@ def test_changed_balance_snapshot_bypasses_throttle(tmp_path):
     with Session(store.engine) as session:
         rows = session.execute(select(AccountBalance)).scalars().all()
     assert len(rows) == 2
-    assert len(changed["balances"]) == 1
+    assert len(_result_items(changed, "balances")) == 1
 
 
 def test_default_balance_snapshot_throttle_is_longer_than_positions() -> None:
@@ -1663,7 +1770,7 @@ def test_balance_assets_are_normalized_and_payloads_are_compact(tmp_path):
             .all()
         )
     assert {row.asset for row in rows} == {"USD", "XBT"}
-    assert {balance.asset for balance in result["balances"]} == {"USD", "XBT"}
+    assert {balance.asset for balance in _result_items(result, "balances")} == {"USD", "XBT"}
     for row in rows:
         assert row.raw_payload["asset"] == row.asset
         assert "holding" not in row.raw_payload
@@ -1700,9 +1807,9 @@ def test_zero_balance_noise_is_skipped_until_nonzero_transition(tmp_path):
             .scalars()
             .all()
         )
-    assert len(first["balances"]) == 0
-    assert len(second["balances"]) == 1
-    assert len(third["balances"]) == 1
+    assert len(_result_items(first, "balances")) == 0
+    assert len(_result_items(second, "balances")) == 1
+    assert len(_result_items(third, "balances")) == 1
     assert [row.total for row in rows] == [10.0, 0.0]
 
 
@@ -1749,9 +1856,9 @@ def test_unchanged_position_snapshots_are_throttled(tmp_path):
     with Session(store.engine) as session:
         rows = session.execute(select(AccountPosition)).scalars().all()
     assert len(rows) == 2
-    assert len(first["positions"]) == 1
-    assert len(second["positions"]) == 0
-    assert len(third["positions"]) == 1
+    assert len(_result_items(first, "positions")) == 1
+    assert len(_result_items(second, "positions")) == 0
+    assert len(_result_items(third, "positions")) == 1
 
 
 def test_changed_position_snapshot_bypasses_throttle(tmp_path):
@@ -1786,7 +1893,7 @@ def test_changed_position_snapshot_bypasses_throttle(tmp_path):
     with Session(store.engine) as session:
         rows = session.execute(select(AccountPosition)).scalars().all()
     assert len(rows) == 2
-    assert len(changed["positions"]) == 1
+    assert len(_result_items(changed, "positions")) == 1
 
 
 def test_map_rest_balances_handles_nested_accounts_payload():

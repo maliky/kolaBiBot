@@ -115,7 +115,7 @@ class TailTelemetryRecorder:
                     ]
                 )
                 session.commit()
-                self._prune_tail_telemetry_if_due(session)
+                self._prune_tail_telemetry_if_due(session, rows)
                 return
             except OperationalError as exc:
                 session.rollback()
@@ -134,7 +134,11 @@ class TailTelemetryRecorder:
             finally:
                 session.close()
 
-    def _prune_tail_telemetry_if_due(self, session: Session) -> None:
+    def _prune_tail_telemetry_if_due(
+        self,
+        session: Session,
+        rows: tuple[TailTelemetryRow, ...],
+    ) -> None:
         pruning = self.config.tail_telemetry_pruning
         now_monotonic = time.monotonic()
         if now_monotonic - self._last_tail_prune_monotonic < max(
@@ -143,13 +147,27 @@ class TailTelemetryRecorder:
         ):
             return
         self._last_tail_prune_monotonic = now_monotonic
-        try:
-            prune_tail_telemetry(
-                session,
-                retention_minutes=pruning.retention_minutes,
-                retention_limit=pruning.retention_limit,
-                now=datetime.now(timezone.utc),
+        lanes = {
+            (
+                row.exchange,
+                row.environment,
+                row.market_type,
+                row.account_scope,
             )
+            for row in rows
+        }
+        try:
+            for exchange, environment, market_type, account_scope in lanes:
+                prune_tail_telemetry(
+                    session,
+                    exchange=exchange,
+                    environment=environment,
+                    market_type=market_type,
+                    account_scope=account_scope,
+                    retention_minutes=pruning.retention_minutes,
+                    retention_limit=pruning.retention_limit,
+                    now=datetime.now(timezone.utc),
+                )
             session.commit()
         except Exception as exc:
             session.rollback()

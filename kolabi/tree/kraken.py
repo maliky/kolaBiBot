@@ -56,6 +56,7 @@ from kolabi.shared.persistence import (
 BookLevelT = tuple[float, float]
 BookSignatureT = tuple[tuple[BookLevelT, ...], tuple[BookLevelT, ...]]
 RawLevelT = object
+MAX_RELATIVE_BOOK_SPREAD = 0.25
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,8 @@ class KrakenTree:
         self._last_trace_cap_logged = False
         self._last_status_log_line: str | None = None
         self._status_rows_logged = 0
+        self._invalid_book_count = 0
+        self._last_invalid_book_log_at: datetime | None = None
         self._stop_event = asyncio.Event()
         self._rest_session = requests.Session()
         self._last_ticker_fetch_at: datetime | None = None
@@ -251,7 +254,12 @@ class KrakenTree:
         if parsed is None:
             return None
         self._book_message_count += 1
-        return self.ingest_payload(parsed, datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
+        try:
+            return self.ingest_payload(parsed, now)
+        except ValueError as exc:
+            self._log_invalid_book(parsed, now, exc)
+            return None
 
     def record_raw_event(
         self,
@@ -346,7 +354,30 @@ class KrakenTree:
             signature=book_signature(state.asks, state.bids),
         )
         self._latest_book = pending
+        self._invalid_book_count = 0
         return pending
+
+    def _log_invalid_book(
+        self,
+        payload: BookPayload,
+        now: datetime,
+        exc: ValueError,
+    ) -> None:
+        """Throttle warnings for raw-but-not-decision-grade public book states."""
+
+        self._invalid_book_count += 1
+        if (
+            self._invalid_book_count <= 3
+            or is_due(self._last_invalid_book_log_at, now, 30.0)
+        ):
+            self.logger.warning(
+                "kraken_tree invalid_book pair=%s seq=%s skipped=%s error=%s",
+                payload.symbol or self.config.pair,
+                payload.sequence if payload.sequence is not None else "-",
+                self._invalid_book_count,
+                exc,
+            )
+            self._last_invalid_book_log_at = now
 
     def ingest_book(
         self,
@@ -1048,20 +1079,34 @@ def calculate_metrics(
     asks: Sequence[BookLevelT], bids: Sequence[BookLevelT]
 ) -> BookMetrics:
     """Calcule les indicateurs compacts depuis les niveaux conserves."""
-    if not asks or not bids:
+    clean_asks = tuple((price, volume) for price, volume in asks if price > 0 and volume > 0)
+    clean_bids = tuple((price, volume) for price, volume in bids if price > 0 and volume > 0)
+    if not clean_asks or not clean_bids:
         raise ValueError("asks and bids must contain at least one level")
-    best_ask = min(price for price, _volume in asks)
-    best_bid = max(price for price, _volume in bids)
-    ask_volume = sum(volume for _price, volume in asks)
-    bid_volume = sum(volume for _price, volume in bids)
+    best_ask = min(price for price, _volume in clean_asks)
+    best_bid = max(price for price, _volume in clean_bids)
+    spread = best_ask - best_bid
+    mid_price = (best_ask + best_bid) / 2
+    if spread < 0:
+        raise ValueError(f"crossed book best_bid={best_bid:g} best_ask={best_ask:g}")
+    if mid_price <= 0:
+        raise ValueError(f"invalid book mid price best_bid={best_bid:g} best_ask={best_ask:g}")
+    relative_spread = spread / mid_price
+    if relative_spread > MAX_RELATIVE_BOOK_SPREAD:
+        raise ValueError(
+            "absurd book spread "
+            f"best_bid={best_bid:g} best_ask={best_ask:g} relative={relative_spread:.4f}"
+        )
+    ask_volume = sum(volume for _price, volume in clean_asks)
+    bid_volume = sum(volume for _price, volume in clean_bids)
     total_volume = max(ask_volume + bid_volume, 1e-8)
     return BookMetrics(
-        avg_ask=weighted_average(asks),
-        avg_bid=weighted_average(bids),
+        avg_ask=weighted_average(clean_asks),
+        avg_bid=weighted_average(clean_bids),
         best_ask=best_ask,
         best_bid=best_bid,
-        spread=best_ask - best_bid,
-        mid_price=(best_ask + best_bid) / 2,
+        spread=spread,
+        mid_price=mid_price,
         imbalance=(bid_volume - ask_volume) / total_volume,
     )
 
