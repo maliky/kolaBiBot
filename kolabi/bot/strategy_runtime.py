@@ -161,6 +161,16 @@ class _CommandSlot:
 class _PendingPrivateRecord:
     record: PrivateOrderRecord
     first_seen_at: datetime
+    is_fill: bool = False
+
+
+@dataclass
+class _PrivateCursor:
+    after_local_timestamp: datetime | None = None
+    after_local_id: int | None = None
+    after_fill_timestamp: datetime | None = None
+    after_fill_id: int | None = None
+    initialised: bool = False
 
 
 @dataclass(frozen=True)
@@ -254,7 +264,7 @@ class StaticHookSource:
             await runtime.enqueue(
                 head_hooked_event(
                     pair_name=pair.name,
-                    symbol=runtime.symbol,
+                    symbol=_pair_symbol_from_pair(pair, runtime.symbol),
                     occurred_at=current_time,
                 )
             )
@@ -273,53 +283,56 @@ class KrakenPublicTriggerSource:
 
     async def pump(self, runtime: RuntimeQueueLike) -> None:
         while runtime.running:
-            market = self.client.fetch_market_state(runtime.symbol)
-            snapshot = MarketSnapshotFact(
-                symbol=runtime.symbol,
-                best_bid=market.best_bid,
-                best_ask=market.best_ask,
-                mid_price=market.mid_price,
-                occurred_at=datetime.now(timezone.utc),
-                last_price=getattr(market, "last_price", None),
-                mark_price=getattr(market, "mark_price", None),
-                index_price=getattr(market, "index_price", None),
-                tick_size=getattr(market, "tick_size", None),
-            )
-            for pair_name, pair_state in runtime.state.pairs.items():
-                if pair_state.head_state == HeadState.LATENT:
-                    if not pair_dependency_satisfied(runtime.state, pair_state):
-                        continue
-                    move = head_hooked_from_market_snapshot(
-                        pair_state=pair_state,
-                        launched_at=runtime.state.launched_at,
-                        snapshot=snapshot,
-                    )
-                    event_prefix = "public-hook"
-                else:
-                    if pair_state.tail_trail is None or pair_state.tail_state not in {
-                        TailState.HOOKED,
-                        TailState.SUBMITTED,
-                        TailState.LIVING,
-                    }:
-                        continue
-                    move = market_tick_from_market_snapshot(
-                        pair=pair_state.pair,
-                        snapshot=snapshot,
-                    )
-                    event_prefix = "public-market"
-                if move is None:
-                    continue
-                reference_key = ""
-                if move.reply is not None:
-                    reference_key = f":{move.reply.get('reference_source', '')}:{move.reply.get('reference_price', '')}"
-                event_id = (
-                    f"{event_prefix}:{pair_name}:{pair_state.attempt_index}:"
-                    f"{market.recorded_at or snapshot.occurred_at.isoformat()}{reference_key}"
+            for symbol in _active_runtime_symbols(runtime):
+                market = self.client.fetch_market_state(symbol)
+                snapshot = MarketSnapshotFact(
+                    symbol=symbol,
+                    best_bid=market.best_bid,
+                    best_ask=market.best_ask,
+                    mid_price=market.mid_price,
+                    occurred_at=datetime.now(timezone.utc),
+                    last_price=getattr(market, "last_price", None),
+                    mark_price=getattr(market, "mark_price", None),
+                    index_price=getattr(market, "index_price", None),
+                    tick_size=getattr(market, "tick_size", None),
                 )
-                if event_id in self._seen_event_ids:
-                    continue
-                self._seen_event_ids.add(event_id)
-                await runtime.enqueue(replace(move, event_id=event_id))
+                for pair_name, pair_state in runtime.state.pairs.items():
+                    if _pair_symbol(pair_state, runtime.symbol) != symbol:
+                        continue
+                    if pair_state.head_state == HeadState.LATENT:
+                        if not pair_dependency_satisfied(runtime.state, pair_state):
+                            continue
+                        move = head_hooked_from_market_snapshot(
+                            pair_state=pair_state,
+                            launched_at=runtime.state.launched_at,
+                            snapshot=snapshot,
+                        )
+                        event_prefix = "public-hook"
+                    else:
+                        if pair_state.tail_trail is None or pair_state.tail_state not in {
+                            TailState.HOOKED,
+                            TailState.SUBMITTED,
+                            TailState.LIVING,
+                        }:
+                            continue
+                        move = market_tick_from_market_snapshot(
+                            pair=pair_state.pair,
+                            snapshot=snapshot,
+                        )
+                        event_prefix = "public-market"
+                    if move is None:
+                        continue
+                    reference_key = ""
+                    if move.reply is not None:
+                        reference_key = f":{move.reply.get('reference_source', '')}:{move.reply.get('reference_price', '')}"
+                    event_id = (
+                        f"{event_prefix}:{symbol}:{pair_name}:{pair_state.attempt_index}:"
+                        f"{market.recorded_at or snapshot.occurred_at.isoformat()}{reference_key}"
+                    )
+                    if event_id in self._seen_event_ids:
+                        continue
+                    self._seen_event_ids.add(event_id)
+                    await runtime.enqueue(replace(move, event_id=event_id))
             if _runtime_sources_should_stop(runtime):
                 return
             await asyncio.sleep(self.poll_seconds)
@@ -338,121 +351,157 @@ class KrakenPrivateOrderPollingSource:
         self.head_fill_reference_grace_seconds = max(
             0.0, head_fill_reference_grace_seconds
         )
-        self.after_local_timestamp: datetime | None = None
-        self.after_local_id: int | None = None
-        self.after_fill_timestamp: datetime | None = None
-        self.after_fill_id: int | None = None
+        self._cursors: dict[str, _PrivateCursor] = {}
         self._pending_records: list[_PendingPrivateRecord] = []
-        self._cursor_initialised = False
 
     async def pump(self, runtime: RuntimeQueueLike) -> None:
         while runtime.running:
             now = datetime.now(timezone.utc)
-            if not self._cursor_initialised:
-                self.after_local_timestamp = runtime.state.launched_at - timedelta(seconds=5)
-                self.after_local_id = None
-                self.after_fill_timestamp = runtime.state.launched_at - timedelta(seconds=5)
-                self.after_fill_id = None
-                self._cursor_initialised = True
-            records = self.client.fetch_private_orders_since(
-                after_local_timestamp=self.after_local_timestamp,
-                after_local_id=self.after_local_id,
-                symbol=runtime.symbol,
-            )
-            fill_records = self.client.fetch_private_fills_since(
-                after_local_timestamp=self.after_fill_timestamp,
-                after_local_id=self.after_fill_id,
-                symbol=runtime.symbol,
-            )
-            active_client_ids, active_exchange_ids = self._active_identity_sets(runtime)
-            if active_client_ids or active_exchange_ids:
-                fetch_orders_by_identity = getattr(
-                    self.client, "fetch_private_orders_for_identities", None
+            fresh_records: list[_PendingPrivateRecord] = []
+            for symbol in _active_runtime_symbols(runtime):
+                cursor = self._cursor_for(symbol, runtime.state.launched_at)
+                records = self.client.fetch_private_orders_since(
+                    after_local_timestamp=cursor.after_local_timestamp,
+                    after_local_id=cursor.after_local_id,
+                    symbol=symbol,
                 )
-                if callable(fetch_orders_by_identity):
-                    identity_orders = fetch_orders_by_identity(
-                        client_order_ids=active_client_ids,
-                        exchange_order_ids=active_exchange_ids,
-                        symbol=runtime.symbol,
-                    )
-                    records = self._merge_unique_private_records(records, identity_orders)
-                fetch_fills_by_identity = getattr(
-                    self.client, "fetch_private_fills_for_identities", None
+                fill_records = self.client.fetch_private_fills_since(
+                    after_local_timestamp=cursor.after_fill_timestamp,
+                    after_local_id=cursor.after_fill_id,
+                    symbol=symbol,
                 )
-                if callable(fetch_fills_by_identity):
-                    identity_fills = fetch_fills_by_identity(
-                        client_order_ids=active_client_ids,
-                        exchange_order_ids=active_exchange_ids,
-                        symbol=runtime.symbol,
-                    )
-                    fill_records = self._merge_unique_private_records(
-                        fill_records, identity_fills
-                    )
-            candidates = tuple(self._pending_records)
-            self._pending_records = []
-            candidates = candidates + tuple(
-                _PendingPrivateRecord(record=record, first_seen_at=now) for record in records
-            ) + tuple(
-                _PendingPrivateRecord(record=record, first_seen_at=now)
-                for record in fill_records
-            )
-            for pending_record in candidates:
-                record = pending_record.record
-                occurred_at = _record_timestamp(record)
-                is_new_record = record in records
-                is_new_fill = record in fill_records
-                if is_new_record:
-                    if occurred_at is not None:
-                        self.after_local_timestamp = occurred_at
-                    self.after_local_id = record.local_id
-                if is_new_fill:
-                    if occurred_at is not None:
-                        self.after_fill_timestamp = occurred_at
-                    self.after_fill_id = record.local_id
-                resolved = runtime.pair_state_for_record(record)
-                if resolved is None:
-                    self._pending_records.append(pending_record)
-                    continue
-                pair_state, role = resolved
-                fact = private_order_fact_from_record(
-                    record,
-                    pair_name=pair_state.pair.name,
+                active_client_ids, active_exchange_ids = self._active_identity_sets(
+                    runtime,
+                    symbol,
                 )
-                move = head_move_from_private_fact(fact)
-                move = replace(move, role=role)
-                move = self._with_reference_price(move, pair_state, runtime.symbol)
-                if self._must_wait_for_private_fill_reference(move, pair_state, role):
-                    if self._reference_price_from_move(move) is None:
-                        elapsed_seconds = max(
-                            0.0,
-                            (now - pending_record.first_seen_at).total_seconds(),
+                if active_client_ids or active_exchange_ids:
+                    fetch_orders_by_identity = getattr(
+                        self.client, "fetch_private_orders_for_identities", None
+                    )
+                    if callable(fetch_orders_by_identity):
+                        identity_orders = fetch_orders_by_identity(
+                            client_order_ids=active_client_ids,
+                            exchange_order_ids=active_exchange_ids,
+                            symbol=symbol,
                         )
-                        if elapsed_seconds < self.head_fill_reference_grace_seconds:
-                            self._pending_records.append(pending_record)
-                            continue
-                        order_id = record.exchange_order_id or "-"
-                        client_id = record.client_order_id or "-"
-                        raise RuntimeError(
-                            "head fill reference price missing for relative tail after grace window: "
-                            f"pair={pair_state.pair.name} clOrdID={client_id} "
-                            f"orderID={order_id} grace_seconds={self.head_fill_reference_grace_seconds:g}"
-                        )
-                event_id = (
-                    self._private_record_event_id(
-                        record,
-                        is_fill=is_new_fill,
+                        records = self._merge_unique_private_records(records, identity_orders)
+                    fetch_fills_by_identity = getattr(
+                        self.client, "fetch_private_fills_for_identities", None
                     )
+                    if callable(fetch_fills_by_identity):
+                        identity_fills = fetch_fills_by_identity(
+                            client_order_ids=active_client_ids,
+                            exchange_order_ids=active_exchange_ids,
+                            symbol=symbol,
+                        )
+                        fill_records = self._merge_unique_private_records(
+                            fill_records,
+                            identity_fills,
+                        )
+                self._advance_cursor(cursor, records=records, fill_records=fill_records)
+                fresh_records.extend(
+                    _PendingPrivateRecord(record=record, first_seen_at=now)
+                    for record in records
                 )
-                await runtime.enqueue(replace(move, event_id=event_id))
+                fresh_records.extend(
+                    _PendingPrivateRecord(
+                        record=record,
+                        first_seen_at=now,
+                        is_fill=True,
+                    )
+                    for record in fill_records
+                )
+            await self._emit_private_records(runtime, now, tuple(fresh_records))
             if _runtime_sources_should_stop(runtime):
                 return
             await asyncio.sleep(self.poll_seconds)
 
+    def _cursor_for(self, symbol: str, launched_at: datetime) -> _PrivateCursor:
+        cursor = self._cursors.setdefault(symbol, _PrivateCursor())
+        if not cursor.initialised:
+            cursor.after_local_timestamp = launched_at - timedelta(seconds=5)
+            cursor.after_local_id = None
+            cursor.after_fill_timestamp = launched_at - timedelta(seconds=5)
+            cursor.after_fill_id = None
+            cursor.initialised = True
+        return cursor
+
     @staticmethod
-    def _active_identity_sets(runtime: RuntimeQueueLike) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    def _advance_cursor(
+        cursor: _PrivateCursor,
+        *,
+        records: tuple[PrivateOrderRecord, ...],
+        fill_records: tuple[PrivateOrderRecord, ...],
+    ) -> None:
+        for record in records:
+            occurred_at = _record_timestamp(record)
+            if occurred_at is not None:
+                cursor.after_local_timestamp = occurred_at
+            cursor.after_local_id = record.local_id
+        for record in fill_records:
+            occurred_at = _record_timestamp(record)
+            if occurred_at is not None:
+                cursor.after_fill_timestamp = occurred_at
+            cursor.after_fill_id = record.local_id
+
+    async def _emit_private_records(
+        self,
+        runtime: RuntimeQueueLike,
+        now: datetime,
+        fresh_records: tuple[_PendingPrivateRecord, ...],
+    ) -> None:
+        candidates = tuple(self._pending_records) + fresh_records
+        self._pending_records = []
+        for pending_record in candidates:
+            record = pending_record.record
+            resolved = runtime.pair_state_for_record(record)
+            if resolved is None:
+                self._pending_records.append(pending_record)
+                continue
+            pair_state, role = resolved
+            fact = private_order_fact_from_record(
+                record,
+                pair_name=pair_state.pair.name,
+            )
+            move = head_move_from_private_fact(fact)
+            move = replace(move, role=role)
+            move = self._with_reference_price(
+                move,
+                pair_state,
+                _pair_symbol(pair_state, runtime.symbol),
+            )
+            if self._must_wait_for_private_fill_reference(move, pair_state, role):
+                if self._reference_price_from_move(move) is None:
+                    elapsed_seconds = max(
+                        0.0,
+                        (now - pending_record.first_seen_at).total_seconds(),
+                    )
+                    if elapsed_seconds < self.head_fill_reference_grace_seconds:
+                        self._pending_records.append(pending_record)
+                        continue
+                    order_id = record.exchange_order_id or "-"
+                    client_id = record.client_order_id or "-"
+                    raise RuntimeError(
+                        "head fill reference price missing for relative tail after grace window: "
+                        f"pair={pair_state.pair.name} clOrdID={client_id} "
+                        f"orderID={order_id} grace_seconds={self.head_fill_reference_grace_seconds:g}"
+                    )
+            event_id = self._private_record_event_id(
+                record,
+                is_fill=pending_record.is_fill,
+            )
+            await runtime.enqueue(replace(move, event_id=event_id))
+
+    @staticmethod
+    def _active_identity_sets(
+        runtime: RuntimeQueueLike,
+        symbol: str,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         client_ids: set[str] = set()
         exchange_ids: set[str] = set()
         for pair_state in runtime.state.pairs.values():
+            if _pair_symbol(pair_state, runtime.symbol) != symbol:
+                continue
             for identity in (pair_state.head_identity, pair_state.tail_identity):
                 if identity is None:
                     continue
@@ -462,6 +511,8 @@ class KrakenPrivateOrderPollingSource:
                     exchange_ids.add(identity.exchange_order_id)
         if isinstance(runtime, StrategyRuntime):
             for identity in runtime._command_identities().values():
+                if identity.symbol is not None and identity.symbol != symbol:
+                    continue
                 if identity.client_order_id:
                     client_ids.add(identity.client_order_id)
                 if identity.exchange_order_id:
@@ -820,7 +871,7 @@ class StrategyRuntime:
                 return
             failure = _command_failure_event(
                 prepared,
-                symbol=self.symbol,
+                symbol=str(prepared.symbol),
                 occurred_at=datetime.now(timezone.utc),
                 error=exc,
             )
@@ -968,11 +1019,6 @@ class StrategyRuntime:
         interval = max(self.tail_telemetry_interval_seconds, 1.0)
         while self.running:
             now = datetime.now(timezone.utc)
-            market = (
-                None
-                if self.public_state_reader is None
-                else self.public_state_reader.fetch_market_state(self.symbol)
-            )
             rows = self._collect_tail_telemetry_rows(now)
             if rows and self.tail_telemetry_writer is not None:
                 try:
@@ -985,6 +1031,11 @@ class StrategyRuntime:
                     )
             for row in rows:
                 source = "unknown"
+                market = (
+                    None
+                    if self.public_state_reader is None
+                    else self.public_state_reader.fetch_market_state(row.symbol)
+                )
                 if market is not None:
                     source, _ = tail_reference_price(self.state.pairs[row.pair_name].pair, market)
                 signature = (
@@ -1033,13 +1084,14 @@ class StrategyRuntime:
         if reader is None:
             return ()
         rows: list[TailTelemetryRow] = []
-        market = reader.fetch_market_state(self.symbol)
         for pair_name, pair_state in self.state.pairs.items():
             if (
                 pair_state.tail_trail is None
                 or pair_state.tail_state not in {TailState.HOOKED, TailState.SUBMITTED, TailState.LIVING}
             ):
                 continue
+            symbol = _pair_symbol(pair_state, self.symbol)
+            market = reader.fetch_market_state(symbol)
             _, ref = tail_reference_price(pair_state.pair, market)
             if ref <= 0:
                 continue
@@ -1055,7 +1107,7 @@ class StrategyRuntime:
                     account_scope=self.account_scope,
                     strategy_id=self.state.strategy_id,
                     pair_name=pair_name,
-                    symbol=self.symbol,
+                    symbol=symbol,
                     head_state=pair_state.head_state.value,
                     tail_state=pair_state.tail_state.value,
                     tail_mode=None if pair_state.tail_mode is None else pair_state.tail_mode.value,
@@ -1338,16 +1390,21 @@ class StrategyRuntime:
             self._live_command_identities.pop(key, None)
 
     def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
+        record_symbol = _record_symbol(record)
         for identity in self._identity_map_from_pair_and_commands().values():
             if identity.role not in {"head", "tail"}:
                 continue
             pair_state = self.state.pairs.get(identity.pair_name)
             if pair_state is None:
                 continue
+            if record_symbol is not None and _pair_symbol(pair_state, self.symbol) != record_symbol:
+                continue
             if _record_matches_identity(record, identity):
                 role = OrderRole.HEAD if identity.role == "head" else OrderRole.TAIL
                 return pair_state, role
         for pair_state in self.state.pairs.values():
+            if record_symbol is not None and _pair_symbol(pair_state, self.symbol) != record_symbol:
+                continue
             tail_identity = pair_state.tail_identity
             if tail_identity is not None and _record_matches_identity(
                 record, tail_identity
@@ -1393,6 +1450,7 @@ class StrategyRuntime:
                 pair_name=pair_name,
                 role="cancel",
                 client_order_id=cancel_id,
+                symbol=str(command.symbol),
             )
         client_order_id = getattr(command.request, "clOrdID", None)
         if not client_order_id:
@@ -1409,6 +1467,7 @@ class StrategyRuntime:
             role=role,
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
+            symbol=str(command.symbol),
         )
 
     def _prepare_command(self, command: DragonSong) -> DragonSong:
@@ -1456,6 +1515,7 @@ class StrategyRuntime:
             role=identity.role,
             client_order_id=identity.client_order_id,
             exchange_order_id=str(ack.order_id) if ack.order_id else identity.exchange_order_id,
+            symbol=identity.symbol,
         )
         self._live_command_identities[_identity_key(merged)] = merged
         if isinstance(command, AmendTailCommand) and _ack_is_rejected(ack):
@@ -1586,7 +1646,11 @@ class StrategyRuntime:
                     deadline.client_order_id or "-",
                     deadline.exchange_order_id or "-",
                 )
-            command = _head_timeout_cancel_command(pair_state, self.symbol, cancel_id)
+            command = _head_timeout_cancel_command(
+                pair_state,
+                _pair_symbol(pair_state, self.symbol),
+                cancel_id,
+            )
             self._dispatch_commands((command,))
             updated[slot] = replace(deadline, cancel_dispatched_at=_as_utc_aware(now))
         for slot in stale_slots:
@@ -1719,7 +1783,9 @@ class StrategyRuntime:
         ref_source = "-"
         ref_price: Decimal | None = None
         if self.public_state_reader is not None:
-            market = self.public_state_reader.fetch_market_state(self.symbol)
+            market = self.public_state_reader.fetch_market_state(
+                _pair_symbol(pair_state, self.symbol)
+            )
             ref_source, ref_price_value = tail_reference_price(pair_state.pair, market)
             ref_price = to_decimal(ref_price_value)
         _LOGGER.info(
@@ -1812,7 +1878,7 @@ class StrategyRuntime:
                 _tail_amend_event_from_ack(
                     command,
                     ack,
-                    symbol=self.symbol,
+                    symbol=str(command.symbol),
                     kind=EggMoveKind.TAIL_AMEND_REJECTED,
                 ),
             )
@@ -1820,7 +1886,7 @@ class StrategyRuntime:
             timeout_cancel = _head_timeout_cancel_event_from_ack(
                 command,
                 ack,
-                symbol=self.symbol,
+                symbol=str(command.symbol),
                 pair_state=self.state.pairs.get(command.pair_name),
             )
             if timeout_cancel is not None:
@@ -1831,7 +1897,7 @@ class StrategyRuntime:
         if isinstance(command, PlaceTailCommand):
             submitted_tail = tail_submitted_from_ack(
                 pair_name=command.pair_name,
-                symbol=self.symbol,
+                symbol=str(command.symbol),
                 ack=ack,
                 client_order_id=command.request.clOrdID,
                 stop_price=command.request.stopPx,
@@ -1844,7 +1910,7 @@ class StrategyRuntime:
                 _tail_amend_event_from_ack(
                     command,
                     ack,
-                    symbol=self.symbol,
+                    symbol=str(command.symbol),
                     kind=kind,
                 ),
             )
@@ -1852,7 +1918,7 @@ class StrategyRuntime:
             return ()
         submitted = head_submitted_from_ack(
             pair_name=command.pair_name,
-            symbol=self.symbol,
+            symbol=str(command.symbol),
             ack=ack,
             client_order_id=command.request.clOrdID,
             occurred_at=datetime.now(timezone.utc),
@@ -1883,7 +1949,7 @@ def plan_strategy_once(
         tuple(
             head_hooked_event(
                 pair_name=pair_state.pair.name,
-                symbol=symbol,
+                symbol=_pair_symbol(pair_state, symbol),
                 occurred_at=state.launched_at,
             )
             for pair_state in state.pairs.values()
@@ -1901,6 +1967,25 @@ def _pair_state_from_spec(pair):
     from kolabi.bot.domain import PairCycleState
 
     return PairCycleState(pair=pair)
+
+
+def _pair_symbol_from_pair(pair: object, default_symbol: str) -> str:
+    symbol = str(getattr(pair, "symbol", "") or "").strip()
+    return symbol or default_symbol
+
+
+def _pair_symbol(pair_state: PairCycleState, default_symbol: str) -> str:
+    return _pair_symbol_from_pair(pair_state.pair, default_symbol)
+
+
+def _active_runtime_symbols(runtime: RuntimeQueueLike) -> tuple[str, ...]:
+    symbols = {
+        _pair_symbol(pair_state, runtime.symbol)
+        for pair_state in runtime.state.pairs.values()
+    }
+    if not symbols:
+        return (runtime.symbol,)
+    return tuple(sorted(symbols))
 
 
 def _pair_runtime_complete(
@@ -2164,19 +2249,33 @@ def _ack_is_zero_fill_cancel(ack: OrderAck) -> bool:
 
 
 def _record_matches_identity(record, identity: OrderIdentity) -> bool:
-    if record.client_order_id and identity.client_order_id == record.client_order_id:
+    record_symbol = _record_symbol(record)
+    if identity.symbol is not None:
+        if record_symbol is None or record_symbol != identity.symbol:
+            return False
+    client_order_id = getattr(record, "client_order_id", None)
+    exchange_order_id = getattr(record, "exchange_order_id", None)
+    if client_order_id and identity.client_order_id == client_order_id:
         return True
     if (
-        record.exchange_order_id
-        and identity.exchange_order_id == record.exchange_order_id
+        exchange_order_id
+        and identity.exchange_order_id == exchange_order_id
     ):
         return True
     return False
 
 
+def _record_symbol(record: object) -> str | None:
+    symbol = getattr(record, "symbol", None)
+    if symbol is None:
+        return None
+    text = str(symbol).strip()
+    return text or None
+
+
 def _identity_key(identity: OrderIdentity) -> str:
     return (
-        f"{identity.pair_name}|{identity.role}|"
+        f"{identity.symbol or '-'}|{identity.pair_name}|{identity.role}|"
         f"{identity.client_order_id or '-'}|{identity.exchange_order_id or '-'}"
     )
 

@@ -294,11 +294,19 @@ Private DB update
      -> back to Chronos
 #+end_src
 
-** TODO Multi-instrument TSV support on one platform
+** DONE Multi-instrument TSV support on one platform
+   CLOSED: [2026-06-02 mar. 22:19]
 
 Goal: allow one TSV file to contain several instruments while keeping one platform per bot run.
 
-Current state:
+Implementation status:
+- =OrderPairSpec= now carries optional =symbol= and TSV files may add the final =symbol= column.
+- =BotService= materializes effective symbols, validates duplicate pair names, checks readiness for every active symbol, and requires a shared market DB for active multi-symbol runs.
+- =StrategyRuntime= public polling groups pairs by symbol; private polling keeps per-symbol order/fill cursors; private record matching rejects wrong-symbol rows.
+- =SymbolRoutingExchangePort= dispatches place/amend/cancel commands to symbol-bound adapters while keeping one platform/account scope per bot invocation.
+- Existing dry-run and old TSV files without =symbol= remain backward compatible.
+
+Former state:
 - =kolabi.bot run= receives one global =--exchange=, =--environment=, and =--symbol=.
 - Every TSV row becomes an =OrderPairSpec= without its own symbol.
 - =BotService= validates one instrument and =StrategyRuntime= polls public/private state for one symbol.

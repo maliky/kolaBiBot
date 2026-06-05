@@ -487,14 +487,15 @@ class KrakenRuntimeStateClient:
     def wait_until_ready(
         self,
         *,
+        symbol: str | None = None,
         timeout_seconds: float,
         poll_seconds: float = 1.0,
     ) -> StrategyRuntimeState:
         """Block until public and private runtime state are fresh enough."""
         deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
-        last_state = self.fetch_runtime_state()
+        last_state = self.fetch_runtime_state(symbol)
         while datetime.now(timezone.utc).timestamp() < deadline:
-            last_state = self.fetch_runtime_state()
+            last_state = self.fetch_runtime_state(symbol)
             if last_state.ready:
                 return last_state
             sleep(poll_seconds)

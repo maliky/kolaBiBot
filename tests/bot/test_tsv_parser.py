@@ -6,11 +6,14 @@ import pytest
 from kolabi.bot.tsv.parser import read_strategy_file
 
 
-def _write_strategy(path: Path, rows: list[str]) -> Path:
+def _write_strategy(path: Path, rows: list[str], *, symbol_column: bool = False) -> Path:
+    header = "name\ttps_run\tessais\ttOut\tpause\tside\toType\toDelta\ttType\ttDelta\tatype\tquantity\ttp\tprix\thook"
+    if symbol_column:
+        header += "\tsymbol"
     path.write_text(
         "\n".join(
             [
-                "name\ttps_run\tessais\ttOut\tpause\tside\toType\toDelta\ttType\ttDelta\tatype\tquantity\ttp\tprix\thook",
+                header,
                 *rows,
             ]
         )
@@ -123,3 +126,31 @@ def test_fractional_timeout_and_extra_interval_spaces_parse(tmp_path: Path) -> N
     assert strategy.pairs[0].window.start_minutes == 0.0
     assert strategy.pairs[0].window.end_minutes == 10.0
     assert strategy.pairs[0].head_price == (-1_000_000.0, 1_000_000.0)
+
+
+def test_optional_symbol_column_is_parsed(tmp_path: Path) -> None:
+    strategy = read_strategy_file(
+        _write_strategy(
+            tmp_path / "symbol.tsv",
+            [
+                "XBT\t0 60\t1\t4\t\tbuy\tL\t\tS-\t\tqAtDpD\t3\t8\t- -5\t\tPI_XBTUSD",
+                "ETH\t0 60\t1\t4\t\tbuy\tL\t\tS-\t\tqAtDpD\t5\t8\t- -5\t\tPI_ETHUSD",
+            ],
+            symbol_column=True,
+        )
+    )
+
+    assert [pair.symbol for pair in strategy.pairs] == ["PI_XBTUSD", "PI_ETHUSD"]
+
+
+def test_duplicate_pair_names_fail_at_tsv_parse_time(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Duplicate pair name"):
+        read_strategy_file(
+            _write_strategy(
+                tmp_path / "duplicate.tsv",
+                [
+                    "SAME\t0 60\t1\t4\t\tbuy\tL\t\tS-\t\tqAtDpD\t3\t8\t- -5\t",
+                    "SAME\t0 60\t1\t4\t\tsell\tL\t\tS-\t\tqAtDpD\t4\t8\t5 +\t",
+                ],
+            )
+        )

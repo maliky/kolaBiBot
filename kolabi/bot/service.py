@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Optional, Protocol, TypeVar, cast
 
@@ -81,6 +81,15 @@ def _kolabi_scoped_db_url(lane: str, account_scope: str) -> str | None:
     if (account_scope.strip() or "default") == "default":
         return os.environ.get(f"KOLABI_{lane_key}_DB_URL")
     return os.environ.get(f"KOLABI_{_env_scope_key(account_scope)}_{lane_key}_DB_URL")
+
+
+def _pair_symbol(pair: OrderPairSpec, default_symbol: str) -> str:
+    symbol = (pair.symbol or "").strip()
+    return symbol or default_symbol
+
+
+def _strategy_symbols(strategy: StrategySpec) -> tuple[str, ...]:
+    return tuple(sorted({str(pair.symbol) for pair in strategy.pairs if pair.symbol}))
 
 
 class InstrumentRulesExchange(Protocol):
@@ -246,6 +255,7 @@ class BotService:
         self._market_db_url = market_db_url
         self._audit_db_url = audit_db_url
         self._telemetry_db_url = telemetry_db_url
+        self._required_symbols: tuple[str, ...] = (config.symbol,)
         self.runtime_state: KrakenRuntimeStateClient | None = None
         if (
             config.exchange.lower() in {"kraken", "binance"}
@@ -260,6 +270,7 @@ class BotService:
                 exchange=config.exchange.lower(),
                 environment=config.environment,
                 market_type="futures",
+                account_scope=config.account_scope,
                 max_public_age_seconds=config.max_public_age_seconds,
                 max_private_age_seconds=config.max_private_age_seconds,
                 max_reconcile_age_seconds=config.max_reconcile_age_seconds,
@@ -293,27 +304,43 @@ class BotService:
         ):
             return
         self.logger.info(
-            "%s runtime preflight symbol=%s env=%s market_db=%s account_db=%s critical_account_db=%s",
+            "%s runtime preflight symbols=%s env=%s market_db=%s account_db=%s critical_account_db=%s",
             self.config.exchange.lower(),
-            self.config.symbol,
+            ",".join(self._required_symbols),
             self.config.environment,
             self._market_db_url,
             self._account_db_url,
             self._critical_account_db_url or self._account_db_url,
         )
-        state = self.runtime_state.wait_until_ready(
-            timeout_seconds=self.config.ready_timeout_seconds,
-            poll_seconds=self.config.ready_poll_seconds,
+        states = tuple(
+            self.runtime_state.wait_until_ready(
+                symbol=symbol,
+                timeout_seconds=self.config.ready_timeout_seconds,
+                poll_seconds=self.config.ready_poll_seconds,
+            )
+            for symbol in self._required_symbols
         )
-        if not state.ready:
-            raise TimeoutError(self._format_wait_timeout(state))
+        stale_states = tuple(state for state in states if not state.ready)
+        if stale_states:
+            raise TimeoutError(self._format_wait_timeouts(stale_states))
+        state = states[0]
+        public_ages = ",".join(
+            f"{item.symbol}:{item.public.age_seconds or 0.0:.2f}s"
+            for item in states
+        )
         self.logger.info(
-            "%s runtime ready symbol=%s public_age=%.2fs private_age=%.2fs",
+            "%s runtime ready symbols=%s public_ages=%s private_age=%.2fs",
             self.config.exchange.lower(),
-            state.symbol,
-            state.public.age_seconds or 0.0,
+            ",".join(item.symbol for item in states),
+            public_ages,
             state.private_ws.age_seconds or 0.0,
         )
+
+    def _format_wait_timeouts(
+        self,
+        states: tuple[StrategyRuntimeState, ...],
+    ) -> str:
+        return " | ".join(self._format_wait_timeout(state) for state in states)
 
     def _format_wait_timeout(self, state: StrategyRuntimeState) -> str:
         """Format a short readiness timeout message for CLI users."""
@@ -335,12 +362,17 @@ class BotService:
                 " start_private='scripts/kolabidb private start"
                 f" --account-scope {self.config.account_scope}'"
             )
+        public_hint = (
+            f" start_public='scripts/kolabidb public start --pair {state.symbol}'"
+            if state.public.reason
+            else ""
+        )
         return (
             f"{self.config.exchange.capitalize()} runtime did not become ready within "
-            f"{self.config.ready_timeout_seconds:.0f}s: {reasons} "
+            f"{self.config.ready_timeout_seconds:.0f}s for symbol={state.symbol}: {reasons} "
             f"(public_age={public_age} private_status={state.private_ws.status} "
             f"private_age={private_age} private_last_heartbeat={private_last_heartbeat} "
-            f"account_scope={self.config.account_scope}{hint})"
+            f"account_scope={self.config.account_scope}{public_hint}{hint})"
         )
 
     def run_strategy(
@@ -351,15 +383,21 @@ class BotService:
         simulate: bool = False,
     ) -> StrategyRunResult:
         """Execute the active typed runtime path in the foreground."""
+        strategy = self._materialize_strategy_symbols(strategy)
+        self._required_symbols = _strategy_symbols(strategy)
+        if not dry_run and not simulate:
+            self._validate_multi_symbol_market_db(strategy)
         pair_list = list(strategy.pairs)
         if not dry_run or self.exchange_config is not None:
             self._validate_pairs(pair_list)
         if not dry_run and not simulate:
             self.start()
         for pair in pair_list:
-            snapshot = self.indicators.fetch_snapshot(self.config.symbol)
             run_id: Optional[int] = None
             if self.recorder:
+                snapshot = self.indicators.fetch_snapshot(
+                    _pair_symbol(pair, self.config.symbol)
+                )
                 run = self.recorder.start_run(pair, snapshot)
                 run_id = run.id
                 self.logger.info(f"[{pair.name}] submitted run #{run_id}")
@@ -447,16 +485,20 @@ class BotService:
                 **self.exchange_config.adapter_kwargs,
             ),
         )
-        rules = adapter.instrument_rules(self.config.symbol)
-        raw_min_qty = rules.get("minQuantity")
-        min_qty = (
-            float(raw_min_qty)
-            if isinstance(raw_min_qty, (int, float, str)) and raw_min_qty
-            else 1.0
-        )
+        min_qty_by_symbol: dict[str, float] = {}
         for pair in pairs:
             if exchange == "binance":
                 _validate_binance_pair_grammar(pair)
+            symbol = _pair_symbol(pair, self.config.symbol)
+            if symbol not in min_qty_by_symbol:
+                rules = adapter.instrument_rules(symbol)
+                raw_min_qty = rules.get("minQuantity")
+                min_qty_by_symbol[symbol] = (
+                    float(raw_min_qty)
+                    if isinstance(raw_min_qty, (int, float, str)) and raw_min_qty
+                    else 1.0
+                )
+            min_qty = min_qty_by_symbol[symbol]
             if (
                 pair.head_quantity_type == "qA"
                 and pair.head_quantity is not None
@@ -464,8 +506,41 @@ class BotService:
             ):
                 raise ValueError(
                     f"Strategy '{pair.name}' quantity {pair.head_quantity} is below "
-                    f"the minimum quantity {min_qty:g} for {self.config.symbol}."
+                    f"the minimum quantity {min_qty:g} for {symbol}."
                 )
+
+    def _materialize_strategy_symbols(self, strategy: StrategySpec) -> StrategySpec:
+        """Attach the CLI default symbol to TSV rows that did not specify one."""
+        names: set[str] = set()
+        duplicates: list[str] = []
+        pairs: list[OrderPairSpec] = []
+        for pair in strategy.pairs:
+            if pair.name in names:
+                duplicates.append(pair.name)
+            names.add(pair.name)
+            pairs.append(
+                replace(
+                    pair,
+                    symbol=_pair_symbol(pair, self.config.symbol),
+                )
+            )
+        if duplicates:
+            raise ValueError(
+                "Duplicate pair name(s) in strategy: " + ", ".join(sorted(set(duplicates)))
+            )
+        return replace(strategy, pairs=tuple(pairs))
+
+    def _validate_multi_symbol_market_db(self, strategy: StrategySpec) -> None:
+        symbols = _strategy_symbols(strategy)
+        if len(symbols) <= 1:
+            return
+        if self.config.market_db_url or os.environ.get("KOLABI_MARKET_DB_URL"):
+            return
+        raise ValueError(
+            "Multi-instrument strategies require a shared market DB URL. "
+            "Start public feeders for every symbol and pass --market-db-url, "
+            "or export KOLABI_MARKET_DB_URL. symbols=" + ",".join(symbols)
+        )
 
     def _build_executor(self, *, simulate: bool):
         if simulate:
@@ -473,7 +548,7 @@ class BotService:
         self._ensure_exchange_config()
         if self.exchange_config is None:
             raise RuntimeError("Exchange configuration is required for active execution")
-        port = AdapterExchangePort(
+        port = SymbolRoutingExchangePort(
             exchange=self.config.exchange.lower(),
             exchange_config=self.exchange_config,
             verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
@@ -868,6 +943,59 @@ class AdapterExchangePort(ExchangePort):
         if request.text is not None:
             params["text"] = request.text
         return self.adapter.amend_order(request.orderID, **params)
+
+
+class SymbolRoutingExchangePort(ExchangePort):
+    """One-platform ExchangePort that dispatches commands by command.symbol."""
+
+    def __init__(
+        self,
+        *,
+        exchange: str,
+        exchange_config: ExchangeConfig,
+        verify_timeout_seconds: float = 11.0,
+        verify_poll_seconds: float = 0.5,
+        run_blocking_calls_in_thread: bool = False,
+        verify_tail_on_place: bool = True,
+    ) -> None:
+        self.exchange = exchange
+        self.exchange_config = exchange_config
+        self.verify_timeout_seconds = verify_timeout_seconds
+        self.verify_poll_seconds = verify_poll_seconds
+        self.run_blocking_calls_in_thread = run_blocking_calls_in_thread
+        self.verify_tail_on_place = verify_tail_on_place
+        self._ports: dict[str, AdapterExchangePort] = {}
+
+    def _port(self, symbol: Symbol) -> AdapterExchangePort:
+        key = str(symbol)
+        existing = self._ports.get(key)
+        if existing is not None:
+            return existing
+        port = AdapterExchangePort(
+            exchange=self.exchange,
+            exchange_config=replace(self.exchange_config, symbol=key),
+            verify_timeout_seconds=self.verify_timeout_seconds,
+            verify_poll_seconds=self.verify_poll_seconds,
+            run_blocking_calls_in_thread=self.run_blocking_calls_in_thread,
+            verify_tail_on_place=self.verify_tail_on_place,
+        )
+        self._ports[key] = port
+        return port
+
+    async def place_head(self, command: PlaceHeadCommand) -> OrderAck:
+        return await self._port(command.symbol).place_head(command)
+
+    async def place_tail(self, command: PlaceTailCommand) -> OrderAck:
+        return await self._port(command.symbol).place_tail(command)
+
+    async def amend_head(self, command: AmendHeadCommand) -> OrderAck:
+        return await self._port(command.symbol).amend_head(command)
+
+    async def amend_tail(self, command: AmendTailCommand) -> OrderAck:
+        return await self._port(command.symbol).amend_tail(command)
+
+    async def cancel(self, command: CancelCommand) -> OrderAck:
+        return await self._port(command.symbol).cancel(command)
 
 def _matching_tail_trigger_order(
     orders: list[dict[str, Any]],

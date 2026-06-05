@@ -1040,6 +1040,48 @@ def test_runtime_resolves_private_record_from_live_command_identity_without_ack_
     assert role == OrderRole.HEAD
 
 
+def test_pair_state_for_record_rejects_wrong_symbol_private_rows() -> None:
+    xbt_pair = replace(sample_strategy()[0], name="xbt", symbol="PI_XBTUSD")
+    eth_pair = replace(sample_strategy()[0], name="eth", symbol="PI_ETHUSD")
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="demo", pairs=(xbt_pair, eth_pair)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "xbt": replace(
+                runtime.state.pairs["xbt"],
+                head_identity=OrderIdentity(
+                    pair_name="xbt",
+                    role="head",
+                    client_order_id="CID-SAME",
+                ),
+            ),
+            "eth": replace(
+                runtime.state.pairs["eth"],
+                head_identity=OrderIdentity(
+                    pair_name="eth",
+                    role="head",
+                    client_order_id="CID-SAME",
+                ),
+            ),
+        },
+    )
+    record = PrivateOrderRecord(
+        symbol="PI_ETHUSD",
+        status="filled",
+        client_order_id="CID-SAME",
+    )
+
+    resolved = runtime.pair_state_for_record(record)
+
+    assert resolved is not None
+    assert resolved[0].pair.name == "eth"
+    assert resolved[1] == OrderRole.HEAD
+
+
 def test_strategy_runtime_dispatches_exchange_commands_without_blocking_loop() -> None:
     class SlowExecutor:
         async def execute(self, command):
@@ -1548,6 +1590,86 @@ def test_public_polling_does_not_deduplicate_changed_tail_reference() -> None:
         102.0,
         103.0,
     ]
+
+
+def test_public_polling_groups_active_pairs_by_symbol() -> None:
+    xbt_pair = replace(sample_strategy()[0], name="xbt", symbol="PI_XBTUSD")
+    eth_pair = replace(sample_strategy()[0], name="eth", symbol="PI_ETHUSD")
+
+    class Market:
+        best_bid = 102.0
+        best_ask = 102.5
+        mid_price = 102.25
+        last_price = 102.0
+        mark_price = None
+        index_price = None
+        tick_size = 0.5
+
+        def __init__(self, symbol: str) -> None:
+            self.recorded_at = f"tick-{symbol}"
+
+    class Client:
+        def __init__(self) -> None:
+            self.symbols: list[str] = []
+
+        def fetch_market_state(self, symbol=None):
+            self.symbols.append(str(symbol))
+            return Market(str(symbol))
+
+    class Runtime:
+        symbol = "PI_XBTUSD"
+        running = True
+
+        def __init__(self) -> None:
+            now = datetime.now(timezone.utc)
+            base_state = StrategyRuntime(
+                strategy=StrategySpec(name="demo", pairs=(xbt_pair, eth_pair)),
+                symbol="PI_XBTUSD",
+                simulate=False,
+            ).state
+            self.state = replace(
+                base_state,
+                pairs={
+                    "xbt": PairCycleState(
+                        pair=xbt_pair,
+                        head_state=HeadState.CLOSED,
+                        tail_state=TailState.LIVING,
+                        tail_trail=initial_tail_trail(xbt_pair, Decimal("100"), now),
+                    ),
+                    "eth": PairCycleState(
+                        pair=eth_pair,
+                        head_state=HeadState.CLOSED,
+                        tail_state=TailState.LIVING,
+                        tail_trail=initial_tail_trail(eth_pair, Decimal("100"), now),
+                    ),
+                },
+            )
+            self.events: list[EggMove] = []
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return len(self.events) >= 2
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
+        async def enqueue(self, event: EggMove) -> None:
+            self.events.append(event)
+
+        def pair_state_for_record(
+            self, record: object
+        ) -> tuple[PairCycleState, OrderRole] | None:
+            return None
+
+    client = Client()
+    runtime = Runtime()
+    source = KrakenPublicTriggerSource(client, poll_seconds=0.0)
+
+    asyncio.run(source.pump(runtime))
+
+    assert set(client.symbols) == {"PI_XBTUSD", "PI_ETHUSD"}
+    assert {event.symbol for event in runtime.events} == {"PI_XBTUSD", "PI_ETHUSD"}
 
 
 def test_public_polling_records_head_baseline_before_market_head_hook() -> None:

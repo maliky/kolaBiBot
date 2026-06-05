@@ -189,6 +189,7 @@ class OrderPairSpec:
     tail_price_spec_type: str
     amount_type: str
     hook_name: str | None = None
+    symbol: str | None = None
 
     @property
     def attempts(self) -> int:
@@ -223,6 +224,7 @@ class OrderIdentity:
     role: str
     client_order_id: str | None = None
     exchange_order_id: str | None = None
+    symbol: str | None = None
 
 
 @dataclass(frozen=True)

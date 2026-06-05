@@ -32,6 +32,9 @@ def read_strategy_file(path: str | Path) -> StrategySpec:
         comment="#",
         skip_blank_lines=True,
     )
+    if df["name"].duplicated().any():
+        duplicates = tuple(str(name) for name in df.loc[df["name"].duplicated(), "name"])
+        raise ValueError(f"Duplicate pair name(s) in strategy TSV: {', '.join(duplicates)}")
     df = df.set_index([df.index, df.name]).drop(columns="name")
     pairs: list[OrderPairSpec] = []
     for idx in df.index:
@@ -58,6 +61,7 @@ def order_pair_from_legacy_values(
     tDelta: float | None,
     tType: str,
     hook: str,
+    symbol: str | None = None,
 ) -> OrderPairSpec:
     """Normalise une ligne legacy vers une paire canonique."""
     head_quantity_type, tail_price_type, head_price_type = split_amount_type(atype)
@@ -93,6 +97,7 @@ def order_pair_from_legacy_values(
         tail_price_spec_type=tail_price_type,
         amount_type=atype.strip(),
         hook_name=hook.strip() or None,
+        symbol=None if symbol is None or not symbol.strip() else symbol.strip(),
     )
 
 
@@ -119,6 +124,7 @@ def strategy_from_run_once_args(args: object) -> StrategySpec:
         tDelta=getattr(args, "tDelta"),
         tType=str(getattr(args, "tType")),
         hook=str(getattr(args, "Hook")),
+        symbol=None,
     )
     return StrategySpec(name=pair.name, pairs=(pair,))
 
@@ -193,7 +199,15 @@ def normalize_legacy_row(row: pd.Series) -> dict[str, object]:
         "tDelta": coerce_to("float", row.tDelta),
         "tType": str(row.tType).strip(),
         "hook": "" if pd.isna(row.hook) else str(row.hook).strip(),
+        "symbol": _optional_text(row.symbol) if "symbol" in row else None,
     }
+
+
+def _optional_text(value: object) -> str | None:
+    if pd.isna(value):
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def split_amount_type(atype: str) -> tuple[str, str, str]:
