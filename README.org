@@ -1,106 +1,210 @@
-Kola BitMEX Bot
-===============
+Kolabi Bot
+==========
 
 * Presentation
 ------------
 
-KolaBitMEXBot is a program to handle concurrently several pairs of orders in the BitMEX exchange. A pair is a main order (amoung those allowed by BitMEX) and an opposite order (again among allowed) that acts as a stop. Each order enter the book based on conditions you set in
-`morders.tsv <https://github.com/maliky/kolaBot/blob/master/kolaBot/morders.tsv>`__.
+Kolabi is a typed, DB-grounded, async order-pair bot for derivatives/perpetual markets. The active production path is the TSV strategy runtime in =kolabi.bot=, backed by public market-data feeders and private account/order feeders in =kolabi.tree=. Kraken Futures is the primary live path. Binance USD-M Futures support is present in the shared adapter/feed layer and is being brought up behind the same DB-grounded architecture.
 
-* Main conditions
-~~~~~~~~~~~~~~~
+The core strategy unit is an order pair:
+- a =head= order enters or opens the position;
+- a =tail= order protects or closes the position;
+- the pair can repeat, wait, update its tail, or activate another pair through a hook.
 
--  time condition: an order activate if the time enters the [dateA, dateB] range
--  price condition: an order activate the market enters the [priceA, priceB] range other conditions
-~~~~~~~~~~~~~~~~
+The runtime deliberately separates concerns:
+- pure typed state transitions live in the reducer and pair-cycle functions;
+- Chronos/StrategyRuntime orchestrates event flow and command deduplication;
+- Ogun executes exchange commands through an adapter boundary;
+- public/private DB rows are the platform-grounded evidence used by the bot.
 
--  a timeout: an order will cancel after timeout minutes. Note this enable speed conditions (eg. activate only if price rise by 60ø in 1
-   minute, else cancel and restart)
--  a repeat #: an order will repeat # times if canceled or filled
--  a waitting time: if canceled or filled the order pair will wait before repeating (min wait ~1 minute)
--  a hook condition: (new not fully stable yet), an order will activate if a hooked order reach a specified status (filled, partialy filled, canceled)
+* Supported Platforms
+-------------------
 
-* Units
-~~~~~
+- =kraken= is the current primary platform for demo and live Kraken Futures.
+- =binance= has adapter and feed support for USD-M Futures, but should be treated as a bring-up path until its full operational runbook is validated.
+- =bitmex= remains only as legacy compatibility and historical test context.
 
--  time units: they are generaly in minutes and for some command line params, in seconds.
--  price units can be:
-   -  **relative** to market price (index, mark or last Price)
-      -  in %, of the activating price (eg. if price move by 5% from order activation)
-      -  in differential of the activating price (eg if price move by -80ø from order activation)
-   -  **absolute**, (eg. if price reach 3500ø)
+The bot invocation runs one platform at a time. TSV rows may carry platform-specific symbols directly; no canonical symbol mapping table is used.
 
-* Options specific to the stop order
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* Strategy Conditions
+-------------------
 
-By defaut kolaBot runs an opening order (main) and a close order (secondary or tail or trail). If your main is a buy, the secondary will be a close and vice-versa. It is possible to run only one of the two order by setting automatic cancelation condition on the not wanted order.
+Each pair can be gated by:
+- an entry window, =tps_run=, in minutes from launch;
+- a price interval, =prix=, interpreted by =atype=;
+- a head timeout, =tOut=, for unfilled head orders;
+- a repeat count, =essais= / =-n=;
+- a pause between repetitions, =pause= / =-p=;
+- a hook dependency, where a pair starts only after another pair reaches the required terminal condition.
 
-Here's a simple example: A buy at market (main order) with a stop at market (secondary order). You just need to set the price differential between the main order and the tail order. Like you want a tail at:
--  100ø below the activating price (relative in differential),
--  or at 2% below of the activating price (relative in %),
--  or at 2500ø what ever the activating price (absolute)
+Important runtime semantics:
+- =tps_run= controls when a new pair attempt may start. Once an attempt starts, it is not stopped only because the entry window closes.
+- =tOut= is stricter: if the head is not filled before the timeout, the head is cancelled and the attempt may repeat according to its repeat policy.
+- Tail stops are grounded on private fill/order evidence, not on a guessed public price.
+- Tail updates are no-widen by design: the pure reducer should not emit a tail amend that worsens the protected stop.
 
-* Example scenarios
-~~~~~~~~~~~~~~~~~
+* Price, Quantity, And Tail Units
+-------------------------------
 
--  you may want to buy 10% of your available balance if the index price goes down by 2% in 2 hours but this should only true for the next 24 hours.
--  you may want to place a simple buy limit if the price goes up by 100ø and then automatically set a (trailing) stop at this higher price - 20ø. This trail stop actually acts both as a stop order and a trail stop. If the market moves against you, it stays in place but if the market move in your favor it will only move once the price will be 20ø or higher above the entry price (in this example). Also you can set in the code some flexibility to the trail. Meaning that if the price rise quickly the trail price will close down on the order up to 20% of the initial 20ø delta you set. This is because usualy chart increase are followed buy sharp reverse and I think it's wise to go out of the market to pick it up automatically later.
--  you may want to use a sell (short) each time the price hits 20000ø with a buy at stop 21000ø and if the stop trigger wait 20 minutes before resetting the condition.
+The compatibility vocabulary is encoded in =atype=:
+- =pD= means the head price interval is differential from the reference price.
+- =p%= means the head price interval is percent from the reference price.
+- =pA= means the head price interval is absolute.
+- =qA= means absolute quantity.
+- =q%= means quantity as a percentage where supported by the strategy path.
+- =tD= means tail distance is differential.
+- =t%= means tail distance is percent.
+- =tA= means tail price is absolute.
+- =oD= / =o%= control optional head offsets where the order type supports them.
 
-All this and more is feasible with this bot. I do not recommend using it to do trading below 1 order per minute unless you have special API arrangement with BitMEX and in that case you should have an improved bot. :o). The reason is that if you have several orders even if we use the websockets, we make REST call that increase with the number of order pairs to track and we can quickly reach the ws limit set by the plateform.
+The =prix= field is a two-bound interval, not a single price. Use semi-open operator style in TSV files when appropriate, for example =- -5= or =5 +=, so the parser can translate the condition into a bounded internal interval.
 
-* Hooks: Update <2020-05-05 mar.>
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* TSV Strategy Files
+------------------
 
-You can now use hooks or what was once called chained order in BitMEX. A hook condition is a condition that is true if the hooked order reach the state defined in the condition. The states can be Filled (F), Triggered
-(T), Canceled (C) or PartiallyFilled (P) Since orders are always passed in pairs. The hook condition can apply to the Principal order (the one to enter the book) or the Secondary order (the one to exit). The syntax to define the hook condition is as follow:
-chain_order := name '-' order'_' trade ;
-order  := 'P' | 'S' ;
-trade  := 'F' | 'C' | 'T' | 'P' ;
--  Examples:
-   -  src1-P_F, will hook when the principal order of the pair named src1 will be filled
-   -  src1-P_C, will hook when the principal order of the pair named src1 will cancel
-   -  foo-S_P, will hook when the secondary order of the pair named foo will partially fill ...
+Strategy files live under =orders/=.
 
-#. Why hooks ?
+The active TSV grammar is:
 
-   Hooks can be useful especially with trail orders. Hook price and time settings are relative to the moment their are started. So you can have an order that enter the book when a trailing stop is filled.
-   This could be useful to catch reversal in momentum.
+#+begin_example
+name  tps_run  essais  tOut  pause  side  oType  oDelta  tType  tDelta  atype  quantity  tp  prix  hook  symbol
+#+end_example
+
+The final =symbol= column is optional. When omitted, the CLI =--symbol= is used. When present, the row uses the platform-specific instrument directly, for example =PI_XBTUSD= or =PI_ADAUSD=. A multi-instrument TSV run requires one shared market DB URL and public feeders for every active symbol.
+
+Useful examples:
+- =orders/demo_ada.tsv= documents compact grammar examples.
+- =orders/demo_kraken_xbt.tsv= covers Kraken XBT combinations.
+- =orders/chained_xbt.tsv= exercises chained order flow.
+- =orders/rep_xbt.tsv= exercises repetition.
+- =orders/pi_xbtusd_sell_plus1_tail_0p5.tsv= is a one-row tail example.
+
+* DB And Feed Services
+--------------------
+
+The runtime expects fresh DB-backed evidence before active execution:
+- public market snapshots from =kolabi.tree.kraken= or =kolabi.tree.binance=;
+- private order/fill/account state from =kolabi.tree.account= or =kolabi.tree.binance_account=;
+- a critical private lane for open orders and fills;
+- optional REST audit and tail telemetry lanes.
+
+PostgreSQL is now the preferred local backend. SQLite fallback remains useful for small offline or legacy checks.
+
+Start the default Kraken demo lanes:
+
+#+begin_src bash
+scripts/kolabidb postgres start
+scripts/kolabidb public start --environment demo --pair PI_XBTUSD
+scripts/kolabidb private start --environment demo --account-scope default
+#+end_src
+
+Check service status and logs:
+
+#+begin_src bash
+scripts/kolabidb public status --environment demo --pair PI_XBTUSD
+scripts/kolabidb private status --environment demo --account-scope default
+scripts/kolabidb public logs --environment demo --pair PI_XBTUSD
+scripts/kolabidb private logs --environment demo --account-scope default
+#+end_src
+
+* Operator Commands
+-----------------
+
+List instruments and find exact symbols:
+
+#+begin_src bash
+python -m kolabi.bargain.cli --exchange kraken --environment demo instruments --contains ADA
+python -m kolabi.bargain.cli --exchange kraken --environment live instruments --contains ADA
+#+end_src
+
+Validate a selected symbol:
+
+#+begin_src bash
+python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_ADAUSD check-symbol
+#+end_src
+
+Read account state:
+
+#+begin_src bash
+python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD balance
+python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD position
+python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD open-orders
+python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD trigger-orders
+#+end_src
+
+Emergency cleanup:
+
+#+begin_src bash
+python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD close-all
+#+end_src
+
+* Running The Bot
+---------------
+
+Dry-run a TSV strategy:
+
+#+begin_src bash
+python -m kolabi.bot run --strategy orders/demo_ada.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
+#+end_src
+
+Run a TSV strategy through the async runtime:
+
+#+begin_src bash
+python -m kolabi.bot run --strategy orders/rep_xbt.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+#+end_src
+
+Run one compatibility-vocabulary order pair:
+
+#+begin_src bash
+python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run
+#+end_src
+
+Preflight runtime readiness:
+
+#+begin_src bash
+python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo
+#+end_src
+
+Live/preprod should be launched only after a clean demo run, fresh public/private DB state, no unexpected open orders or positions, and an explicit dry-run of the exact strategy. Start live with small size, =--max-active-pairs 1=, =--rest-max-inflight 1=, and a non-zero =--rest-min-interval=.
 
 * Installation
 ------------
 
+Use the repository Python environment declared by =.python-version=, then install the package and dependencies in editable mode:
 
-.. code:: bash source env.sh        # loads .env-dev source env.sh prod   # loads .env-prod Write your orders in the `morder.tsv <https://github.com/maliky/kolaBot/blob/master/kolaBot/morders.tsv>`__
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#+begin_src bash
+pyenv local kola
+python -m pip install -r requirements.txt
+python -m pip install -e .
+#+end_src
 
-Test your orders on testnet.BitMEX.com
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Credential values should come from environment variables or a local env file that is not committed. Kraken defaults are:
 
-Extend dummy bargain to have a personnal test net
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#+begin_example
+KRAKEN_FUTURE_DEMO_API_KEY
+KRAKEN_FUTURE_DEMO_API_SECRET
+KRAKEN_FUTURE_API_KEY
+KRAKEN_FUTURE_API_SECRET
+#+end_example
 
-Write hyptothesis tests
-~~~~~~~~~~~~~~~~~~~~~~~
+Use =--api-key-env= and =--api-secret-env= when selecting a non-default account.
 
-* FAQ
----
+* Tests
+-----
 
-Why is it free ?
-~~~~~~~~~~~~~~~~
+Start with focused active-path tests:
 
-#. Because I had fun making it.
-#. Also because the gift you may give me having fun using this code, will be infinitely more valuable for me, if its free.:o)
+#+begin_src bash
+PYENV_VERSION=kola pytest tests/bot tests/tree/test_kraken_tree.py -q
+python -m ruff check kolabi tests
+#+end_src
 
-381b5ygUaK3CpHSKH2kKYCYKGMUbH4ruiw (BTC only)
+Legacy tests and archived paths exist for behavioural reference, but the active regression surface is under =tests/bot=, =tests/tree=, =tests/exchanges=, and =tests/core=.
 
 * Disclaimer
-~~~~~~~~~~
+----------
 
-Check the code! This is an EDUCATIONAL PROJECT. NO GARANTY is granted.
-
-That been published, THIS CODE IS LICENCE FREE. No Gnu, no MIT, no GitHub©, no what so ever regulation from my part. Although, I may be obliged by some legal contracts I'm not consciously aware off because I did reused codes notably `BitMEX's API connectors <https://github.com/BitMEX/api-connectors>`__ and an uncountable number of functions from python's imported libraries
-(pandas, request, numpy, datetime...). I hope their authors don't really care. We are born free, let's stay so. So, your are free to do what you want with this code BUT... do check it and understand it.
+This is an educational and experimental trading system. It can submit real orders when run against a live platform. Review the code, use small size, keep exchange-side risk limits in place, and do not run unattended until the live preprod path has proven itself under your operating conditions.
 
 * File Index
 ~~~~~~~~~~~~~~~~~~
@@ -129,15 +233,17 @@ kolabi/
 |  `- smoke.py                    # paced smoke-test runner for standard Kraken order kinds
 |- bot/                         # active strategy entrypoint layer
 |  |- __main__.py                 # bot CLI: run, preflight, run-once
-|  |- service.py                  # runtime orchestration, readiness checks, dispatch into auditor
+|  |- chronos.py                  # async repetition/dependency supervisor helpers
+|  |- domain.py                   # typed strategy, pair, command, and lifecycle dataclasses
+|  |- dragon.py                   # event constructors and platform-fact translation
+|  |- horus.py                    # pure intent-to-runtime-command translation
+|  |- isis.py                     # narrow reducer entrypoint over targeted strategy events
+|  |- ogun_executor.py            # paced async command execution boundary
+|  |- pair_cycle.py               # pure head/tail lifecycle transition functions
+|  |- service.py                  # runtime orchestration, readiness checks, exchange-port routing
+|  |- strategy_runtime.py         # active async foreground runtime path
 |  |- indicators.py               # reads indicator snapshots from the public DB
 |  |- persistence.py              # optional bot-run persistence
-|  |- runtime/
-|  |  |- orange.py                  # event normalizer/translator into reducer moves
-|  |  |- chronos.py                 # async supervisor over strategy state
-|  |  |- isis.py                    # pure strategy reducer
-|  |  |- janus.py                   # pure intent-to-command planner
-|  |  `- strategy_runtime.py        # active async foreground runtime path
 |  `- tsv/
 |     `- parser.py                # TSV parser and OrderSpec normalisation
 |- kraken_contract/
@@ -153,26 +259,35 @@ kolabi/
 |- shared/                      # common exchange and persistence layer
 |  |- config.py                   # exchange config resolution and credentials
 |  |- kraken_futures.py           # demo/live Kraken Futures endpoint mapping
+|  |- binance_futures.py          # demo/live Binance Futures endpoint mapping
 |  |- logging.py                  # common logger setup
+|  |- pruning.py                  # central retention defaults for DB lanes
 |  |- runtime_state.py            # combined public/private DB readiness view
 |  |- core/
-|  |  |- bargain.py                 # shared Bargain surface backed by DB state for Kraken
 |  |  |- models.py                  # shared dataclasses for positions and order acknowledgements
+|  |  |- runtime_commands.py        # typed exchange command request objects
+|  |  |- runtime_types.py           # shared enum-like runtime constants
 |  |  `- types.py                   # abstract exchange interfaces
 |  |- exchanges/
 |  |  |- kraken_adapter.py          # active Kraken Futures adapter
-|  |  |- bitmex_adapter.py          # retained adapter for legacy compatibility and tests
-|  |  `- binance_adapter.py         # retained adapter for legacy compatibility and tests
+|  |  |- binance_adapter.py         # Binance USD-M Futures adapter
+|  |  `- bitmex_adapter.py          # retained adapter for legacy compatibility and tests
 |  `- persistence/
 |     |- db.py                      # SQLAlchemy session helpers
-|     `- models.py                  # shared persistence models
+|     |- models.py                  # shared persistence models
+|     `- retention.py               # lane-scoped pruning helpers
 `- tree/                        # market and account state services
    |- kraken.py                   # public Kraken Futures book service
    |- account.py                  # private Kraken Futures account and order service
+   |- binance.py                  # public Binance Futures book service
+   |- binance_account.py          # private Binance Futures account/order service
    `- service.py                  # shared service helpers for tree modules
 
 orders/                       # example strategy definitions
 |- demo_ada.tsv                 # compact contract and order-type examples
+|- demo_kraken_xbt.tsv          # Kraken XBT grammar matrix
+|- chained_xbt.tsv              # chained order scenario
+|- rep_xbt.tsv                  # repetition scenario
 |- xbt_bk.tsv                   # broader strategy regression file
 `- pi_xbtusd_sell_plus1_tail_0p5.tsv
                                 # one-row Kraken demo example for a bot-managed tail order
