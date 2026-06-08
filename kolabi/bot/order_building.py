@@ -109,6 +109,21 @@ def _head_exchange_offset(pair: OrderPairSpec) -> PriceOffset | None:
     return cast(PriceOffset, to_decimal(pair.head.delta))
 
 
+def _tail_exchange_offset(state: PairCycleState) -> PriceOffset | None:
+    """Return explicit tail offset or one tick for blank stop-limit deltas."""
+    if state.pair.tail.delta is not None:
+        return cast(PriceOffset, to_decimal(state.pair.tail.delta))
+    if base_order_type(state.pair.tail.order_type) not in {"SL", "LT"}:
+        return None
+    tick = state.instrument_tick_size
+    if tick is None or tick <= 0:
+        raise ValueError(
+            f"Order pair '{state.pair.name}' needs an instrument tick size to materialise "
+            "blank tail tDelta"
+        )
+    return cast(PriceOffset, tick)
+
+
 def resolve_tail_quantity(state: PairCycleState) -> Decimal | int | None:
     """Resolve tail quantity from played runtime state first, then planned size."""
     if state.played_quantity is not None and state.played_quantity > 0:
@@ -133,8 +148,9 @@ def tail_order_dict(state: PairCycleState) -> OrderDict:
     stop_price = tail_stop_price(state)
     if stop_price is not None:
         order["stopPx"] = cast(StopPrice, to_decimal(stop_price))
-    if pair.tail.delta is not None:
-        order["oDelta"] = cast(PriceOffset, to_decimal(pair.tail.delta))
+    tail_offset = _tail_exchange_offset(state)
+    if tail_offset is not None:
+        order["oDelta"] = tail_offset
     return order
 
 
@@ -148,11 +164,7 @@ def tail_place_request(state: PairCycleState) -> PlaceOrderCommandRequest:
         orderQty=None if quantity is None else cast(OrderQty, to_decimal(quantity)),
         stopPx=None if stop_price is None else cast(StopPrice, to_decimal(stop_price)),
         execInst=_tail_exec_inst(state.pair.tail.order_type),
-        oDelta=(
-            None
-            if state.pair.tail.delta is None
-            else cast(PriceOffset, to_decimal(state.pair.tail.delta))
-        ),
+        oDelta=_tail_exchange_offset(state),
     )
 
 

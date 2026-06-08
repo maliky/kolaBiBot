@@ -4,6 +4,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import pytest
+
 from kolabi.bot.domain import (
     HeadSpec,
     OrderPairSpec,
@@ -13,6 +15,7 @@ from kolabi.bot.domain import (
     TimeWindow,
 )
 from kolabi.bot.dragon import MarketSnapshotFact, head_hooked_from_market_snapshot
+from kolabi.bot.order_building import tail_place_request
 from kolabi.bot.pricing import (
     executable_head_reference_price,
     pair_window_has_ended,
@@ -48,6 +51,7 @@ class _Market:
     last_price: float | None = None
     mark_price: float | None = None
     index_price: float | None = None
+    tick_size: float | None = None
 
 
 def test_head_limit_mark_suffix_uses_mark_reference() -> None:
@@ -119,6 +123,74 @@ def test_buy_limit_percent_offset_materialises_below_mark_reference() -> None:
     assert stop_price is None
 
 
+def test_buy_limit_blank_delta_materialises_one_tick_below_reference() -> None:
+    pair = _pair("Lm")
+
+    price, stop_price = resolve_head_order_prices(
+        pair,
+        _Market(
+            best_bid=99.0,
+            best_ask=101.0,
+            mid_price=100.0,
+            mark_price=1000.0,
+            tick_size=0.00001,
+        ),
+    )
+
+    assert price == 999.99999
+    assert stop_price is None
+
+
+def test_sell_limit_blank_delta_materialises_one_tick_above_reference() -> None:
+    pair = replace(_pair("Lm"), head=HeadSpec(side=Side.SELL, order_type="Lm"))
+
+    price, stop_price = resolve_head_order_prices(
+        pair,
+        _Market(
+            best_bid=99.0,
+            best_ask=101.0,
+            mid_price=100.0,
+            mark_price=1000.0,
+            tick_size=0.00001,
+        ),
+    )
+
+    assert price == 1000.00001
+    assert stop_price is None
+
+
+def test_blank_head_delta_requires_tick_size() -> None:
+    with pytest.raises(ValueError, match="blank head oDelta"):
+        resolve_head_order_prices(
+            _pair("Lm"),
+            _Market(
+                best_bid=99.0,
+                best_ask=101.0,
+                mid_price=100.0,
+                mark_price=1000.0,
+            ),
+        )
+
+
+def test_blank_stop_limit_tail_delta_materialises_one_tick_offset() -> None:
+    pair = replace(
+        _pair("M"),
+        tail=TailSpec(side=Side.SELL, order_type="SLm", delta=None),
+        tail_price_spec=95.0,
+        tail_price_spec_type="tA",
+        amount_type="qAtApD",
+    )
+    request = tail_place_request(
+        PairCycleState(
+            pair=pair,
+            played_quantity=Decimal("3"),
+            instrument_tick_size=Decimal("0.00001"),
+        )
+    )
+
+    assert request.oDelta == Decimal("0.00001")
+
+
 def test_head_limit_suffix_drives_price_condition() -> None:
     pair = _pair("Lm")
     now = datetime.now(timezone.utc)
@@ -134,6 +206,7 @@ def test_head_limit_suffix_drives_price_condition() -> None:
             best_ask=91.0,
             mid_price=90.5,
             mark_price=116.0,
+            tick_size=0.5,
             occurred_at=now,
         ),
     )
@@ -157,13 +230,14 @@ def test_head_limit_hook_carries_materialised_order_price() -> None:
             best_bid=95.0,
             best_ask=96.0,
             mid_price=95.5,
+            tick_size=0.5,
             occurred_at=now,
         ),
     )
 
     assert move is not None
     assert move.reply is not None
-    assert move.reply["head_order_price"] == 95.0
+    assert move.reply["head_order_price"] == 94.5
 
 
 def test_head_stop_hook_carries_materialised_stop_price() -> None:
@@ -185,13 +259,14 @@ def test_head_stop_hook_carries_materialised_stop_price() -> None:
             best_ask=104.0,
             mid_price=103.5,
             mark_price=104.0,
+            tick_size=0.5,
             occurred_at=now,
         ),
     )
 
     assert move is not None
     assert move.reply is not None
-    assert move.reply["head_order_stop_price"] == 104.0
+    assert move.reply["head_order_stop_price"] == 103.5
 
 
 def test_buy_stop_head_delta_places_trigger_above_reference() -> None:

@@ -105,6 +105,7 @@ def step_tail_trail(
     occurred_at: datetime,
     *,
     tick_size: Decimal | int | float | str | None = None,
+    spread: Decimal | int | float | str | None = None,
     config: TailTrailingConfig = DEFAULT_TAIL_TRAILING_CONFIG,
     symbol: str | None = None,
 ) -> TailTrailState:
@@ -112,10 +113,26 @@ def step_tail_trail(
     del symbol
     occurred_at = _as_utc_aware(occurred_at)
     reference = to_decimal(reference_price)
+    current_spread = _spread_or_none(spread)
+    max_spread = trail.max_observed_spread
+    if current_spread is not None and current_spread > max_spread:
+        max_spread = current_spread
     samples = _bounded_samples(
-        trail.samples + (TailTrailSample(occurred_at=occurred_at, reference_price=reference),)
+        trail.samples
+        + (
+            TailTrailSample(
+                occurred_at=occurred_at,
+                reference_price=reference,
+                spread=current_spread,
+            ),
+        )
     )
-    next_state = replace(trail, samples=samples, last_reference_price=reference)
+    next_state = replace(
+        trail,
+        samples=samples,
+        last_reference_price=reference,
+        max_observed_spread=max_spread,
+    )
 
     if trail.baseline_width <= 0:
         return next_state
@@ -137,19 +154,19 @@ def step_tail_trail(
     tick = _tick_size_or_none(tick_size)
     min_improvement = _min_improvement(d0, tick, config)
 
-    max_lag = config.unblock_multiplier * d0
+    max_lag = config.unblock_multiplier * d0 + max_spread
 
     if pair.tail.side == Side.SELL:
         d_raw = reference - current_stop
         favorable = previous_ref is None or reference > previous_ref
         if d_raw <= 0 or not favorable:
             return next_state
-        if trail.last_amended_at is None and d_raw < config.unblock_multiplier * d0:
+        if trail.last_amended_at is None and d_raw < max_lag:
             return next_state
         r = _clamp_r(d_raw / (config.response_denominator_multiplier * d0), config.max_r)
         factor = curve.factor(float(r), max_factor=config.max_factor)
         candidate = current_stop + factor * d_raw
-        # Hard invariant: do not let stop lag behind reference by more than 2*d0.
+        # Hard invariant: include spread guard before tightening the stop.
         lag_cap_candidate = reference - max_lag
         if candidate < lag_cap_candidate:
             candidate = lag_cap_candidate
@@ -171,12 +188,12 @@ def step_tail_trail(
     favorable = previous_ref is None or reference < previous_ref
     if d_raw <= 0 or not favorable:
         return next_state
-    if trail.last_amended_at is None and d_raw < config.unblock_multiplier * d0:
+    if trail.last_amended_at is None and d_raw < max_lag:
         return next_state
     r = _clamp_r(d_raw / (config.response_denominator_multiplier * d0), config.max_r)
     factor = curve.factor(float(r), max_factor=config.max_factor)
     candidate = current_stop - factor * d_raw
-    # Hard invariant: do not let stop lag behind reference by more than 2*d0.
+    # Hard invariant: include spread guard before tightening the stop.
     lag_cap_candidate = reference + max_lag
     if candidate > lag_cap_candidate:
         candidate = lag_cap_candidate
@@ -233,6 +250,15 @@ def _tick_size_or_none(value: Decimal | int | float | str | None) -> Decimal | N
     if tick <= 0:
         return None
     return tick
+
+
+def _spread_or_none(value: Decimal | int | float | str | None) -> Decimal | None:
+    if value is None:
+        return None
+    spread = to_decimal(value)
+    if spread < 0:
+        return None
+    return spread
 
 
 def _min_improvement(

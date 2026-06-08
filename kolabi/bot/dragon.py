@@ -54,6 +54,7 @@ class MarketSnapshotFact:
     mark_price: float | None = None
     index_price: float | None = None
     tick_size: float | None = None
+    spread: float | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,8 @@ def head_hooked_from_market_snapshot(
             occurred_at=snapshot.occurred_at,
             reference_price=reference,
             reference_source=source,
+            tick_size=snapshot.tick_size,
+            spread=snapshot.spread,
         )
     if not head_price_condition_satisfied(pair_state, reference):
         return None
@@ -107,6 +110,8 @@ def head_hooked_from_market_snapshot(
         reference_source=source,
         head_order_price=order_price,
         head_order_stop_price=order_stop_price,
+        tick_size=snapshot.tick_size,
+        spread=snapshot.spread,
     )
 
 
@@ -117,16 +122,23 @@ def head_trigger_baselined_event(
     reference_price: Decimal | int | float | str,
     reference_source: str,
     occurred_at: datetime | None = None,
+    tick_size: Decimal | int | float | str | None = None,
+    spread: Decimal | int | float | str | None = None,
 ) -> EggMove:
+    reply: dict[str, object] = {
+        "reference_price": float(to_decimal(reference_price)),
+        "reference_source": reference_source,
+    }
+    if tick_size is not None:
+        reply["tick_size"] = float(to_decimal(tick_size))
+    if spread is not None:
+        reply["spread"] = float(to_decimal(spread))
     return EggMove(
         kind=EggMoveKind.HEAD_TRIGGER_BASELINED,
         occurred_at=occurred_at or datetime.now(timezone.utc),
         symbol=symbol,
         pair_name=pair_name,
-        reply={
-            "reference_price": float(to_decimal(reference_price)),
-            "reference_source": reference_source,
-        },
+        reply=reply,
     )
 
 
@@ -152,6 +164,11 @@ def market_tick_from_market_snapshot(
                 if snapshot.tick_size is None
                 else {"tick_size": snapshot.tick_size}
             ),
+            **(
+                {}
+                if snapshot.spread is None
+                else {"spread": snapshot.spread}
+            ),
         },
     )
 
@@ -165,6 +182,8 @@ def head_hooked_event(
     reference_source: str | None = None,
     head_order_price: Decimal | int | float | str | None = None,
     head_order_stop_price: Decimal | int | float | str | None = None,
+    tick_size: Decimal | int | float | str | None = None,
+    spread: Decimal | int | float | str | None = None,
 ) -> EggMove:
     reply: dict[str, object] = {}
     if reference_price is not None:
@@ -174,6 +193,10 @@ def head_hooked_event(
         reply["head_order_price"] = float(to_decimal(head_order_price))
     if head_order_stop_price is not None:
         reply["head_order_stop_price"] = float(to_decimal(head_order_stop_price))
+    if tick_size is not None:
+        reply["tick_size"] = float(to_decimal(tick_size))
+    if spread is not None:
+        reply["spread"] = float(to_decimal(spread))
     return EggMove(
         kind=EggMoveKind.HEAD_HOOKED,
         occurred_at=occurred_at or datetime.now(timezone.utc),

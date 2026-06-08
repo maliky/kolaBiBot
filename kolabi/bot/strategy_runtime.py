@@ -50,7 +50,12 @@ from kolabi.bot.dragon import (
     tail_submitted_from_ack,
 )
 from kolabi.bot.ids import head_client_order_id, tail_client_order_id
-from kolabi.bot.pricing import pair_window_has_ended, tail_reference_price
+from kolabi.bot.pricing import (
+    executable_head_reference_price,
+    pair_window_has_ended,
+    pair_window_is_open,
+    tail_reference_price,
+)
 from kolabi.bot.telemetry import TailTelemetryRow
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
@@ -295,6 +300,7 @@ class KrakenPublicTriggerSource:
                     mark_price=getattr(market, "mark_price", None),
                     index_price=getattr(market, "index_price", None),
                     tick_size=getattr(market, "tick_size", None),
+                    spread=getattr(market, "spread", None),
                 )
                 for pair_name, pair_state in runtime.state.pairs.items():
                     if _pair_symbol(pair_state, runtime.symbol) != symbol:
@@ -675,6 +681,9 @@ class StrategyRuntime:
         self._head_fill_deadlines: dict[_CommandSlot, _HeadFillDeadline] = {}
         self._pending_tail_visibility: dict[_CommandSlot, _TailVisibilityWindow] = {}
         self._pending_tail_amends: dict[_CommandSlot, _TailAmendPending] = {}
+        self._last_gate_logs: dict[str, datetime] = {}
+        self._last_gate_signatures: dict[str, tuple[str, ...]] = {}
+        self._gate_log_interval_seconds = 30.0
 
     def _pair_state(self, pair):
         from kolabi.bot.domain import PairCycleState
@@ -756,6 +765,7 @@ class StrategyRuntime:
                 self._check_head_fill_deadlines(current_time)
                 self._check_tail_visibility_deadlines(current_time)
                 self._check_tail_amend_deadlines(current_time)
+                self._log_gate_waits(current_time)
                 repeat_commands = self.chronos.activate_ready_repeats(
                     symbol=self.symbol,
                     now=current_time,
@@ -1037,6 +1047,8 @@ class StrategyRuntime:
                     _fmt_compact_price(row.stop_price),
                     _fmt_compact_price(row.initial_distance),
                     _fmt_compact_price(row.current_distance),
+                    _fmt_compact_price(row.spread_guard),
+                    _fmt_compact_price(row.unblock_requirement),
                     row.last_tail_update_at.isoformat() if row.last_tail_update_at is not None else "-",
                     source,
                     _fmt_compact_price(None if market is None else getattr(market, "best_bid", None)),
@@ -1050,7 +1062,7 @@ class StrategyRuntime:
                     continue
                 self._last_tail_metrics[row.pair_name] = signature
                 _LOGGER.info(
-                    "METRICS (%s#%s): (%s--%s) ref=%s stop=%s ID=%s CD=%s LU=%s src=%s px=B:%s A:%s MID:%s L:%s MK:%s I:%s",
+                    "METRICS (%s#%s): (%s--%s) ref=%s stop=%s ID=%s CD=%s SG=%s UR=%s LU=%s src=%s px=B:%s A:%s MID:%s L:%s MK:%s I:%s",
                     row.pair_name,
                     signature[0],
                     row.head_state,
@@ -1067,6 +1079,8 @@ class StrategyRuntime:
                     signature[12],
                     signature[13],
                     signature[14],
+                    signature[15],
+                    signature[16],
                 )
             await asyncio.sleep(interval)
 
@@ -1090,6 +1104,10 @@ class StrategyRuntime:
             if stop is None:
                 continue
             current_distance = _tail_signed_distance(pair_state, to_decimal(ref), stop)
+            spread_guard = pair_state.tail_trail.max_observed_spread
+            unblock_requirement = (
+                Decimal("2") * pair_state.tail_trail.baseline_width + spread_guard
+            )
             rows.append(
                 TailTelemetryRow(
                     exchange=self.exchange,
@@ -1106,6 +1124,8 @@ class StrategyRuntime:
                     stop_price=float(stop),
                     initial_distance=float(pair_state.tail_trail.baseline_width),
                     current_distance=float(current_distance),
+                    spread_guard=float(spread_guard),
+                    unblock_requirement=float(unblock_requirement),
                     last_tail_update_at=pair_state.tail_trail.last_confirmed_at,
                     recorded_at=now,
                 )
@@ -1309,6 +1329,148 @@ class StrategyRuntime:
         _LOGGER.info(
             "RAPPEL: AI=attempt_index PU=pair_update HS=head_state TS=tail_state PQ=played_qty CS=confirmed_stop DS=desired_stop ID=initial_dist CD=current_dist LU=last_update TCID=tail_client_id TOID=tail_order_id TLU=tail_last_update HFS/HFQ/HFP/HFT=head_fill_fields(closed--hooked) TFS/TFQ/TFP/TFT=tail_fill_fields(closed--closed)"
         )
+
+    def _log_gate_waits(self, now: datetime) -> None:
+        """Log latent head gates so quiet strategies are observable."""
+        if self.public_state_reader is None:
+            return
+        for pair_name, pair_state in self.state.pairs.items():
+            if pair_state.head_state != HeadState.LATENT:
+                continue
+            pair = pair_state.pair
+            if pair.hook_name and not pair_dependency_satisfied(self.state, pair_state):
+                self._emit_gate_wait(
+                    pair_name=pair_name,
+                    pair_state=pair_state,
+                    now=now,
+                    signature=("chain_wait", pair.hook_name),
+                    message=(
+                        "GATE_WAIT (%s#%s): status=chain_wait hook=%s "
+                        "oType=%s oDelta=%s tOut=%s"
+                    ),
+                    message_args=(
+                        pair_name,
+                        pair_state.attempt_index,
+                        pair.hook_name,
+                        pair.head.order_type,
+                        _fmt_compact_price(
+                            None if pair.head.delta is None else Decimal(str(pair.head.delta))
+                        ),
+                        "-" if pair.timeout_minutes is None else pair.timeout_minutes,
+                    ),
+                )
+                continue
+            if not pair_window_is_open(pair, launched_at=self.state.launched_at, now=now):
+                status = "window_closed" if pair_window_has_ended(
+                    pair,
+                    launched_at=self.state.launched_at,
+                    now=now,
+                ) else "window_wait"
+                self._emit_gate_wait(
+                    pair_name=pair_name,
+                    pair_state=pair_state,
+                    now=now,
+                    signature=(status,),
+                    message=(
+                        "GATE_WAIT (%s#%s): status=%s window=%s..%s "
+                        "oType=%s oDelta=%s tOut=%s"
+                    ),
+                    message_args=(
+                        pair_name,
+                        pair_state.attempt_index,
+                        status,
+                        pair.window.start_minutes,
+                        pair.window.end_minutes,
+                        pair.head.order_type,
+                        _fmt_compact_price(
+                            None if pair.head.delta is None else Decimal(str(pair.head.delta))
+                        ),
+                        "-" if pair.timeout_minutes is None else pair.timeout_minutes,
+                    ),
+                )
+                continue
+            symbol = _pair_symbol(pair_state, self.symbol)
+            try:
+                market = self.public_state_reader.fetch_market_state(symbol)
+                source, reference = executable_head_reference_price(pair, market)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "GATE_WAIT (%s#%s): status=market_unavailable symbol=%s error=%s",
+                    pair_name,
+                    pair_state.attempt_index,
+                    symbol,
+                    " ".join(str(exc).split()),
+                )
+                continue
+            if reference <= 0:
+                continue
+            current = Decimal(str(reference))
+            measurement = _head_gate_measure(pair_state, current)
+            low = Decimal(str(pair.head_price[0]))
+            high = Decimal(str(pair.head_price[1]))
+            unit = _head_gate_unit(pair_state)
+            status = _head_gate_status(measurement, low, high)
+            baseline = pair_state.head_trigger_reference_price
+            signature = (
+                status,
+                source,
+                _fmt_compact_price(current),
+                _fmt_compact_price(measurement),
+                _fmt_compact_price(baseline),
+                _fmt_compact_price(low),
+                _fmt_compact_price(high),
+                unit,
+            )
+            self._emit_gate_wait(
+                pair_name=pair_name,
+                pair_state=pair_state,
+                now=now,
+                signature=signature,
+                message=(
+                    "GATE_WAIT (%s#%s): status=%s src=%s ref=%s base=%s "
+                    "move=%s gate=%s..%s unit=%s oType=%s oDelta=%s tOut=%s"
+                ),
+                message_args=(
+                    pair_name,
+                    pair_state.attempt_index,
+                    status,
+                    source,
+                    _fmt_compact_price(current),
+                    _fmt_compact_price(baseline),
+                    _fmt_compact_price(measurement),
+                    _fmt_compact_price(low),
+                    _fmt_compact_price(high),
+                    unit,
+                    pair.head.order_type,
+                    _fmt_compact_price(
+                        None if pair.head.delta is None else Decimal(str(pair.head.delta))
+                    ),
+                    "-" if pair.timeout_minutes is None else pair.timeout_minutes,
+                ),
+            )
+
+    def _emit_gate_wait(
+        self,
+        *,
+        pair_name: str,
+        pair_state: PairCycleState,
+        now: datetime,
+        signature: tuple[str, ...],
+        message: str,
+        message_args: tuple[object, ...],
+    ) -> None:
+        key = f"{pair_name}#{pair_state.attempt_index}"
+        last_at = self._last_gate_logs.get(key)
+        previous_signature = self._last_gate_signatures.get(key)
+        if (
+            last_at is not None
+            and previous_signature == signature
+            and (now - last_at).total_seconds() < self._gate_log_interval_seconds
+        ):
+            return
+        self._last_gate_logs[key] = now
+        self._last_gate_signatures[key] = signature
+        _LOGGER.info(message, *message_args)
 
     def _record_head_lifecycle(self, move: EggMove) -> None:
         if move.role not in {OrderRole.HEAD, OrderRole.TAIL} or move.reply is None:
@@ -2358,6 +2520,46 @@ def _fmt_compact_price(value: float | Decimal | None) -> str:
     as_float = float(value)
     decimals = 2 if abs(as_float) >= 1 else 4
     return f"{as_float:.{decimals}f}"
+
+
+def _head_gate_unit(pair_state: PairCycleState) -> str:
+    pair = pair_state.pair
+    price_type = (pair.head_price_type or "").lower()
+    amount_type = pair.amount_type.lower()
+    if "pa" in price_type or "pa" in amount_type:
+        return "pA"
+    if "p%" in price_type or "p%" in amount_type:
+        return "p%"
+    return "pD"
+
+
+def _head_gate_measure(
+    pair_state: PairCycleState,
+    current: Decimal,
+) -> Decimal | None:
+    unit = _head_gate_unit(pair_state)
+    if unit == "pA":
+        return current
+    baseline = pair_state.head_trigger_reference_price
+    if baseline is None or baseline <= 0:
+        return None
+    if unit == "p%":
+        return (current - baseline) * Decimal("100") / baseline
+    return current - baseline
+
+
+def _head_gate_status(
+    measurement: Decimal | None,
+    low: Decimal,
+    high: Decimal,
+) -> str:
+    if measurement is None:
+        return "awaiting_baseline"
+    if measurement < low:
+        return "below"
+    if measurement > high:
+        return "above"
+    return "ready"
 
 
 def _event_atom(value: object) -> str:

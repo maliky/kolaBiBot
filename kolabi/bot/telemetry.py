@@ -20,5 +20,7 @@ class TailTelemetryRow:
     stop_price: float
     initial_distance: float
     current_distance: float
+    spread_guard: float
+    unblock_requirement: float
     last_tail_update_at: datetime | None
     recorded_at: datetime

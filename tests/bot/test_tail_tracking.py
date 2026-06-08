@@ -53,6 +53,32 @@ def test_sell_tail_first_unblock_requires_twice_initial_distance() -> None:
     assert unblocked.last_amended_at is not None
 
 
+def test_sell_tail_first_unblock_adds_max_observed_spread() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(side=Side.BUY, tail=1.0, tail_type="tD")
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+
+    blocked = step_tail_trail(
+        pair,
+        trail,
+        Decimal("101.5"),
+        now + timedelta(seconds=7),
+        spread=Decimal("1"),
+    )
+    unblocked = step_tail_trail(
+        pair,
+        blocked,
+        Decimal("102.1"),
+        now + timedelta(seconds=14),
+        spread=Decimal("0.25"),
+    )
+
+    assert blocked.current_stop_price == trail.current_stop_price
+    assert blocked.max_observed_spread == Decimal("1")
+    assert unblocked.current_stop_price > trail.current_stop_price
+    assert unblocked.max_observed_spread == Decimal("1")
+
+
 def test_sell_tail_respects_six_second_update_gate() -> None:
     now = datetime.now(timezone.utc)
     pair = sample_pair(side=Side.BUY)
@@ -110,6 +136,32 @@ def test_buy_tail_first_unblock_requires_twice_initial_distance() -> None:
     assert blocked.current_stop_price == trail.current_stop_price
     assert unblocked.current_stop_price < trail.current_stop_price
     assert unblocked.last_amended_at is not None
+
+
+def test_buy_tail_first_unblock_adds_max_observed_spread() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(side=Side.SELL, tail=1.0, tail_type="tD")
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+
+    blocked = step_tail_trail(
+        pair,
+        trail,
+        Decimal("98.5"),
+        now + timedelta(seconds=7),
+        spread=Decimal("1"),
+    )
+    unblocked = step_tail_trail(
+        pair,
+        blocked,
+        Decimal("97.9"),
+        now + timedelta(seconds=14),
+        spread=Decimal("0.25"),
+    )
+
+    assert blocked.current_stop_price == trail.current_stop_price
+    assert blocked.max_observed_spread == Decimal("1")
+    assert unblocked.current_stop_price < trail.current_stop_price
+    assert unblocked.max_observed_spread == Decimal("1")
 
 
 def test_buy_tail_respects_six_second_update_gate() -> None:

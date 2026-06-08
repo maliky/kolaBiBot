@@ -254,6 +254,7 @@ class ConfirmedOrder:
 class TailTrailSample:
     occurred_at: datetime
     reference_price: Decimal
+    spread: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -269,6 +270,7 @@ class TailTrailState:
     last_amended_at: datetime | None = None
     last_stop_update_at: datetime | None = None
     last_confirmed_at: datetime | None = None
+    max_observed_spread: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -304,6 +306,7 @@ class PairCycleState:
     last_emitted_command_ts: datetime | None = None
     attempt_index: int = 1
     completed_at: datetime | None = None
+    instrument_tick_size: Decimal | None = None
 
     @property
     def head_client_order_id(self) -> str | None:

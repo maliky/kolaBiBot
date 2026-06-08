@@ -677,6 +677,18 @@ python -m kolabi.bot run --strategy orders/xbt_bk.tsv --exchange kraken --symbol
 python -m kolabi.bot run --strategy orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
 #+end_src
 
+*** Capturing run logs
+
+- Bot strategy commands write to the terminal by default; there is no automatic strategy log file for =python -m kolabi.bot run= or =python -m kolabi.bot run-once=.
+- To keep a live copy while still seeing the output, redirect stderr to stdout and pipe through =tee=:
+
+#+begin_src bash
+python -m kolabi.bot run --strategy orders/stra.tsv --exchange kraken --symbol PI_XBTUSD --environment demo 2>&1 | tee logs/stra.log
+#+end_src
+
+- Replace =logs/stra.log= with the strategy-specific file you want, for example =logs/bmm_ada.log=.
+- Default background DB feeder logs are created by =scripts/kolabidb= under =./logs/kolabidb-*.log=; inspect them with =scripts/kolabidb public logs=, =scripts/kolabidb private logs=, or =scripts/kolabidb postgres logs=.
+
 ** bot run-once
 #+BEGIN_SRC bash :results output
   python -m kolabi.bot run-once --help

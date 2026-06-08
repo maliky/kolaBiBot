@@ -97,7 +97,7 @@ def step_pair(
         reply = move.reply or {}
         source = reply.get("reference_source")
         return replace(
-            state,
+            state_with_market_metadata(state, move),
             head_trigger_reference_price=reference_price,
             head_trigger_reference_source=(
                 str(source) if isinstance(source, str) and source else None
@@ -109,7 +109,7 @@ def step_pair(
         if state.head_state != HeadState.LATENT:
             return state, ()
         next_state = replace(
-            state,
+            state_with_market_metadata(state, move),
             head_state=HeadState.HOOKED,
             head_trigger_reference_at=move.occurred_at,
             head_order_price=_decimal_from_move(move, "head_order_price"),
@@ -143,9 +143,10 @@ def step_pair(
             reference_price,
             move.occurred_at,
             tick_size=tick_size_from_move(move),
+            spread=spread_from_move(move),
             symbol=move.symbol,
         )
-        next_state = replace(state, tail_trail=next_trail)
+        next_state = replace(state_with_market_metadata(state, move), tail_trail=next_trail)
         if (
             next_trail.current_stop_price != state.tail_trail.current_stop_price
             and _has_full_tail_identity(next_state)
@@ -372,6 +373,25 @@ def tick_size_from_move(move: EggMove) -> Decimal | None:
             if tick > 0:
                 return tick
     return None
+
+
+def spread_from_move(move: EggMove) -> Decimal | None:
+    for payload in (move.reply, move.order):
+        if payload is None:
+            continue
+        value = payload.get("spread")
+        if isinstance(value, (int, float, Decimal, str)):
+            spread = to_decimal(value)
+            if spread >= 0:
+                return spread
+    return None
+
+
+def state_with_market_metadata(state: PairCycleState, move: EggMove) -> PairCycleState:
+    tick_size = tick_size_from_move(move)
+    if tick_size is None:
+        return state
+    return replace(state, instrument_tick_size=tick_size)
 
 
 def tail_trail_from_move(state: PairCycleState, move: EggMove):

@@ -94,11 +94,11 @@ def resolve_head_order_prices(
     if reference <= 0:
         return None, None
     if code.base_key == "L":
-        return decimal_to_float(_plain_limit_head_price(pair, reference)), None
+        return decimal_to_float(_plain_limit_head_price(pair, reference, market)), None
     if code.base_key == "S":
-        return None, decimal_to_float(_stop_head_price(pair, reference))
+        return None, decimal_to_float(_stop_head_price(pair, reference, market))
     if code.base_key in {"SL", "LT"}:
-        price = _trigger_limit_head_price(pair, reference)
+        price = _trigger_limit_head_price(pair, reference, market)
         return (
             None if price is None else decimal_to_float(price),
             decimal_to_float(reference),
@@ -115,38 +115,66 @@ def reference_price(side: Side, market: MarketLike) -> float:
     return market.best_ask or market.mid_price or 0.0
 
 
-def _plain_limit_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal:
-    if pair.head.delta is None:
-        return reference
-    distance = _head_delta_distance(pair, reference)
+def _plain_limit_head_price(
+    pair: OrderPairSpec,
+    reference: Decimal,
+    market: MarketLike,
+) -> Decimal:
+    distance = _head_delta_distance(pair, reference, market)
     if pair.head.side == Side.BUY:
         return reference - distance
     return reference + distance
 
 
-def _stop_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal:
-    if pair.head.delta is None:
-        return reference
-    distance = _head_delta_distance(pair, reference)
+def _stop_head_price(
+    pair: OrderPairSpec,
+    reference: Decimal,
+    market: MarketLike,
+) -> Decimal:
+    distance = _head_delta_distance(pair, reference, market)
     if pair.head.side == Side.BUY:
         return reference + distance
     return reference - distance
 
 
-def _trigger_limit_head_price(pair: OrderPairSpec, reference: Decimal) -> Decimal | None:
-    if pair.head.delta is None:
-        return None
-    distance = _head_delta_distance(pair, reference)
+def _trigger_limit_head_price(
+    pair: OrderPairSpec,
+    reference: Decimal,
+    market: MarketLike,
+) -> Decimal | None:
+    distance = _head_delta_distance(pair, reference, market)
     if pair.head.side == Side.BUY:
         return reference + distance
     return reference - distance
 
 
-def _head_delta_distance(pair: OrderPairSpec, reference: Decimal) -> Decimal:
+def _head_delta_distance(
+    pair: OrderPairSpec,
+    reference: Decimal,
+    market: MarketLike,
+) -> Decimal:
+    if pair.head.delta is None:
+        tick = _tick_size_from_market(market)
+        if tick is None:
+            raise ValueError(
+                f"Order pair '{pair.name}' needs an instrument tick size to materialise "
+                "blank head oDelta"
+            )
+        return tick
     delta = abs(to_decimal(pair.head.delta or 0))
     if pair.head.delta_type.lower() == "o%":
         return reference * delta / Decimal("100")
     return delta
+
+
+def _tick_size_from_market(market: MarketLike) -> Decimal | None:
+    value = getattr(market_as_any(market), "tick_size", None)
+    if value is None:
+        return None
+    tick = to_decimal(value)
+    if tick <= 0:
+        return None
+    return tick
 
 
 def executable_head_reference_price(

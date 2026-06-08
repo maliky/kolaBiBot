@@ -59,6 +59,8 @@ def test_tail_telemetry_recorder_prunes_history_by_limit(tmp_path) -> None:
                 stop_price=1.5,
                 initial_distance=0.5,
                 current_distance=0.5,
+                spread_guard=0.0,
+                unblock_requirement=1.0,
                 last_tail_update_at=None,
                 recorded_at=datetime.now(timezone.utc),
             ),
