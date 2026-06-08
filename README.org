@@ -1,9 +1,6 @@
 Kolabi Bot
-==========
 
 * Presentation
-------------
-
 Kolabi is a typed, DB-grounded, async order-pair bot for derivatives/perpetual markets. The active production path is the TSV strategy runtime in =kolabi.bot=, backed by public market-data feeders and private account/order feeders in =kolabi.tree=. Kraken Futures is the primary live path. Binance USD-M Futures support is present in the shared adapter/feed layer and is being brought up behind the same DB-grounded architecture.
 
 The core strategy unit is an order pair:
@@ -11,14 +8,7 @@ The core strategy unit is an order pair:
 - a =tail= order protects or closes the position;
 - the pair can repeat, wait, update its tail, or activate another pair through a hook.
 
-The runtime deliberately separates concerns:
-- pure typed state transitions live in the reducer and pair-cycle functions;
-- Chronos/StrategyRuntime orchestrates event flow and command deduplication;
-- Ogun executes exchange commands through an adapter boundary;
-- public/private DB rows are the platform-grounded evidence used by the bot.
-
 * Supported Platforms
--------------------
 
 - =kraken= is the current primary platform for demo and live Kraken Futures.
 - =binance= has adapter and feed support for USD-M Futures, but should be treated as a bring-up path until its full operational runbook is validated.
@@ -27,7 +17,6 @@ The runtime deliberately separates concerns:
 The bot invocation runs one platform at a time. TSV rows may carry platform-specific symbols directly; no canonical symbol mapping table is used.
 
 * Strategy Conditions
--------------------
 
 Each pair can be gated by:
 - an entry window, =tps_run=, in minutes from launch;
@@ -44,7 +33,6 @@ Important runtime semantics:
 - Tail updates are no-widen by design: the pure reducer should not emit a tail amend that worsens the protected stop.
 
 * Price, Quantity, And Tail Units
--------------------------------
 
 The compatibility vocabulary is encoded in =atype=:
 - =pD= means the head price interval is differential from the reference price.
@@ -60,7 +48,6 @@ The compatibility vocabulary is encoded in =atype=:
 The =prix= field is a two-bound interval, not a single price. Use semi-open operator style in TSV files when appropriate, for example =- -5= or =5 +=, so the parser can translate the condition into a bounded internal interval.
 
 * TSV Strategy Files
-------------------
 
 Strategy files live under =orders/=.
 
@@ -70,7 +57,7 @@ The active TSV grammar is:
 name  tps_run  essais  tOut  pause  side  oType  oDelta  tType  tDelta  atype  quantity  tp  prix  hook  symbol
 #+end_example
 
-The final =symbol= column is optional. When omitted, the CLI =--symbol= is used. When present, the row uses the platform-specific instrument directly, for example =PI_XBTUSD= or =PI_ADAUSD=. A multi-instrument TSV run requires one shared market DB URL and public feeders for every active symbol.
+The final =symbol= column is optional. When omitted, the CLI =--symbol= is used. When present, the row uses the platform-specific instrument directly, for example =PI_XBTUSD= or =PF_ADAUSD=. A multi-instrument TSV run requires one shared market DB URL and public feeders for every active symbol.
 
 Useful examples:
 - =orders/demo_ada.tsv= documents compact grammar examples.
@@ -80,7 +67,6 @@ Useful examples:
 - =orders/pi_xbtusd_sell_plus1_tail_0p5.tsv= is a one-row tail example.
 
 * DB And Feed Services
---------------------
 
 The runtime expects fresh DB-backed evidence before active execution:
 - public market snapshots from =kolabi.tree.kraken= or =kolabi.tree.binance=;
@@ -108,67 +94,44 @@ scripts/kolabidb private logs --environment demo --account-scope default
 #+end_src
 
 * Operator Commands
------------------
 
-List instruments and find exact symbols:
 
-#+begin_src bash
-python -m kolabi.bargain.cli --exchange kraken --environment demo instruments --contains ADA
-python -m kolabi.bargain.cli --exchange kraken --environment live instruments --contains ADA
-#+end_src
-
-Validate a selected symbol:
 
 #+begin_src bash
-python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_ADAUSD check-symbol
-#+end_src
+  # List instruments and find exact symbols:  
+  python -m kolabi.bargain.cli --exchange kraken --environment live instruments --contains ADA
 
-Read account state:
+  # Validate a selected symbol:
+  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_ADAUSD check-symbol
 
-#+begin_src bash
-python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD balance
-python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD position
-python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD open-orders
-python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD trigger-orders
-#+end_src
+  # Read account state:
+  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD balance
+  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD position
+  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD open-orders
+  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD trigger-orders
 
-Emergency cleanup:
-
-#+begin_src bash
-python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD close-all
+  # Emergency cleanup:
+  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD close-all
 #+end_src
 
 * Running The Bot
----------------
-
-Dry-run a TSV strategy:
-
 #+begin_src bash
-python -m kolabi.bot run --strategy orders/demo_ada.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
-#+end_src
+  # Dry-run a TSV strategy:
+  python -m kolabi.bot run --strategy orders/demo_ada.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
 
-Run a TSV strategy through the async runtime:
+  # Run a TSV strategy through the async runtime:
+  python -m kolabi.bot run --strategy orders/rep_xbt.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
 
-#+begin_src bash
-python -m kolabi.bot run --strategy orders/rep_xbt.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
-#+end_src
+  # Run one compatibility-vocabulary order pair:
+  python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run
 
-Run one compatibility-vocabulary order pair:
-
-#+begin_src bash
-python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run
-#+end_src
-
-Preflight runtime readiness:
-
-#+begin_src bash
-python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo
+  # Preflight runtime readiness:
+  python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo
 #+end_src
 
 Live/preprod should be launched only after a clean demo run, fresh public/private DB state, no unexpected open orders or positions, and an explicit dry-run of the exact strategy. Start live with small size, =--max-active-pairs 1=, =--rest-max-inflight 1=, and a non-zero =--rest-min-interval=.
 
 * Installation
-------------
 
 Use the repository Python environment declared by =.python-version=, then install the package and dependencies in editable mode:
 
@@ -190,7 +153,6 @@ KRAKEN_FUTURE_API_SECRET
 Use =--api-key-env= and =--api-secret-env= when selecting a non-default account.
 
 * Tests
------
 
 Start with focused active-path tests:
 
@@ -202,29 +164,23 @@ python -m ruff check kolabi tests
 Legacy tests and archived paths exist for behavioural reference, but the active regression surface is under =tests/bot=, =tests/tree=, =tests/exchanges=, and =tests/core=.
 
 * Disclaimer
-----------
 
 This is an educational and experimental trading system. It can submit real orders when run against a live platform. Review the code, use small size, keep exchange-side risk limits in place, and do not run unattended until the live preprod path has proven itself under your operating conditions.
 
-* File Index
-~~~~~~~~~~~~~~~~~~
-The active code base is now organised around =kolabi/=.
-
-* Vocabulary Translation
-----------------------
+* Vocabulary Translation                                           :noexport:
 Canonical runtime naming keeps literal typed names in code and uses metaphors
 as operator-facing aliases.
 
-| Literal role/type | Metaphor alias                     |
-|-------------------+------------------------------------|
-| =StrategySpec=    | =Dragon=                           |
-| =OrderPairSpec=   | =DragonPollen= / =DragonPheromone= |
-| =PairCycleState=  | =DragonEgg=                        |
-| =PairActor=       | =DragonFly=                        |
-| =Chronos=         | =Chronos=                          |
-| =RuntimeCommand=  | =OgunBang=                         |
-| =CommandAck=      | =OgunAck=                          |
-| =CommandExecutor= | =Ogun=                             |
+| Literal role/type | Metaphor alias |
+|-------------------+----------------|
+| =StrategySpec=    | =Dragon=       |
+| =OrderPairSpec=   | =DragonPhero=  |
+| =PairCycleState=  | =DragonEgg=    |
+| =PairActor=       | =DragonFly=    |
+| =Chronos=         | =Chronos=      |
+| =RuntimeCommand=  | =OgunBang=     |
+| =CommandAck=      | =OgunAck=      |
+| =CommandExecutor= | =Ogun=         |
 
 #+begin_example
 kolabi/
@@ -307,17 +263,8 @@ Read order for the core code:
 - Read =kolabi/bot/tsv/parser.py= if you want to map one TSV row to one normalized bot strategy.
 - Read =kolabi/bot/= for the active strategy runtime and =archives/runtime/= only for historical reference.
 
-* Bot CLI usage
--------------
-Run strategies stored in TSV files (e.g. =orders/demo_ada.tsv=) directly via:
-#+BEGIN_SRC bash  -i
-python -m kolabi.bot run --strategy orders/demo_ada.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
-
-python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 1 1 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run
-#+END_SRC
-
+* Misc
 ** Architecture diagrams
----------------------
 Generate UML diagrams of the kolabi package via the helper script:
 
 #+BEGIN_SRC bash  -i

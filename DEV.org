@@ -2,7 +2,7 @@
 #+OPTIONS: toc:2 num:nil
 
 * <2026-06-02 mar. 18:28> multip platefomr
--  v1 should target derivatives/perpetuals only.
+- v1 should target derivatives/perpetuals only.
 - every platform should have the same DB-grounded architecture from day one
 - For now we forget about coinbase and bitmex.  we only create the adapter for Binance
 - Platform-specific symbols be written directly in TSV files. We should not have canonical symbols a mapping table.  The reason is to be able to have one TSV table calling synbole for different plateform. In fact it is important that symbols for same instrument do not colide.
