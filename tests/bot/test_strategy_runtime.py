@@ -41,6 +41,7 @@ from kolabi.shared.core.runtime_types import (
     AmendOrderCommandRequest,
     AmendTailCommand,
     CancelCommand,
+    CancelOrderCommandRequest,
     DragonSong,
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
@@ -670,6 +671,95 @@ def test_head_timeout_notfound_without_cumqty_does_not_terminate_head(
     assert "HEAD_CANCELLED (pair-a#1):" not in caplog.text
 
 
+def test_stale_head_timeout_cancel_ack_does_not_fail_new_attempt(caplog) -> None:
+    pair = sample_strategy()[0]
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="head-timeout-stale", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.NEW,
+                head_identity=OrderIdentity(
+                    pair_name="pair-a",
+                    role="head",
+                    client_order_id="CID-H2",
+                    exchange_order_id="OID-H2",
+                ),
+                attempt_index=2,
+            )
+        },
+    )
+    runtime.chronos.state = runtime.state
+    command = CancelCommand(
+        kind=RuntimeCommandKind.CANCEL,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=CancelOrderCommandRequest(
+            pair_name="pair-a",
+            clOrdID="OID-H1",
+        ),
+        reason="head_timeout",
+    )
+
+    with caplog.at_level("INFO", logger="kola"):
+        followups = runtime._followup_events(
+            command,
+            OrderAck(order_id="OID-H1", status="Canceled", executed_qty=0.0),
+            slot=_CommandSlot(pair_name="pair-a", attempt_index=1, role="cancel"),
+        )
+
+    assert followups == ()
+    assert runtime.state.pairs["pair-a"].head_state == HeadState.NEW
+    assert "HEAD_CANCEL_ACK_STALE (pair-a#1): current_attempt=2" in caplog.text
+
+
+def test_old_live_head_identity_is_pruned_after_repeat_resets_to_latent() -> None:
+    pair = sample_strategy()[0]
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="old-identity", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    runtime._live_command_identities["old-head"] = OrderIdentity(
+        pair_name="pair-a",
+        role="head",
+        client_order_id="CID-H1",
+        exchange_order_id="OID-H1",
+        symbol="PI_XBTUSD",
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": PairCycleState(
+                pair=pair,
+                head_state=HeadState.LATENT,
+                attempt_index=2,
+            )
+        },
+    )
+    runtime.chronos.state = runtime.state
+
+    runtime._prune_live_command_identities()
+
+    assert runtime._live_command_identities == {}
+    assert (
+        runtime.pair_state_for_record(
+            PrivateOrderRecord(
+                symbol="PI_XBTUSD",
+                status="canceled",
+                exchange_order_id="OID-H1",
+                client_order_id="CID-H1",
+            )
+        )
+        is None
+    )
+
+
 def test_entry_window_does_not_cancel_started_head_before_timeout(tmp_path) -> None:
     db = _PrivateDbHarness(tmp_path)
     executor = _RecordingLiveExecutor()
@@ -697,6 +787,196 @@ def test_entry_window_does_not_cancel_started_head_before_timeout(tmp_path) -> N
     assert any(isinstance(command, PlaceHeadCommand) for command in result.commands)
     assert not any(isinstance(command, CancelCommand) for command in result.commands)
     assert result.state.pairs["pair-a"].head_state == HeadState.NEW
+
+
+def test_price_gated_latent_head_times_out_without_platform_cancel(caplog) -> None:
+    class Market:
+        best_bid = 99.5
+        best_ask = 100.0
+        mid_price = 99.75
+        last_price = None
+        mark_price = None
+        index_price = None
+        tick_size = 0.5
+        recorded_at = "latent-low"
+
+    class Reader:
+        def fetch_market_state(self, symbol=None):
+            return Market()
+
+    pair = replace(
+        sample_strategy()[0],
+        timeout=0.001,
+        head_price=(200.0, 201.0),
+        head_price_type="pA",
+    )
+    reader = Reader()
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="latent-timeout", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        executor=_RecordingLiveExecutor(),
+        public_source=KrakenPublicTriggerSource(reader, poll_seconds=0.01),
+        public_state_reader=reader,
+        simulate=False,
+    )
+
+    with caplog.at_level("INFO", logger="kola"):
+        result = asyncio.run(_run_runtime_for(runtime, seconds=0.35))
+
+    assert result.state.pairs["pair-a"].head_state == HeadState.FAILED
+    assert not any(isinstance(command, PlaceHeadCommand) for command in result.commands)
+    assert not any(isinstance(command, CancelCommand) for command in result.commands)
+    assert "LATENT_TIMEOUT_ARMED (pair-a#1):" in caplog.text
+    assert "LATENT_TIMEOUT (pair-a#1):" in caplog.text
+    assert "HEAD_CANCEL_SENT" not in caplog.text
+
+
+def test_latent_timeout_repeats_with_fresh_relative_price_baseline(caplog) -> None:
+    pair = replace(
+        sample_strategy()[0],
+        timeout=0.003,
+        try_num=2,
+        dr_pause=0.0,
+        head=HeadSpec(side=Side.SELL, order_type="M"),
+        head_price=(5.0, 50.0),
+        head_price_type="pD",
+        amount_type="qAtDpD",
+    )
+
+    class Market:
+        best_ask = 210.0
+        mid_price = 200.0
+        last_price = None
+        mark_price = None
+        index_price = None
+        tick_size = 0.5
+
+        def __init__(self, best_bid: float, recorded_at: str) -> None:
+            self.best_bid = best_bid
+            self.recorded_at = recorded_at
+
+    class Reader:
+        runtime: StrategyRuntime | None = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def fetch_market_state(self, symbol=None):
+            self.calls += 1
+            assert self.runtime is not None
+            pair_state = self.runtime.state.pairs["pair-a"]
+            if pair_state.attempt_index == 1:
+                if pair_state.head_trigger_reference_price is None:
+                    return Market(100.0, f"attempt-1-baseline-{self.calls}")
+                return Market(104.0, f"attempt-1-wait-{self.calls}")
+            if pair_state.head_trigger_reference_price is None:
+                return Market(200.0, f"attempt-2-baseline-{self.calls}")
+            return Market(205.0, f"attempt-2-ready-{self.calls}")
+
+    reader = Reader()
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="latent-repeat", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        public_source=KrakenPublicTriggerSource(reader, poll_seconds=0.01),
+        public_state_reader=reader,
+        simulate=False,
+    )
+    reader.runtime = runtime
+
+    with caplog.at_level("INFO", logger="kola"):
+        result = asyncio.run(_run_runtime_for(runtime, seconds=0.8))
+
+    pair_state = result.state.pairs["pair-a"]
+    assert pair_state.attempt_index == 2
+    assert pair_state.head_state == HeadState.HOOKED
+    assert pair_state.head_trigger_reference_price == Decimal("200.0")
+    assert any(isinstance(command, PlaceHeadCommand) for command in result.commands)
+    assert not any(isinstance(command, CancelCommand) for command in result.commands)
+    assert "LATENT_TIMEOUT (pair-a#1):" in caplog.text
+    assert "LATENT_TIMEOUT_ARMED (pair-a#2):" in caplog.text
+
+
+def test_chained_latent_head_timeout_waits_for_dependency_before_clock_starts() -> None:
+    origin = replace(sample_strategy()[0], name="origin", timeout=None)
+    chained = replace(
+        sample_strategy()[0],
+        name="chained",
+        hook_name="origin",
+        timeout=0.001,
+    )
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="latent-chain", pairs=(origin, chained)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+    first_check = runtime.state.launched_at + timedelta(seconds=1)
+
+    runtime._check_latent_head_deadlines(first_check)
+
+    assert ("chained", 1) not in runtime._latent_head_deadlines
+
+    chained_ready = replace(
+        runtime.state.pairs["chained"],
+        dependency_token=ChainDependencyToken(
+            origin_pair_name="origin",
+            origin_attempt_index=1,
+            closed_at=first_check,
+        ),
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={**runtime.state.pairs, "chained": chained_ready},
+    )
+    runtime.chronos.state = runtime.state
+    dependency_ready_at = first_check + timedelta(minutes=10)
+
+    runtime._check_latent_head_deadlines(dependency_ready_at)
+
+    deadline = runtime._latent_head_deadlines[("chained", 1)]
+    assert deadline.started_at == dependency_ready_at
+    assert deadline.deadline_at == dependency_ready_at + timedelta(minutes=0.001)
+    assert runtime.event_queue.empty()
+
+
+def test_gate_wait_logs_unchanged_status_every_five_minutes(caplog) -> None:
+    class Market:
+        best_bid = 99.5
+        best_ask = 100.0
+        mid_price = 99.75
+        last_price = None
+        mark_price = None
+        index_price = None
+        tick_size = 0.5
+        recorded_at = "gate-low"
+
+    class Reader:
+        def fetch_market_state(self, symbol=None):
+            return Market()
+
+    pair = replace(
+        sample_strategy()[0],
+        head_price=(200.0, 201.0),
+        head_price_type="pA",
+    )
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="gate-log", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        public_state_reader=Reader(),
+        simulate=False,
+    )
+    now = runtime.state.launched_at + timedelta(seconds=1)
+
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._log_gate_waits(now)
+        runtime._log_gate_waits(now + timedelta(seconds=299))
+        runtime._log_gate_waits(now + timedelta(seconds=300))
+
+    gate_waits = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("GATE_WAIT (pair-a#1):")
+    ]
+    assert len(gate_waits) == 2
 
 
 def test_runtime_dispatches_different_pairs_concurrently() -> None:

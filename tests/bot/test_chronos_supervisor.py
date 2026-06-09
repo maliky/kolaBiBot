@@ -494,6 +494,48 @@ def test_chronos_repeats_terminal_pair_with_fresh_attempt_key() -> None:
     assert chronos.state.pairs["pair-r"].head_trigger_reference_price is None
 
 
+def test_chronos_repeats_not_played_canceled_head_with_fresh_attempt_key() -> None:
+    pair = replace(
+        sample_pair("pair-r"),
+        try_num=2,
+        head_price=(5.0, 50.0),
+        head_price_type="pD",
+        amount_type="qAtDpD",
+    )
+    state = StrategyState(
+        launched_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
+        strategy_id="strategy-latent-repeat",
+        pairs={
+            "pair-r": PairCycleState(
+                pair=pair,
+                head_state=HeadState.LATENT,
+                head_trigger_reference_price=Decimal("100"),
+                head_trigger_reference_source="bid",
+                head_trigger_reference_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
+                attempt_index=1,
+            ),
+        },
+    )
+    chronos = Chronos(state=state)
+    move = EggMove(
+        kind=EggMoveKind.NOT_PLAYED_CANCELED,
+        occurred_at=datetime(2026, 5, 21, 12, 1, tzinfo=timezone.utc),
+        symbol="PI_XBTUSD",
+        pair_name="pair-r",
+        role=None,
+        event_id="latent-timeout:pair-r:1",
+        reply={"cumQty": 0.0, "execType": "latent_timeout"},
+    )
+
+    commands = chronos.process_event(move, now=move.occurred_at)
+
+    assert commands == ()
+    repeated = chronos.state.pairs["pair-r"]
+    assert repeated.attempt_index == 2
+    assert repeated.head_state == HeadState.LATENT
+    assert repeated.head_trigger_reference_price is None
+
+
 def test_chronos_delays_repeat_until_pause_has_elapsed() -> None:
     pair = replace(sample_pair("pair-r"), try_num=2, dr_pause=1.0)
     state = StrategyState(

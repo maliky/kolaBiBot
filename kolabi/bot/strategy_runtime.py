@@ -226,6 +226,14 @@ class _HeadFillDeadline:
 
 
 @dataclass(frozen=True)
+class _LatentHeadDeadline:
+    pair_name: str
+    attempt_index: int
+    started_at: datetime
+    deadline_at: datetime
+
+
+@dataclass(frozen=True)
 class StrategyRunResult:
     state: StrategyState
     commands: tuple[DragonSong, ...]
@@ -679,11 +687,12 @@ class StrategyRuntime:
         self._tail_order_lifecycle: dict[str, _OrderLifecycleSnapshot] = {}
         self._live_command_identities: dict[str, OrderIdentity] = {}
         self._head_fill_deadlines: dict[_CommandSlot, _HeadFillDeadline] = {}
+        self._latent_head_deadlines: dict[tuple[str, int], _LatentHeadDeadline] = {}
         self._pending_tail_visibility: dict[_CommandSlot, _TailVisibilityWindow] = {}
         self._pending_tail_amends: dict[_CommandSlot, _TailAmendPending] = {}
         self._last_gate_logs: dict[str, datetime] = {}
         self._last_gate_signatures: dict[str, tuple[str, ...]] = {}
-        self._gate_log_interval_seconds = 30.0
+        self._gate_log_interval_seconds = 300.0
 
     def _pair_state(self, pair):
         from kolabi.bot.domain import PairCycleState
@@ -748,6 +757,7 @@ class StrategyRuntime:
         self._pending_commands.clear()
         self._pending_head_commands.clear()
         self._head_fill_deadlines.clear()
+        self._latent_head_deadlines.clear()
         self._pending_tail_visibility.clear()
         self._pending_tail_amends.clear()
 
@@ -762,6 +772,7 @@ class StrategyRuntime:
                 if self._command_errors:
                     raise self._command_errors[0]
                 self._prune_live_command_identities()
+                self._check_latent_head_deadlines(current_time)
                 self._check_head_fill_deadlines(current_time)
                 self._check_tail_visibility_deadlines(current_time)
                 self._check_tail_amend_deadlines(current_time)
@@ -774,6 +785,7 @@ class StrategyRuntime:
                     previous_pairs = dict(self.state.pairs)
                     previous_state = self.state
                     self.state = self.chronos.state
+                    self._prune_latent_head_deadlines()
                     self._log_repeat_attempts(previous_state.pairs)
                 if repeat_commands:
                     self._log_repeat_start(repeat_commands)
@@ -786,6 +798,7 @@ class StrategyRuntime:
                     and not self._inflight_commands
                     and not self._pending_commands
                     and not self._pending_head_commands
+                    and not self._latent_head_deadlines
                     and not self.chronos.pending_repeats
                 ):
                     break
@@ -793,11 +806,14 @@ class StrategyRuntime:
                     event = await asyncio.wait_for(self.event_queue.get(), timeout=0.2)
                 except TimeoutError:
                     continue
+                if self._should_ignore_stale_runtime_cancel(event):
+                    continue
                 previous_pairs = dict(self.state.pairs)
                 previous_repeats = dict(self.chronos.pending_repeats)
                 self._record_head_lifecycle(event)
                 commands = self.chronos.process_event(event)
                 self.state = self.chronos.state
+                self._prune_latent_head_deadlines()
                 self._sync_head_fill_deadline(event)
                 self._log_new_pending_repeats(previous_repeats)
                 self._log_chain_releases(previous_pairs)
@@ -850,10 +866,14 @@ class StrategyRuntime:
         self._on_command_dispatched(slot, prepared, identity)
         self._inflight_commands[slot] = _InFlightCommand(
             command=prepared,
-            task=asyncio.create_task(self._execute_and_enqueue(prepared)),
+            task=asyncio.create_task(self._execute_and_enqueue(prepared, slot)),
         )
 
-    async def _execute_and_enqueue(self, prepared: DragonSong) -> None:
+    async def _execute_and_enqueue(
+        self,
+        prepared: DragonSong,
+        slot: _CommandSlot,
+    ) -> None:
         if self.executor is None:
             return
         try:
@@ -888,7 +908,7 @@ class StrategyRuntime:
             await self.enqueue(failure)
             return
         self._record_live_ack(prepared, ack)
-        for followup in self._followup_events(prepared, ack):
+        for followup in self._followup_events(prepared, ack, slot=slot):
             await self.enqueue(followup)
 
     def _reap_command_tasks(self) -> None:
@@ -1520,6 +1540,9 @@ class StrategyRuntime:
                 if _identity_confirmed(identity, pair_state.head_identity):
                     stale.append(key)
                     continue
+                if pair_state.head_state == HeadState.LATENT and pair_state.head_identity is None:
+                    stale.append(key)
+                    continue
                 if pair_state.head_state in {HeadState.CLOSED, HeadState.FAILED}:
                     stale.append(key)
                     continue
@@ -1706,6 +1729,128 @@ class StrategyRuntime:
             started_at=now,
             deadline_at=now + timedelta(seconds=self.tail_visibility_timeout_seconds),
         )
+
+    def _check_latent_head_deadlines(self, now: datetime) -> None:
+        now = _as_utc_aware(now)
+        stale_keys: list[tuple[str, int]] = []
+        expired_keys: set[tuple[str, int]] = set()
+        for key, deadline in tuple(self._latent_head_deadlines.items()):
+            pair_state = self.state.pairs.get(deadline.pair_name)
+            if not self._latent_head_deadline_still_applies(pair_state, deadline):
+                stale_keys.append(key)
+                continue
+            if now < deadline.deadline_at:
+                continue
+            _LOGGER.warning(
+                "LATENT_TIMEOUT (%s#%s): waited=%ss reason=price_gate",
+                deadline.pair_name,
+                deadline.attempt_index,
+                f"{(now - deadline.started_at).total_seconds():.1f}",
+            )
+            self.event_queue.put_nowait(
+                _latent_head_timeout_event(
+                    deadline,
+                    symbol=_pair_symbol(cast(PairCycleState, pair_state), self.symbol),
+                    occurred_at=now,
+                )
+            )
+            stale_keys.append(key)
+            expired_keys.add(key)
+
+        for key in stale_keys:
+            self._latent_head_deadlines.pop(key, None)
+
+        for pair_name, pair_state in self.state.pairs.items():
+            key = (pair_name, pair_state.attempt_index)
+            if key in self._latent_head_deadlines or key in expired_keys:
+                continue
+            if not self._latent_head_timeout_can_arm(pair_state, now):
+                continue
+            timeout_minutes = cast(float, pair_state.pair.timeout_minutes)
+            deadline = _LatentHeadDeadline(
+                pair_name=pair_name,
+                attempt_index=pair_state.attempt_index,
+                started_at=now,
+                deadline_at=now + timedelta(minutes=float(timeout_minutes)),
+            )
+            self._latent_head_deadlines[key] = deadline
+            _LOGGER.info(
+                "LATENT_TIMEOUT_ARMED (%s#%s): deadline=%s",
+                pair_name,
+                pair_state.attempt_index,
+                deadline.deadline_at.isoformat(),
+            )
+
+    def _latent_head_timeout_can_arm(
+        self,
+        pair_state: PairCycleState,
+        now: datetime,
+    ) -> bool:
+        if pair_state.head_state != HeadState.LATENT:
+            return False
+        if pair_state.head_identity is not None:
+            return False
+        timeout_minutes = pair_state.pair.timeout_minutes
+        if timeout_minutes is None or timeout_minutes <= 0:
+            return False
+        if not pair_window_is_open(
+            pair_state.pair,
+            launched_at=self.state.launched_at,
+            now=now,
+        ):
+            return False
+        if not pair_dependency_satisfied(self.state, pair_state):
+            return False
+        return True
+
+    def _latent_head_deadline_still_applies(
+        self,
+        pair_state: PairCycleState | None,
+        deadline: _LatentHeadDeadline,
+    ) -> bool:
+        if pair_state is None:
+            return False
+        if pair_state.attempt_index != deadline.attempt_index:
+            return False
+        if pair_state.head_state != HeadState.LATENT:
+            return False
+        if pair_state.head_identity is not None:
+            return False
+        timeout_minutes = pair_state.pair.timeout_minutes
+        return timeout_minutes is not None and timeout_minutes > 0
+
+    def _prune_latent_head_deadlines(self) -> None:
+        stale_keys = [
+            key
+            for key, deadline in self._latent_head_deadlines.items()
+            if not self._latent_head_deadline_still_applies(
+                self.state.pairs.get(deadline.pair_name),
+                deadline,
+            )
+        ]
+        for key in stale_keys:
+            self._latent_head_deadlines.pop(key, None)
+
+    def _discard_latent_head_deadline(self, pair_name: str, attempt_index: int) -> None:
+        self._latent_head_deadlines.pop((pair_name, attempt_index), None)
+
+    def _should_ignore_stale_runtime_cancel(self, event: EggMove) -> bool:
+        is_latent_timeout = _is_latent_head_timeout_event(event)
+        is_head_timeout_cancel = _is_head_timeout_cancel_event(event)
+        if not (is_latent_timeout or is_head_timeout_cancel):
+            return False
+        pair_name = event.pair_name
+        if pair_name is None:
+            return True
+        pair_state = self.state.pairs.get(pair_name)
+        if pair_state is None:
+            return True
+        attempt_index = _runtime_cancel_attempt_index(event)
+        if attempt_index is not None and pair_state.attempt_index != attempt_index:
+            return True
+        if is_latent_timeout:
+            return pair_state.head_state != HeadState.LATENT
+        return pair_state.head_state not in {HeadState.NEW, HeadState.LIVING}
 
     def _sync_head_fill_deadline(self, move: EggMove) -> None:
         if move.role != OrderRole.HEAD:
@@ -1902,6 +2047,7 @@ class StrategyRuntime:
         if isinstance(command, PlaceHeadCommand):
             pair_state = self.state.pairs.get(command.pair_name)
             attempt_index = slot.attempt_index if pair_state is None else pair_state.attempt_index
+            self._discard_latent_head_deadline(command.pair_name, attempt_index)
             _LOGGER.info(
                 "HEAD_SENT (%s#%s): HCID=%s side=%s type=%s qty=%s price=%s stop=%s",
                 command.pair_name,
@@ -2027,7 +2173,13 @@ class StrategyRuntime:
                 sum(1 for item in commands if item.pair_name == key[0]),
             )
 
-    def _followup_events(self, command: DragonSong, ack: OrderAck) -> tuple[EggMove, ...]:
+    def _followup_events(
+        self,
+        command: DragonSong,
+        ack: OrderAck,
+        *,
+        slot: _CommandSlot | None = None,
+    ) -> tuple[EggMove, ...]:
         if isinstance(command, AmendTailCommand) and _ack_is_rejected(ack):
             return (
                 _tail_amend_event_from_ack(
@@ -2038,11 +2190,27 @@ class StrategyRuntime:
                 ),
             )
         if isinstance(command, CancelCommand) and command.reason == "head_timeout":
+            pair_state = self.state.pairs.get(command.pair_name)
+            expected_attempt = (
+                slot.attempt_index
+                if slot is not None
+                else 1 if pair_state is None else pair_state.attempt_index
+            )
+            if pair_state is None or pair_state.attempt_index != expected_attempt:
+                _LOGGER.info(
+                    "HEAD_CANCEL_ACK_STALE (%s#%s): current_attempt=%s CID=%s",
+                    command.pair_name,
+                    expected_attempt,
+                    "-" if pair_state is None else pair_state.attempt_index,
+                    command.request.clOrdID,
+                )
+                return ()
             timeout_cancel = _head_timeout_cancel_event_from_ack(
                 command,
                 ack,
                 symbol=str(command.symbol),
-                pair_state=self.state.pairs.get(command.pair_name),
+                pair_state=pair_state,
+                attempt_index=expected_attempt,
             )
             if timeout_cancel is not None:
                 return (timeout_cancel,)
@@ -2193,6 +2361,64 @@ def _head_timeout_cancel_command(
     )
 
 
+def _latent_head_timeout_event(
+    deadline: _LatentHeadDeadline,
+    *,
+    symbol: str,
+    occurred_at: datetime,
+) -> EggMove:
+    return EggMove(
+        kind=EggMoveKind.NOT_PLAYED_CANCELED,
+        occurred_at=occurred_at,
+        symbol=symbol,
+        pair_name=deadline.pair_name,
+        role=OrderRole.HEAD,
+        reply={
+            "ordStatus": "Canceled",
+            "execType": "latent_timeout",
+            "reason": "latent_timeout",
+            "cumQty": 0.0,
+            "attempt_index": deadline.attempt_index,
+        },
+        event_id=(
+            f"latent-timeout:{deadline.pair_name}:"
+            f"{deadline.attempt_index}:{deadline.deadline_at.isoformat()}"
+        ),
+        is_private=False,
+    )
+
+
+def _is_latent_head_timeout_event(event: EggMove) -> bool:
+    if event.kind != EggMoveKind.NOT_PLAYED_CANCELED or event.role != OrderRole.HEAD:
+        return False
+    if event.event_id is not None and event.event_id.startswith("latent-timeout:"):
+        return True
+    reply = event.reply or {}
+    return reply.get("execType") == "latent_timeout" or reply.get("reason") == "latent_timeout"
+
+
+def _is_head_timeout_cancel_event(event: EggMove) -> bool:
+    if event.kind != EggMoveKind.NOT_PLAYED_CANCELED or event.role != OrderRole.HEAD:
+        return False
+    if event.event_id is not None and event.event_id.startswith("head-timeout-cancel:"):
+        return True
+    reply = event.reply or {}
+    return reply.get("runtime_reason") == "head_timeout"
+
+
+def _runtime_cancel_attempt_index(event: EggMove) -> int | None:
+    reply = event.reply or {}
+    value = reply.get("attempt_index")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
 def _command_failure_event(
     command: DragonSong,
     *,
@@ -2293,6 +2519,7 @@ def _head_timeout_cancel_event_from_ack(
     *,
     symbol: str,
     pair_state: PairCycleState | None,
+    attempt_index: int,
 ) -> EggMove | None:
     if not _ack_is_zero_fill_cancel(ack):
         return None
@@ -2308,6 +2535,8 @@ def _head_timeout_cancel_event_from_ack(
     reply: dict[str, object] = {
         "ordStatus": "Canceled",
         "execType": "Canceled",
+        "runtime_reason": "head_timeout",
+        "attempt_index": attempt_index,
         "cumQty": 0.0,
     }
     if exchange_order_id:
@@ -2333,6 +2562,7 @@ def _head_timeout_cancel_event_from_ack(
         pair_name=command.pair_name,
         role=OrderRole.HEAD,
         reply=reply,
+        event_id=f"head-timeout-cancel:{command.pair_name}:{attempt_index}:{command.request.clOrdID}",
         is_private=False,
     )
 
