@@ -23,6 +23,7 @@ DEFAULT_MAX_SAMPLES = 40
 @dataclass(frozen=True)
 class TailTrailingConfig:
     update_interval_seconds: int = 6
+    first_unblock_delay_seconds: int = 50
     unblock_multiplier: Decimal = Decimal("2")
     response_denominator_multiplier: Decimal = Decimal("1.9")
     max_r: Decimal = Decimal("2")
@@ -161,7 +162,15 @@ def step_tail_trail(
         favorable = previous_ref is None or reference > previous_ref
         if d_raw <= 0 or not favorable:
             return next_state
-        if trail.last_amended_at is None and d_raw < max_lag:
+        next_state, first_unblock_ready = _first_unblock_ready(
+            trail,
+            next_state,
+            d_raw=d_raw,
+            max_lag=max_lag,
+            occurred_at=occurred_at,
+            config=config,
+        )
+        if not first_unblock_ready:
             return next_state
         r = _clamp_r(d_raw / (config.response_denominator_multiplier * d0), config.max_r)
         factor = curve.factor(float(r), max_factor=config.max_factor)
@@ -188,7 +197,15 @@ def step_tail_trail(
     favorable = previous_ref is None or reference < previous_ref
     if d_raw <= 0 or not favorable:
         return next_state
-    if trail.last_amended_at is None and d_raw < max_lag:
+    next_state, first_unblock_ready = _first_unblock_ready(
+        trail,
+        next_state,
+        d_raw=d_raw,
+        max_lag=max_lag,
+        occurred_at=occurred_at,
+        config=config,
+    )
+    if not first_unblock_ready:
         return next_state
     r = _clamp_r(d_raw / (config.response_denominator_multiplier * d0), config.max_r)
     factor = curve.factor(float(r), max_factor=config.max_factor)
@@ -210,6 +227,31 @@ def step_tail_trail(
         last_amended_at=occurred_at,
         last_stop_update_at=occurred_at,
     )
+
+
+def _first_unblock_ready(
+    trail: TailTrailState,
+    next_state: TailTrailState,
+    *,
+    d_raw: Decimal,
+    max_lag: Decimal,
+    occurred_at: datetime,
+    config: TailTrailingConfig,
+) -> tuple[TailTrailState, bool]:
+    if trail.last_amended_at is not None:
+        return next_state, True
+    if d_raw < max_lag:
+        return next_state, False
+
+    delay = timedelta(seconds=max(0, config.first_unblock_delay_seconds))
+    if trail.first_unblocked_at is None:
+        next_state = replace(next_state, first_unblocked_at=occurred_at)
+        return next_state, delay <= timedelta(0)
+
+    elapsed = occurred_at - _as_utc_aware(trail.first_unblocked_at)
+    if elapsed < delay:
+        return next_state, False
+    return next_state, True
 
 
 def _initial_stop_price(pair: OrderPairSpec, reference: Decimal) -> Decimal:

@@ -236,14 +236,25 @@ class _DbBackedOneLifecycleSource:
             lambda pair: pair.tail_state == TailState.LIVING,
         )
 
+        first_unblocked_at = datetime.now(timezone.utc)
         await runtime.enqueue(
             EggMove(
                 kind=EggMoveKind.MARKET_TICK,
-                occurred_at=datetime.now(timezone.utc),
+                occurred_at=first_unblocked_at,
+                symbol=runtime.symbol,
+                pair_name=pair_name,
+                event_id="test:market-tick-first-unblock",
+                reply={"reference_price": 103.0, "tick_size": 0.5},
+            )
+        )
+        await runtime.enqueue(
+            EggMove(
+                kind=EggMoveKind.MARKET_TICK,
+                occurred_at=first_unblocked_at + timedelta(seconds=50),
                 symbol=runtime.symbol,
                 pair_name=pair_name,
                 event_id="test:market-tick-amend",
-                reply={"reference_price": 103.0, "tick_size": 0.5},
+                reply={"reference_price": 103.5, "tick_size": 0.5},
             )
         )
         amend_command = await _wait_for_command(runtime, AmendTailCommand, pair_name)
@@ -2397,6 +2408,7 @@ def test_market_tick_reaches_horus_as_tail_amend_command() -> None:
     trail = replace(
         initial_tail_trail(pair, Decimal("100"), confirmed_at),
         confirmed_stop_price=Decimal("99.0"),
+        first_unblocked_at=confirmed_at - timedelta(seconds=50),
         last_confirmed_at=confirmed_at,
     )
     state = PairCycleState(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from kolabi.bot.domain import (
@@ -346,11 +346,12 @@ def test_percent_tail_place_uses_reference_price_not_raw_tail_spec() -> None:
     assert commands[0].request.stopPx == Decimal("98.500")
 
 
-def test_market_tick_with_tail_identity_emits_amend_only_on_improvement() -> None:
+def test_market_tick_with_tail_identity_waits_before_first_amend() -> None:
     played, _ = step_pair(
         submitted_state(),
         egg_move(EggMoveKind.PLAYED_NOT_CANCELED, played_quantity=2.0),
     )
+    first_unblocked_at = datetime.now(timezone.utc)
     identified = PairCycleState(
         pair=played.pair,
         head_state=played.head_state,
@@ -374,48 +375,77 @@ def test_market_tick_with_tail_identity_emits_amend_only_on_improvement() -> Non
         identified,
         EggMove(
             kind=EggMoveKind.MARKET_TICK,
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=first_unblocked_at,
             symbol="PI_XBTUSD",
             pair_name="pair-a",
             reply={"reference_price": 102.0},
         ),
     )
-    repeated, repeated_intents = step_pair(
+    amended, amended_intents = step_pair(
         moved,
         EggMove(
             kind=EggMoveKind.MARKET_TICK,
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=first_unblocked_at + timedelta(seconds=50),
             symbol="PI_XBTUSD",
             pair_name="pair-a",
-            reply={"reference_price": 102.0},
+            reply={"reference_price": 102.2},
+        ),
+    )
+    repeated, repeated_intents = step_pair(
+        amended,
+        EggMove(
+            kind=EggMoveKind.MARKET_TICK,
+            occurred_at=first_unblocked_at + timedelta(seconds=53),
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            reply={"reference_price": 102.3},
         ),
     )
 
     assert moved.tail_trail is not None
-    assert moved.tail_trail.current_stop_price > Decimal("100")
-    assert len(intents) == 1
-    assert intents[0].kind == PairIntentKind.AMEND_TAIL
-    assert repeated == moved or repeated.tail_trail is not None
+    assert moved.tail_trail.current_stop_price == Decimal("99.0")
+    assert moved.tail_trail.first_unblocked_at == first_unblocked_at
+    assert intents == ()
+    assert amended.tail_trail is not None
+    assert amended.tail_trail.current_stop_price > Decimal("100")
+    assert len(amended_intents) == 1
+    assert amended_intents[0].kind == PairIntentKind.AMEND_TAIL
+    assert repeated == amended or repeated.tail_trail is not None
     assert repeated_intents == ()
 
 
-def test_market_tick_before_tail_identity_updates_state_without_amend() -> None:
+def test_market_tick_before_tail_identity_waits_then_updates_state_without_amend() -> None:
     played, _ = step_pair(
         submitted_state(),
         egg_move(EggMoveKind.PLAYED_NOT_CANCELED, played_quantity=2.0),
     )
+    first_unblocked_at = datetime.now(timezone.utc)
 
-    moved, intents = step_pair(
+    waiting, waiting_intents = step_pair(
         played,
         EggMove(
             kind=EggMoveKind.MARKET_TICK,
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=first_unblocked_at,
             symbol="PI_XBTUSD",
             pair_name="pair-a",
             reply={"reference_price": 102.0},
         ),
     )
+    moved, intents = step_pair(
+        waiting,
+        EggMove(
+            kind=EggMoveKind.MARKET_TICK,
+            occurred_at=first_unblocked_at + timedelta(seconds=50),
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            reply={"reference_price": 102.2},
+        ),
+    )
 
+    assert waiting.tail_trail is not None
+    assert waiting.tail_trail.current_stop_price == Decimal("99.0")
+    assert waiting.tail_trail.first_unblocked_at == first_unblocked_at
+    assert waiting_intents == ()
     assert moved.tail_trail is not None
     assert moved.tail_trail.current_stop_price > Decimal("100")
     assert intents == ()
@@ -445,8 +475,13 @@ def test_closed_pair_ignores_later_market_tick() -> None:
 
 
 def test_closed_head_with_active_tail_still_trails_on_market_tick() -> None:
-    trail = initial_tail_trail(sample_pair(), Decimal("100"), datetime.now(timezone.utc))
-    trail = replace(trail, confirmed_stop_price=trail.current_stop_price)
+    first_unblocked_at = datetime.now(timezone.utc) - timedelta(seconds=50)
+    trail = initial_tail_trail(sample_pair(), Decimal("100"), first_unblocked_at)
+    trail = replace(
+        trail,
+        confirmed_stop_price=trail.current_stop_price,
+        first_unblocked_at=first_unblocked_at,
+    )
     closed = PairCycleState(
         pair=sample_pair(),
         head_state=HeadState.CLOSED,

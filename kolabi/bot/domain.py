@@ -269,6 +269,7 @@ class TailTrailState:
     last_reference_price: Decimal | None = None
     last_amended_at: datetime | None = None
     last_stop_update_at: datetime | None = None
+    first_unblocked_at: datetime | None = None
     last_confirmed_at: datetime | None = None
     max_observed_spread: Decimal = Decimal("0")
 
