@@ -9,8 +9,8 @@ from kolabi.shared.pruning import TimeCountPruning
 from sqlalchemy import select
 
 
-def test_tail_telemetry_recorder_prunes_history_by_limit(tmp_path) -> None:
-    db_url = f"sqlite:///{tmp_path / 'telemetry.sqlite'}"
+def test_tail_telemetry_recorder_prunes_history_by_limit(postgres_url_factory) -> None:
+    db_url = postgres_url_factory("telemetry")
     recorder = TailTelemetryRecorder(
         PersistenceConfig(
             db_url=db_url,

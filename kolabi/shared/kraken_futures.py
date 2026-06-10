@@ -24,9 +24,9 @@ _KRAKEN_FUTURES_ENVIRONMENTS = {
         public_ws_url="wss://demo-futures.kraken.com/ws/v1",
         private_ws_url="wss://demo-futures.kraken.com/ws/v1",
         rest_url="https://demo-futures.kraken.com/derivatives/api/v3",
-        public_db_url="sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite",
-        private_db_url="sqlite:///dbs/prv-futures-demo.sqlite",
-        critical_private_db_url="sqlite:///dbs/prv-futures-demo-critical.sqlite",
+        public_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market",
+        private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
+        critical_private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical",
         api_key_env="KRAKEN_FUTURE_DEMO_API_KEY",
         api_secret_env="KRAKEN_FUTURE_DEMO_API_SECRET",
     ),
@@ -35,9 +35,9 @@ _KRAKEN_FUTURES_ENVIRONMENTS = {
         public_ws_url="wss://futures.kraken.com/ws/v1",
         private_ws_url="wss://futures.kraken.com/ws/v1",
         rest_url="https://futures.kraken.com/derivatives/api/v3",
-        public_db_url="sqlite:///dbs/pub-futures-live-PI_XBTUSD.sqlite",
-        private_db_url="sqlite:///dbs/prv-futures-live.sqlite",
-        critical_private_db_url="sqlite:///dbs/prv-futures-live-critical.sqlite",
+        public_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market",
+        private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
+        critical_private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical",
         api_key_env="KRAKEN_FUTURE_API_KEY",
         api_secret_env="KRAKEN_FUTURE_API_SECRET",
     ),
@@ -52,25 +52,32 @@ def _db_safe_symbol(symbol: str) -> str:
 def kraken_futures_public_db_url(environment: str, symbol: str) -> str:
     """Return the default public DB URL for one Kraken Futures instrument."""
 
-    env_cfg = kraken_futures_environment(environment)
-    safe_symbol = _db_safe_symbol(symbol.strip() or "PI_XBTUSD")
-    return f"sqlite:///dbs/pub-futures-{env_cfg.environment}-{safe_symbol}.sqlite"
+    del symbol
+    return kraken_futures_environment(environment).public_db_url
 
 
 def kraken_futures_audit_db_url(environment: str, account_scope: str = "default") -> str:
     """Return the default forensic REST audit DB URL for one account scope."""
 
-    env_cfg = kraken_futures_environment(environment)
+    kraken_futures_environment(environment)
     safe_scope = _db_safe_symbol(account_scope.strip() or "default")
-    return f"sqlite:///dbs/audit-futures-{env_cfg.environment}-{safe_scope}.sqlite"
+    suffix = "" if safe_scope == "default" else f"_{safe_scope}"
+    return (
+        "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/"
+        f"kolabi_audit{suffix}"
+    )
 
 
 def kraken_futures_telemetry_db_url(environment: str, account_scope: str = "default") -> str:
     """Return the default bot telemetry DB URL for one account scope."""
 
-    env_cfg = kraken_futures_environment(environment)
+    kraken_futures_environment(environment)
     safe_scope = _db_safe_symbol(account_scope.strip() or "default")
-    return f"sqlite:///dbs/telemetry-futures-{env_cfg.environment}-{safe_scope}.sqlite"
+    suffix = "" if safe_scope == "default" else f"_{safe_scope}"
+    return (
+        "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/"
+        f"kolabi_telemetry{suffix}"
+    )
 
 
 def kraken_futures_environment(environment: str) -> KrakenFuturesEnvironment:

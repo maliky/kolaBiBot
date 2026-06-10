@@ -21,7 +21,7 @@ def test_kolabidb_help_documents_account_scope_and_logs() -> None:
     assert result.returncode == 0
     assert "--account-scope NAME" in result.stdout
     assert "./logs" in result.stdout
-    assert "--backend postgres|sqlite" in result.stdout
+    assert "--backend postgres" in result.stdout
     assert "Default: postgres" in result.stdout
 
 
@@ -43,7 +43,7 @@ def test_kolabidb_public_start_dry_run_defaults_to_postgres_lane() -> None:
     assert "logs/kolabidb-public-kraken-postgres-demo-PI_ADAUSD.log" in result.stdout
 
 
-def test_kolabidb_public_start_dry_run_uses_sqlite_instrument_db_when_requested() -> None:
+def test_kolabidb_rejects_sqlite_backend() -> None:
     result = run_script(
         "--dry-run",
         "--backend",
@@ -54,11 +54,8 @@ def test_kolabidb_public_start_dry_run_uses_sqlite_instrument_db_when_requested(
         "PI_ADAUSD",
     )
 
-    assert result.returncode == 0
-    assert "python\\ -m\\ kolabi.tree.kraken\\ run" in result.stdout
-    assert "--pair\\ PI_ADAUSD" in result.stdout
-    assert "sqlite:///dbs/pub-futures-demo-PI_ADAUSD.sqlite" in result.stdout
-    assert "logs/kolabidb-public-kraken-demo-PI_ADAUSD.log" in result.stdout
+    assert result.returncode == 2
+    assert "SQLite backend is no longer supported" in result.stderr
 
 
 def test_kolabidb_private_start_dry_run_defaults_to_postgres_reuse_public() -> None:
@@ -83,11 +80,11 @@ def test_kolabidb_private_start_dry_run_defaults_to_postgres_reuse_public() -> N
     )
 
 
-def test_kolabidb_private_spawn_public_dry_run_starts_both_with_sqlite() -> None:
+def test_kolabidb_private_spawn_public_dry_run_starts_both_with_postgres() -> None:
     result = run_script(
         "--dry-run",
-        "--backend",
-        "sqlite",
+        "--env-file",
+        "docker/postgres/kolabi-postgres.env.example",
         "private",
         "start",
         "--public",
@@ -108,8 +105,8 @@ def test_kolabidb_private_spawn_public_dry_run_starts_both_with_sqlite() -> None
     assert "--account-scope\\ advers" in result.stdout
     assert "--api-key-env\\ KRAKEN_FUTURE_DEMO2_API_KEY" in result.stdout
     assert "--api-secret-env\\ KRAKEN_FUTURE_DEMO2_API_SECRET" in result.stdout
-    assert "sqlite:///dbs/prv-futures-demo-advers.sqlite" in result.stdout
-    assert "sqlite:///dbs/prv-futures-demo-advers-critical.sqlite" in result.stdout
+    assert "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account_advers" in result.stdout
+    assert "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical_advers" in result.stdout
 
 
 def test_kolabidb_postgres_public_dry_run_uses_env_lane_and_distinct_log() -> None:
@@ -149,8 +146,8 @@ def test_kolabidb_postgres_private_logs_uses_distinct_log() -> None:
 def test_kolabidb_binance_public_private_dry_run_uses_binance_modules() -> None:
     result = run_script(
         "--dry-run",
-        "--backend",
-        "sqlite",
+        "--env-file",
+        "docker/postgres/kolabi-postgres.env.example",
         "--exchange",
         "binance",
         "private",
@@ -165,9 +162,9 @@ def test_kolabidb_binance_public_private_dry_run_uses_binance_modules() -> None:
     assert "python\\ -m\\ kolabi.tree.binance\\ run" in result.stdout
     assert "python\\ -m\\ kolabi.tree.binance_account\\ run" in result.stdout
     assert "--pair\\ BTCUSDT" in result.stdout
-    assert "sqlite:///dbs/pub-binance-futures-demo-BTCUSDT.sqlite" in result.stdout
-    assert "sqlite:///dbs/prv-binance-futures-demo-advers.sqlite" in result.stdout
-    assert "sqlite:///dbs/prv-binance-futures-demo-advers-critical.sqlite" in result.stdout
+    assert "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market" in result.stdout
+    assert "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account_advers" in result.stdout
+    assert "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical_advers" in result.stdout
 
 
 def test_kolabidb_postgres_container_logs_use_compose() -> None:

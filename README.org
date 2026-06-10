@@ -74,7 +74,7 @@ The runtime expects fresh DB-backed evidence before active execution:
 - a critical private lane for open orders and fills;
 - optional REST audit and tail telemetry lanes.
 
-PostgreSQL is now the preferred local backend. SQLite fallback remains useful for small offline or legacy checks.
+PostgreSQL is the supported local runtime backend. Use =scripts/kolabidb postgres start= and the lane URLs from =.env.postgres= for public, private, critical, audit, and telemetry storage.
 
 Start the default Kraken demo lanes:
 

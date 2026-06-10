@@ -60,14 +60,14 @@ def test_demo_ada_strategy_parsed_and_planned_on_active_runtime() -> None:
 
 
 def test_bot_service_keeps_audit_and_telemetry_lanes_off_account_db(
-    tmp_path,
+    postgres_url_factory,
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_KEY", "k")
     monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_SECRET", "s")
-    account_db_url = f"sqlite:///{tmp_path / 'account.sqlite'}"
-    audit_db_url = f"sqlite:///{tmp_path / 'audit.sqlite'}"
-    telemetry_db_url = f"sqlite:///{tmp_path / 'telemetry.sqlite'}"
+    account_db_url = postgres_url_factory("account")
+    audit_db_url = postgres_url_factory("audit")
+    telemetry_db_url = postgres_url_factory("telemetry")
     service = BotService(
         BotConfig(
             symbol="PI_XBTUSD",

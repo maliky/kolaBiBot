@@ -101,10 +101,10 @@ class _CancelAckLiveExecutor(_RecordingLiveExecutor):
 
 
 class _PrivateDbHarness:
-    def __init__(self, tmp_path) -> None:
-        self.critical_db_url = f"sqlite:///{tmp_path / 'critical-private.sqlite'}"
-        self.account_db_url = f"sqlite:///{tmp_path / 'account-private.sqlite'}"
-        self.market_db_url = f"sqlite:///{tmp_path / 'market.sqlite'}"
+    def __init__(self, postgres_url_factory) -> None:
+        self.critical_db_url = postgres_url_factory("critical_private")
+        self.account_db_url = postgres_url_factory("account_private")
+        self.market_db_url = postgres_url_factory("market")
         self.critical_store = AccountStateStore(
             AccountStreamConfig(db_url=self.critical_db_url)
         )
@@ -515,10 +515,10 @@ def test_strategy_runtime_simulation_advances_to_tail_state() -> None:
 
 
 def test_db_backed_runtime_completes_one_lifecycle_with_amend_and_tail_fill(
-    tmp_path,
+    postgres_url_factory,
     caplog,
 ) -> None:
-    db = _PrivateDbHarness(tmp_path)
+    db = _PrivateDbHarness(postgres_url_factory)
     executor = _RecordingLiveExecutor()
     runtime = StrategyRuntime(
         strategy=StrategySpec(name="db-lifecycle", pairs=sample_strategy()),
@@ -558,10 +558,10 @@ def test_db_backed_runtime_completes_one_lifecycle_with_amend_and_tail_fill(
 
 
 def test_head_timeout_cancels_unfilled_platform_ack(
-    tmp_path,
+    postgres_url_factory,
     caplog,
 ) -> None:
-    db = _PrivateDbHarness(tmp_path)
+    db = _PrivateDbHarness(postgres_url_factory)
     executor = _RecordingLiveExecutor()
     pair = replace(sample_strategy()[0], timeout=0.001)
     runtime = StrategyRuntime(
@@ -598,10 +598,10 @@ def test_head_timeout_cancels_unfilled_platform_ack(
 
 
 def test_head_timeout_cancel_ack_does_not_terminate_unfilled_head_without_db(
-    tmp_path,
+    postgres_url_factory,
     caplog,
 ) -> None:
-    db = _PrivateDbHarness(tmp_path)
+    db = _PrivateDbHarness(postgres_url_factory)
     executor = _CancelAckLiveExecutor()
     pair = replace(sample_strategy()[0], timeout=0.001)
     runtime = StrategyRuntime(
@@ -634,9 +634,9 @@ def test_head_timeout_cancel_ack_does_not_terminate_unfilled_head_without_db(
 
 
 def test_head_timeout_private_db_cancel_terminates_unfilled_head(
-    tmp_path,
+    postgres_url_factory,
 ) -> None:
-    db = _PrivateDbHarness(tmp_path)
+    db = _PrivateDbHarness(postgres_url_factory)
     executor = _CancelAckLiveExecutor()
     pair = replace(sample_strategy()[0], timeout=0.001)
     runtime = StrategyRuntime(
@@ -666,7 +666,7 @@ def test_head_timeout_private_db_cancel_terminates_unfilled_head(
 
 
 def test_head_timeout_notfound_without_cumqty_does_not_terminate_head(
-    tmp_path,
+    postgres_url_factory,
     caplog,
 ) -> None:
     class SparseNotFoundAckExecutor(_CancelAckLiveExecutor):
@@ -682,7 +682,7 @@ def test_head_timeout_notfound_without_cumqty_does_not_terminate_head(
                 )
             return ack
 
-    db = _PrivateDbHarness(tmp_path)
+    db = _PrivateDbHarness(postgres_url_factory)
     executor = SparseNotFoundAckExecutor()
     pair = replace(sample_strategy()[0], timeout=0.001)
     runtime = StrategyRuntime(
@@ -800,8 +800,8 @@ def test_old_live_head_identity_is_pruned_after_repeat_resets_to_latent() -> Non
     )
 
 
-def test_entry_window_does_not_cancel_started_head_before_timeout(tmp_path) -> None:
-    db = _PrivateDbHarness(tmp_path)
+def test_entry_window_does_not_cancel_started_head_before_timeout(postgres_url_factory) -> None:
+    db = _PrivateDbHarness(postgres_url_factory)
     executor = _RecordingLiveExecutor()
     pair = replace(
         sample_strategy()[0],
@@ -2564,7 +2564,7 @@ def test_tail_telemetry_write_failure_does_not_stop_runtime_source(caplog) -> No
 
     class Writer:
         def record_rows(self, rows):
-            raise RuntimeError("database is locked")
+            raise RuntimeError("telemetry write failed")
 
     pair = sample_strategy()[0]
     confirmed_at = datetime.now(timezone.utc)

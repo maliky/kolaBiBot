@@ -30,8 +30,8 @@ def fixed_time(offset_seconds: int = 0) -> datetime:
     return datetime(2026, 5, 10, 0, 0, offset_seconds, tzinfo=timezone.utc)
 
 
-def test_process_book_persists_normalized_snapshot_levels_and_indicators(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_process_book_persists_normalized_snapshot_levels_and_indicators(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD", depth=2))
     asks = [{"price": 100, "qty": 1}, {"price": 101, "qty": 3}]
     bids = [{"price": 99, "qty": 2}, {"price": 98, "qty": 2}]
@@ -133,8 +133,8 @@ def test_apply_book_payload_removes_zero_qty_level():
     assert state.asks == ((102.0, 1.0),)
 
 
-def test_scheduler_leaves_gap_when_book_does_not_change(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_scheduler_leaves_gap_when_book_does_not_change(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(
         KrakenConfig(db_url=db_url, pair="PI_XBTUSD", snapshot_interval_seconds=1)
     )
@@ -150,8 +150,8 @@ def test_scheduler_leaves_gap_when_book_does_not_change(tmp_path):
         assert len(snapshots) == 1
 
 
-def test_status_log_suppresses_identical_lines(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_status_log_suppresses_identical_lines(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(
         KrakenConfig(db_url=db_url, pair="PI_XBTUSD", log_interval_seconds=0)
     )
@@ -171,8 +171,8 @@ def test_status_log_suppresses_identical_lines(tmp_path, caplog):
     assert caplog.text.count("kraken_tree\tdemo\t0\tPI_XBTUSD\tFalse") == 1
 
 
-def test_status_log_prints_header_every_fifty_rows(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_status_log_prints_header_every_fifty_rows(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(
         KrakenConfig(db_url=db_url, pair="PI_XBTUSD", log_interval_seconds=0)
     )
@@ -193,8 +193,8 @@ def test_status_log_prints_header_every_fifty_rows(tmp_path, caplog):
     assert caplog.text.count(header) == 2
 
 
-def test_indicator_client_filters_pair_and_environment(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_indicator_client_filters_pair_and_environment(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     btc_tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
     eth_tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_ETHUSD"))
     btc_tree.process_book([{"price": 101, "qty": 1}], [{"price": 99, "qty": 1}])
@@ -209,8 +209,8 @@ def test_indicator_client_filters_pair_and_environment(tmp_path):
     assert snapshot["indicators"]["mid_price"] == 100.0
 
 
-def test_handle_message_ignores_non_book_events(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_handle_message_ignores_non_book_events(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(KrakenConfig(db_url=db_url))
 
     result = tree.handle_message(json.dumps({"event": "heartbeat"}))
@@ -219,8 +219,8 @@ def test_handle_message_ignores_non_book_events(tmp_path):
     assert tree.latest_status()["status"] == "empty"
 
 
-def test_handle_message_skips_absurd_book_but_keeps_raw_payload(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_handle_message_skips_absurd_book_but_keeps_raw_payload(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
     payload = {
         "feed": "book_snapshot",
@@ -294,8 +294,8 @@ def test_normal_mgf_clips_large_exponent_instead_of_raising():
     assert value > 0
 
 
-def test_retention_prunes_old_normalized_rows(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_retention_prunes_old_normalized_rows(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(KrakenConfig(db_url=db_url, retention_minutes=1))
     tree.ingest_book([{"price": 101, "qty": 1}], [{"price": 99, "qty": 1}], fixed_time(0))
     tree.flush_due(fixed_time(0))
@@ -310,8 +310,8 @@ def test_retention_prunes_old_normalized_rows(tmp_path):
         assert len(levels) == 2
 
 
-def test_sqlite_reader_can_query_while_writer_session_is_open(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_reader_can_query_while_writer_session_is_open(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
 
     tree.process_book([{"price": 101, "qty": 1}], [{"price": 99, "qty": 1}])
@@ -371,8 +371,8 @@ def test_sequence_regression_delta_is_ignored():
     assert next_state == state
 
 
-def test_snapshot_status_reports_environment(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_snapshot_status_reports_environment(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
     tree.process_book([{"price": 101, "qty": 1}], [{"price": 99, "qty": 1}])
 
@@ -382,8 +382,8 @@ def test_snapshot_status_reports_environment(tmp_path):
     assert status["market_type"] == "futures"
 
 
-def test_snapshot_status_rounds_prices_to_cached_tick_size(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_snapshot_status_rounds_prices_to_cached_tick_size(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
     tree.process_book([{"price": 101.24, "qty": 1}], [{"price": 99.26, "qty": 1}])
 
@@ -410,8 +410,8 @@ def test_snapshot_status_rounds_prices_to_cached_tick_size(tmp_path):
     assert status["mid_price"] == 100.5
 
 
-def test_snapshot_status_keeps_raw_precision_when_tick_size_missing(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_snapshot_status_keeps_raw_precision_when_tick_size_missing(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
     tree.process_book([{"price": 101.24, "qty": 1}], [{"price": 99.26, "qty": 1}])
 
@@ -440,8 +440,8 @@ def test_delta_before_snapshot_raises():
         apply_book_payload(None, delta, depth=3)
 
 
-def test_public_raw_event_consecutive_duplicate_is_collapsed(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'pub-futures-demo.sqlite'}"
+def test_public_raw_event_consecutive_duplicate_is_collapsed(postgres_url_factory):
+    db_url = postgres_url_factory("pub-futures-demo")
     tree = KrakenTree(KrakenConfig(db_url=db_url, pair="PI_XBTUSD"))
     message = {
         "feed": "notifications_auth",

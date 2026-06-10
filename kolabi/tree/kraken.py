@@ -23,11 +23,8 @@ from sqlalchemy import (
     String,
     create_engine,
     delete,
-    event,
     func,
-    inspect,
     select,
-    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import (
@@ -66,8 +63,8 @@ class KrakenConfig:
     pair: str = "PI_XBTUSD"
     depth: int = 25
     ws_url: str = "wss://demo-futures.kraken.com/ws/v1"
-    db_url: str = "sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite"
-    private_db_url: str = "sqlite:///dbs/prv-futures-demo.sqlite"
+    db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market"
+    private_db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account"
     rest_url: str = "https://demo-futures.kraken.com/derivatives/api/v3"
     exchange: str = "kraken"
     environment: str = "demo"
@@ -163,7 +160,6 @@ class KrakenTree:
         self.logger = setup_logging(config.log_level)
         self.engine = build_engine(config.db_url)
         Base.metadata.create_all(self.engine)
-        upgrade_public_schema(self.engine)
         self.sessionmaker = sessionmaker(
             bind=self.engine,
             expire_on_commit=False,
@@ -723,136 +719,12 @@ class OrderBookLevel(Base):
     )
 
 
-def build_engine(
-    db_url: str,
-    *,
-    sqlite_busy_timeout_seconds: float = 30.0,
-) -> Engine:
-    """Cree l'engine DB du service avec reglages SQLite locaux."""
-    timeout_seconds = max(0.0, float(sqlite_busy_timeout_seconds))
-    connect_args = {"timeout": timeout_seconds} if db_url.startswith("sqlite") else {}
-    engine = create_engine(db_url, future=True, connect_args=connect_args)
+def build_engine(db_url: str) -> Engine:
+    """Cree l'engine PostgreSQL du service."""
+
     if db_url.startswith("sqlite"):
-        configure_sqlite_engine(
-            engine,
-            busy_timeout_ms=int(timeout_seconds * 1000),
-        )
-    return engine
-
-
-def configure_sqlite_engine(
-    engine: Engine,
-    *,
-    busy_timeout_ms: int = 30_000,
-) -> None:
-    """Installe WAL et les pragmas de concurrence sur chaque connexion."""
-
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragmas(dbapi_connection: object, _connection_record: object) -> None:
-        cursor = cast_dbapi_connection(dbapi_connection).cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute(f"PRAGMA busy_timeout={max(0, busy_timeout_ms)}")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.close()
-
-
-def cast_dbapi_connection(connection: object) -> Any:
-    """Expose la connexion DBAPI avec les methodes attendues par SQLite."""
-    return connection
-
-
-def upgrade_public_schema(engine: Engine) -> None:
-    """Apply additive SQLite schema upgrades for existing public DBs."""
-    if getattr(engine.dialect, "name", "") != "sqlite":
-        return
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    with engine.begin() as connection:
-        if "raw_exchange_events" in tables:
-            added_raw_columns = ensure_columns(
-                connection,
-                "raw_exchange_events",
-                {
-                    "environment": "VARCHAR(32)",
-                    "market_type": "VARCHAR(32)",
-                    "account_scope": "VARCHAR(64)",
-                    "symbol": "VARCHAR(64)",
-                    "exchange_sequence": "VARCHAR(128)",
-                    "source_timestamp": "DATETIME",
-                    "duplicate_count": "INTEGER",
-                    "last_seen_at": "DATETIME",
-                    "received_at": "DATETIME",
-                },
-            )
-            if "duplicate_count" in added_raw_columns:
-                connection.execute(
-                    text(
-                        "UPDATE raw_exchange_events "
-                        "SET duplicate_count = COALESCE(duplicate_count, 0) "
-                        "WHERE duplicate_count IS NULL"
-                    )
-                )
-            if "last_seen_at" in added_raw_columns:
-                connection.execute(
-                    text(
-                        "UPDATE raw_exchange_events "
-                        "SET last_seen_at = COALESCE(last_seen_at, received_at) "
-                        "WHERE last_seen_at IS NULL"
-                    )
-                )
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_identity "
-                    "ON raw_exchange_events "
-                    "(exchange, environment, stream_kind, event_type, correlation_id)"
-                )
-            )
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_event_latest "
-                    "ON raw_exchange_events "
-                    "(exchange, environment, stream_kind, event_type, received_at, id)"
-                )
-            )
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_stream_received "
-                    "ON raw_exchange_events "
-                    "(exchange, environment, stream_kind, received_at, id)"
-                )
-            )
-        if "market_snapshots" in tables:
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_market_snapshots_symbol_time "
-                    "ON market_snapshots "
-                    "(exchange, environment, market_type, symbol, local_timestamp, id)"
-                )
-            )
-        if "market_indicators" in tables:
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_market_indicators_symbol_time "
-                    "ON market_indicators "
-                    "(exchange, environment, market_type, symbol, computed_at, id)"
-                )
-            )
-
-
-def ensure_columns(connection: Any, table_name: str, columns: dict[str, str]) -> set[str]:
-    existing = {
-        str(row[1])
-        for row in connection.execute(text(f"PRAGMA table_info({table_name})"))
-    }
-    added: set[str] = set()
-    for column_name, column_type in columns.items():
-        if column_name not in existing:
-            connection.execute(
-                text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
-            )
-            added.add(column_name)
-    return added
+        raise ValueError("SQLite is no longer supported; use a PostgreSQL database URL.")
+    return create_engine(db_url, future=True)
 
 
 def subscription_message(config: KrakenConfig) -> dict[str, object]:
@@ -1525,8 +1397,8 @@ def build_parser() -> argparse.ArgumentParser:
         command_parser.add_argument("--environment", choices=("demo", "live"), default=KrakenConfig.environment, help="Endpoint family.")
         command_parser.add_argument("--ws-url", help="Override public websocket URL.")
         command_parser.add_argument("--rest-url", help="Override public REST URL for ticker polling.")
-        command_parser.add_argument("--db-url", help="Override public SQLite DB URL.")
-        command_parser.add_argument("--private-db-url", help="Override private SQLite DB URL used for correlation.")
+        command_parser.add_argument("--db-url", help="Override public PostgreSQL DB URL.")
+        command_parser.add_argument("--private-db-url", help="Override private PostgreSQL DB URL used for correlation.")
         command_parser.add_argument("--exchange", default=KrakenConfig.exchange, help="Exchange label stored with rows.")
         command_parser.add_argument("--market-type", default=KrakenConfig.market_type, help="Market type label stored with rows.")
         command_parser.add_argument("--log-level", default=KrakenConfig.log_level, help="Logging verbosity.")

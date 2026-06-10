@@ -524,7 +524,6 @@ class BotService:
                 else TailTelemetryRecorder(
                     PersistenceConfig(
                         self._telemetry_db_url,
-                        sqlite_busy_timeout_seconds=0.5,
                         tail_telemetry_pruning=TimeCountPruning(
                             retention_minutes=(
                                 self.config.tail_telemetry_retention_minutes

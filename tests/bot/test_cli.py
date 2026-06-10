@@ -109,11 +109,11 @@ def test_bot_parser_uses_critical_db_url_only() -> None:
             "--strategy",
             "orders/advers.tsv",
             "--critical-db-url",
-            "sqlite:///critical.sqlite",
+            "postgresql+psycopg://x/critical",
             "--audit-db-url",
-            "sqlite:///audit.sqlite",
+            "postgresql+psycopg://x/audit",
             "--telemetry-db-url",
-            "sqlite:///telemetry.sqlite",
+            "postgresql+psycopg://x/telemetry",
             "--rest-audit-retention-minutes",
             "60",
             "--rest-audit-retention-limit",
@@ -128,9 +128,9 @@ def test_bot_parser_uses_critical_db_url_only() -> None:
         ]
     )
 
-    assert args.critical_account_db_url == "sqlite:///critical.sqlite"
-    assert args.audit_db_url == "sqlite:///audit.sqlite"
-    assert args.telemetry_db_url == "sqlite:///telemetry.sqlite"
+    assert args.critical_account_db_url == "postgresql+psycopg://x/critical"
+    assert args.audit_db_url == "postgresql+psycopg://x/audit"
+    assert args.telemetry_db_url == "postgresql+psycopg://x/telemetry"
     assert args.rest_audit_retention_minutes == 60
     assert args.rest_audit_retention_limit == 10
     assert args.tail_telemetry_retention_minutes == 30
@@ -143,7 +143,7 @@ def test_bot_parser_uses_critical_db_url_only() -> None:
                 "--strategy",
                 "orders/advers.tsv",
                 "--critical-account-db-url",
-                "sqlite:///critical.sqlite",
+                "postgresql+psycopg://x/critical",
             ]
         )
 

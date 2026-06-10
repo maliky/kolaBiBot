@@ -456,7 +456,7 @@ def test_close_all_reports_audit_persistence_error_separately(monkeypatch, capsy
             cancelled=[OrderAck(order_id="OID-1", status="Canceled")],
             before_qty=0.0,
             after_qty=0.0,
-            audit_errors=["database is locked"],
+            audit_errors=["audit write failed"],
         ),
     )
 
@@ -466,7 +466,7 @@ def test_close_all_reports_audit_persistence_error_separately(monkeypatch, capsy
     output = capsys.readouterr().out
     assert '"closed": true' in output
     assert '"audit_persistence_ok": false' in output
-    assert '"database is locked"' in output
+    assert '"audit write failed"' in output
 
 
 def test_close_all_survives_cancel_fetch_503_and_still_closes_position(monkeypatch, capsys):

@@ -20,7 +20,7 @@ from uuid import uuid4
 
 import requests
 import websockets
-from sqlalchemy import delete, func, inspect, select, text
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.shared.kraken_futures import kraken_futures_environment
@@ -159,7 +159,7 @@ class _RestReconcileLogState:
 class AccountStreamConfig:
     """Configuration de la memoire privee ordre/compte."""
 
-    db_url: str = "sqlite:///dbs/prv-futures-demo.sqlite"
+    db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account"
     critical_db_url: str | None = None
     exchange: str = "kraken"
     environment: str = "demo"
@@ -197,8 +197,6 @@ class AccountStreamConfig:
     snapshot_tombstone_grace_seconds: float = 30.0
     balance_write_min_interval_seconds: float = 300.0
     position_write_min_interval_seconds: float = 60.0
-    sqlite_busy_timeout_seconds: float = 30.0
-    critical_mirror_busy_timeout_seconds: float = 1.0
     raw_retention_minutes: int = DEFAULT_PRUNING.raw_events.retention_minutes
     raw_retention_limit: int = DEFAULT_PRUNING.raw_events.retention_limit
     state_retention_minutes: int = DEFAULT_PRUNING.account_state.retention_minutes
@@ -343,7 +341,6 @@ class PrivateIngestMirror:
         )
         self._thread: threading.Thread | None = None
         self._dropped = 0
-        self._locked = 0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -392,142 +389,12 @@ class PrivateIngestMirror:
                     prune_raw=False,
                 )
             except Exception as exc:
-                if _is_sqlite_locked_error(exc):
-                    self._locked += 1
-                    if self._locked == 1 or self._locked % 100 == 0:
-                        self.logger.warning(
-                            "kraken_account critical mirror skipped locked message count=%s feed=%s stream=%s",
-                            self._locked,
-                            feed,
-                            self.stream_kind,
-                        )
-                    continue
                 self.logger.warning(
                     "kraken_account critical mirror failed feed=%s stream=%s error=%s",
                     feed,
                     self.stream_kind,
                     exc,
                 )
-
-
-def upgrade_private_schema(engine: Any) -> None:
-    """Apply additive SQLite schema upgrades for existing private DBs."""
-    if getattr(engine.dialect, "name", "") != "sqlite":
-        return
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
-    with engine.begin() as connection:
-        if "exchange_orders" in tables:
-            ensure_columns(connection, "exchange_orders", {"raw_payload": "JSON"})
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_exchange_orders_symbol_cursor "
-                    "ON exchange_orders "
-                    "(exchange, environment, market_type, symbol, local_timestamp, id)"
-                )
-            )
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_exchange_orders_env_client "
-                    "ON exchange_orders "
-                    "(exchange, environment, market_type, client_order_id)"
-                )
-            )
-        if "exchange_fills" in tables:
-            ensure_columns(connection, "exchange_fills", {"raw_payload": "JSON"})
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_exchange_fills_cursor "
-                    "ON exchange_fills (exchange, local_timestamp, id, order_id)"
-                )
-            )
-        if "account_balances" in tables:
-            ensure_columns(connection, "account_balances", {"raw_payload": "JSON"})
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_account_balances_state_time "
-                    "ON account_balances "
-                    "(exchange, environment, account_scope, asset, local_timestamp, id)"
-                )
-            )
-        if "account_positions" in tables:
-            ensure_columns(connection, "account_positions", {"raw_payload": "JSON"})
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_account_positions_state_time "
-                    "ON account_positions "
-                    "(exchange, environment, market_type, account_scope, symbol, side, local_timestamp, id)"
-                )
-            )
-        if "private_ingest_audits" in tables:
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_private_ingest_audits_account_time "
-                    "ON private_ingest_audits "
-                    "(exchange, environment, market_type, account_scope, received_at, id)"
-                )
-            )
-        if "raw_exchange_events" in tables:
-            added_raw_columns = ensure_columns(
-                connection,
-                "raw_exchange_events",
-                {
-                    "environment": "VARCHAR(32)",
-                    "market_type": "VARCHAR(32)",
-                    "account_scope": "VARCHAR(64)",
-                    "symbol": "VARCHAR(64)",
-                    "exchange_sequence": "VARCHAR(128)",
-                    "source_timestamp": "DATETIME",
-                    "duplicate_count": "INTEGER",
-                    "last_seen_at": "DATETIME",
-                    "received_at": "DATETIME",
-                },
-            )
-            if "duplicate_count" in added_raw_columns:
-                connection.execute(
-                    text(
-                        "UPDATE raw_exchange_events "
-                        "SET duplicate_count = COALESCE(duplicate_count, 0) "
-                        "WHERE duplicate_count IS NULL"
-                    )
-                )
-            if "last_seen_at" in added_raw_columns:
-                connection.execute(
-                    text(
-                        "UPDATE raw_exchange_events "
-                        "SET last_seen_at = COALESCE(last_seen_at, received_at) "
-                        "WHERE last_seen_at IS NULL"
-                    )
-                )
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_identity "
-                    "ON raw_exchange_events "
-                    "(exchange, environment, stream_kind, event_type, correlation_id)"
-                )
-            )
-            connection.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS ix_raw_exchange_events_event_latest "
-                    "ON raw_exchange_events "
-                    "(exchange, environment, stream_kind, event_type, received_at, id)"
-                )
-            )
-
-
-def ensure_columns(connection: Any, table_name: str, columns: dict[str, str]) -> set[str]:
-    existing = {
-        str(row[1])
-        for row in connection.execute(text(f"PRAGMA table_info({table_name})"))
-    }
-    added: set[str] = set()
-    for column_name, column_type in columns.items():
-        if column_name not in existing:
-            connection.execute(
-                text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
-            )
-            added.add(column_name)
-    return added
 
 
 class AccountStateStore:
@@ -539,11 +406,7 @@ class AccountStateStore:
 
     def __init__(self, config: AccountStreamConfig) -> None:
         self.config = config
-        self.engine = build_engine(
-            config.db_url,
-            sqlite_busy_timeout_seconds=config.sqlite_busy_timeout_seconds,
-        )
-        upgrade_private_schema(self.engine)
+        self.engine = build_engine(config.db_url)
         Base.metadata.create_all(self.engine)
         self.sessionmaker = sessionmaker(
             bind=self.engine,
@@ -2122,13 +1985,7 @@ def critical_private_config(config: AccountStreamConfig) -> AccountStreamConfig:
 
 def critical_mirror_config(config: AccountStreamConfig) -> AccountStreamConfig:
     """Return config for best-effort critical mirroring into the broad private DB."""
-    return replace(
-        config,
-        sqlite_busy_timeout_seconds=max(
-            0.0,
-            float(config.critical_mirror_busy_timeout_seconds),
-        ),
-    )
+    return config
 
 
 def profile_uses_critical_db(profile: PrivateStreamProfile) -> bool:
@@ -3293,17 +3150,6 @@ def _stop_price_from_payload(payload: object) -> float | None:
     return None
 
 
-def _is_sqlite_locked_error(exc: BaseException) -> bool:
-    """Return true for SQLite lock errors, including SQLAlchemy wrappers."""
-    current: BaseException | None = exc
-    while current is not None:
-        message = str(current).lower()
-        if "database is locked" in message or "database table is locked" in message:
-            return True
-        current = current.__cause__ if isinstance(current.__cause__, BaseException) else None
-    return False
-
-
 def build_parser() -> argparse.ArgumentParser:
     """Construit la CLI de memoire privee."""
     parser = argparse.ArgumentParser(
@@ -3332,13 +3178,13 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument(
             "--account-db-url",
             dest="db_url",
-            help="Private account SQLite database URL.",
+            help="Private account PostgreSQL database URL.",
         )
         cmd.add_argument(
             "--critical-db-url",
             dest="critical_db_url",
             help=(
-                "Critical private SQLite database URL for open_orders/fills. "
+                "Critical private PostgreSQL database URL for open_orders/fills. "
                 "Defaults from Kraken Futures environment."
             ),
         )
@@ -3451,21 +3297,6 @@ def build_parser() -> argparse.ArgumentParser:
             default=AccountStreamConfig.position_write_min_interval_seconds,
             help="Minimum seconds between unchanged position snapshot rows.",
         )
-        cmd.add_argument(
-            "--sqlite-busy-timeout-seconds",
-            type=float,
-            default=AccountStreamConfig.sqlite_busy_timeout_seconds,
-            help="SQLite write-lock wait timeout for primary private DB writers.",
-        )
-        cmd.add_argument(
-            "--critical-mirror-busy-timeout-seconds",
-            type=float,
-            default=AccountStreamConfig.critical_mirror_busy_timeout_seconds,
-            help=(
-                "SQLite write-lock wait timeout for best-effort critical mirroring "
-                "into the broad private DB."
-            ),
-        )
     return parser
 
 
@@ -3493,11 +3324,6 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
         position_write_min_interval_seconds=max(
             0.0,
             args.position_write_min_interval_seconds,
-        ),
-        sqlite_busy_timeout_seconds=max(0.0, args.sqlite_busy_timeout_seconds),
-        critical_mirror_busy_timeout_seconds=max(
-            0.0,
-            args.critical_mirror_busy_timeout_seconds,
         ),
         raw_retention_minutes=args.raw_retention_minutes,
         raw_retention_limit=args.raw_retention_limit,

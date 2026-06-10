@@ -54,7 +54,22 @@ def test_get_adapter_loads_kraken():
     assert adapter_cls.__name__ == "KrakenFuturesAdapter"
 
 
-def test_place_maps_limit_order_to_sendorder(tmp_path):
+def test_default_audit_lane_is_postgres_environment_scoped(monkeypatch) -> None:
+    monkeypatch.setattr(Base.metadata, "create_all", lambda *args, **kwargs: None)
+    adapter = KrakenFuturesAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://demo-futures.kraken.com",
+        symbol="PI_XBTUSD",
+        environment="demo",
+        account_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/account",
+        session=cast(Any, DummySession([])),
+    )
+
+    assert adapter.audit_db_url == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_audit"
+
+
+def test_place_maps_limit_order_to_sendorder(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -91,11 +106,11 @@ def test_place_maps_limit_order_to_sendorder(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
+        audit_db_url=postgres_url_factory("audit"),
         session=cast(Any, session),
     )
 
-    assert adapter.audit_db_url.endswith("prv-audit.sqlite")
     reply = adapter.place(
         orderQty=2,
         side="buy",
@@ -126,7 +141,7 @@ def test_duplicate_client_id_status_maps_to_new() -> None:
     assert status == "New"
 
 
-def test_sendorder_http_error_is_persisted_for_forensics(tmp_path):
+def test_sendorder_http_error_is_persisted_for_forensics(postgres_url_factory):
     session = DummySession(
         [
             (503, {"raw_text": "Service Unavailable"}),
@@ -140,7 +155,8 @@ def test_sendorder_http_error_is_persisted_for_forensics(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
+        audit_db_url=postgres_url_factory("audit"),
         session=cast(Any, session),
     )
 
@@ -162,7 +178,7 @@ def test_sendorder_http_error_is_persisted_for_forensics(tmp_path):
     assert rows[0].client_order_id == "CID-ERR"
 
 
-def test_openorders_get_is_not_persisted_in_rest_call_audit(tmp_path):
+def test_openorders_get_is_not_persisted_in_rest_call_audit(postgres_url_factory):
     session = DummySession(
         [
             {"result": "success", "openOrders": []},
@@ -174,7 +190,8 @@ def test_openorders_get_is_not_persisted_in_rest_call_audit(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
+        audit_db_url=postgres_url_factory("audit"),
         session=cast(Any, session),
     )
 
@@ -184,14 +201,15 @@ def test_openorders_get_is_not_persisted_in_rest_call_audit(tmp_path):
     assert rows == []
 
 
-def test_record_rest_call_serializes_decimal_request_params(tmp_path) -> None:
+def test_record_rest_call_serializes_decimal_request_params(postgres_url_factory) -> None:
     adapter = KrakenFuturesAdapter(
         api_key="k",
         api_secret="c2VjcmV0",
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
+        audit_db_url=postgres_url_factory("audit"),
         session=cast(Any, DummySession([])),
     )
 
@@ -211,14 +229,15 @@ def test_record_rest_call_serializes_decimal_request_params(tmp_path) -> None:
     assert row.request_params["stopPx"] == "77245.0"
 
 
-def test_record_rest_call_serializes_nested_decimal_payload(tmp_path) -> None:
+def test_record_rest_call_serializes_nested_decimal_payload(postgres_url_factory) -> None:
     adapter = KrakenFuturesAdapter(
         api_key="k",
         api_secret="c2VjcmV0",
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
+        audit_db_url=postgres_url_factory("audit"),
         session=cast(Any, DummySession([])),
     )
 
@@ -247,14 +266,15 @@ def test_record_rest_call_serializes_nested_decimal_payload(tmp_path) -> None:
     assert history[0] == "1.2"
 
 
-def test_record_rest_call_recovers_order_id_from_request_for_edit_failures(tmp_path) -> None:
+def test_record_rest_call_recovers_order_id_from_request_for_edit_failures(postgres_url_factory) -> None:
     adapter = KrakenFuturesAdapter(
         api_key="k",
         api_secret="c2VjcmV0",
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
+        audit_db_url=postgres_url_factory("audit"),
         session=cast(Any, DummySession([])),
     )
 
@@ -276,14 +296,15 @@ def test_record_rest_call_recovers_order_id_from_request_for_edit_failures(tmp_p
     assert row.correlation_id == "OID-EDIT-1"
 
 
-def test_record_rest_call_recovers_order_id_from_request_for_cancel_failures(tmp_path) -> None:
+def test_record_rest_call_recovers_order_id_from_request_for_cancel_failures(postgres_url_factory) -> None:
     adapter = KrakenFuturesAdapter(
         api_key="k",
         api_secret="c2VjcmV0",
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
+        audit_db_url=postgres_url_factory("audit"),
         session=cast(Any, DummySession([])),
     )
 
@@ -305,14 +326,14 @@ def test_record_rest_call_recovers_order_id_from_request_for_cancel_failures(tmp
     assert row.correlation_id == "OID-CANCEL-1"
 
 
-def test_record_rest_call_persistence_failure_is_fail_open(tmp_path, caplog) -> None:
+def test_record_rest_call_persistence_failure_is_fail_open(postgres_url_factory, caplog) -> None:
     adapter = KrakenFuturesAdapter(
         api_key="k",
         api_secret="c2VjcmV0",
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, DummySession([])),
     )
 
@@ -353,15 +374,15 @@ def test_record_rest_call_persistence_failure_is_fail_open(tmp_path, caplog) -> 
     assert "forced commit failure" in adapter.rest_audit_errors[0]
 
 
-def test_record_rest_call_prunes_audit_history_by_limit(tmp_path) -> None:
+def test_record_rest_call_prunes_audit_history_by_limit(postgres_url_factory) -> None:
     adapter = KrakenFuturesAdapter(
         api_key="k",
         api_secret="c2VjcmV0",
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
-        audit_db_url=f"sqlite:///{tmp_path / 'audit.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
+        audit_db_url=postgres_url_factory("audit"),
         rest_audit_retention_minutes=0,
         rest_audit_retention_limit=1,
         session=cast(Any, DummySession([])),
@@ -402,7 +423,7 @@ def test_record_rest_call_prunes_audit_history_by_limit(tmp_path) -> None:
     assert [row.client_order_id for row in rows] == ["CID-NEW"]
 
 
-def test_place_generates_client_order_id_when_missing(tmp_path):
+def test_place_generates_client_order_id_when_missing(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -423,7 +444,7 @@ def test_place_generates_client_order_id_when_missing(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -435,7 +456,7 @@ def test_place_generates_client_order_id_when_missing(tmp_path):
     assert reply["clOrdID"] == payload["cliOrdId"]
 
 
-def test_sendorder_without_client_order_id_is_not_retried_on_503(tmp_path):
+def test_sendorder_without_client_order_id_is_not_retried_on_503(postgres_url_factory):
     session = DummySession(
         [
             (503, {"raw_text": "Service Unavailable"}),
@@ -457,7 +478,7 @@ def test_sendorder_without_client_order_id_is_not_retried_on_503(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -476,7 +497,7 @@ def test_sendorder_without_client_order_id_is_not_retried_on_503(tmp_path):
     assert len(session.calls) == 1
 
 
-def test_sendorder_with_client_order_id_retries_on_503(tmp_path):
+def test_sendorder_with_client_order_id_retries_on_503(postgres_url_factory):
     session = DummySession(
         [
             (503, {"raw_text": "Service Unavailable"}),
@@ -499,7 +520,7 @@ def test_sendorder_with_client_order_id_retries_on_503(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -520,7 +541,7 @@ def test_sendorder_with_client_order_id_retries_on_503(tmp_path):
     assert len(session.calls) == 2
 
 
-def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):
+def test_place_fills_ack_defaults_when_sendstatus_is_sparse(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -545,7 +566,7 @@ def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -567,7 +588,7 @@ def test_place_fills_ack_defaults_when_sendstatus_is_sparse(tmp_path):
     assert "limitPrice" not in sent_payload
 
 
-def test_place_order_merges_execinst_and_reduceonly_without_duplicate_kwarg(tmp_path):
+def test_place_order_merges_execinst_and_reduceonly_without_duplicate_kwarg(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -591,7 +612,7 @@ def test_place_order_merges_execinst_and_reduceonly_without_duplicate_kwarg(tmp_
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -611,7 +632,7 @@ def test_place_order_merges_execinst_and_reduceonly_without_duplicate_kwarg(tmp_
     assert sent_payload["reduceOnly"] is True
 
 
-def test_live_trigger_orders_normalises_nested_order_trigger_payload(tmp_path):
+def test_live_trigger_orders_normalises_nested_order_trigger_payload(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -641,7 +662,7 @@ def test_live_trigger_orders_normalises_nested_order_trigger_payload(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -665,8 +686,8 @@ def test_live_trigger_orders_normalises_nested_order_trigger_payload(tmp_path):
     ]
 
 
-def test_place_order_rounds_stop_price_to_cached_tick_size(tmp_path):
-    public_db_url = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+def test_place_order_rounds_stop_price_to_cached_tick_size(postgres_url_factory):
+    public_db_url = postgres_url_factory("pub")
     session = DummySession(
         [
             {
@@ -689,7 +710,7 @@ def test_place_order_rounds_stop_price_to_cached_tick_size(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         public_db_url=public_db_url,
         session=cast(Any, session),
     )
@@ -726,7 +747,7 @@ def test_place_order_rounds_stop_price_to_cached_tick_size(tmp_path):
         ("ReduceOnly,IndexPrice", "index"),
     ),
 )
-def test_place_order_maps_execinst_trigger_signal(exec_inst, expected_signal, tmp_path):
+def test_place_order_maps_execinst_trigger_signal(exec_inst, expected_signal, postgres_url_factory):
     session = DummySession(
         [
             {
@@ -749,7 +770,7 @@ def test_place_order_maps_execinst_trigger_signal(exec_inst, expected_signal, tm
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -766,7 +787,7 @@ def test_place_order_maps_execinst_trigger_signal(exec_inst, expected_signal, tm
     assert sent_payload["triggerSignal"] == expected_signal
 
 
-def test_authenticated_requests_retry_with_increasing_nonce(tmp_path, monkeypatch):
+def test_authenticated_requests_retry_with_increasing_nonce(postgres_url_factory, monkeypatch):
     session = DummySession(
         [
             {
@@ -787,7 +808,7 @@ def test_authenticated_requests_retry_with_increasing_nonce(tmp_path, monkeypatc
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -835,8 +856,8 @@ def test_build_exec_orders_maps_rows_and_fills():
     assert any(row["ordStatus"] == "Filled" for row in rows)
 
 
-def test_open_orders_reads_private_db(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_open_orders_reads_private_db(postgres_url_factory):
+    db_url = postgres_url_factory("prv")
     adapter = KrakenFuturesAdapter(
         api_key="k",
         api_secret="c2VjcmV0",
@@ -874,8 +895,8 @@ def test_open_orders_reads_private_db(tmp_path):
     assert rows[0]["orderID"] == "OID-1"
 
 
-def test_live_trigger_orders_db_reads_open_stop_rows(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_live_trigger_orders_db_reads_open_stop_rows(postgres_url_factory):
+    db_url = postgres_url_factory("prv")
     adapter = KrakenFuturesAdapter(
         api_key="k",
         api_secret="c2VjcmV0",
@@ -932,7 +953,7 @@ def test_extract_available_margin_reads_auxiliary_available_funds():
     assert available == 123.45
 
 
-def test_validate_symbol_suggests_pi_for_pf_prefix(tmp_path):
+def test_validate_symbol_suggests_pi_for_pf_prefix(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -950,7 +971,7 @@ def test_validate_symbol_suggests_pi_for_pf_prefix(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PF_ADAUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -962,7 +983,7 @@ def test_validate_symbol_suggests_pi_for_pf_prefix(tmp_path):
         raise AssertionError("expected ValueError for invalid PF_ symbol")
 
 
-def test_amend_maps_to_editorder(tmp_path):
+def test_amend_maps_to_editorder(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -986,7 +1007,7 @@ def test_amend_maps_to_editorder(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -1000,8 +1021,8 @@ def test_amend_maps_to_editorder(tmp_path):
     assert sent_payload["size"] == 3
 
 
-def test_amend_rounds_tail_stop_to_contract_tick(tmp_path):
-    public_db_url = f"sqlite:///{tmp_path / 'pub.sqlite'}"
+def test_amend_rounds_tail_stop_to_contract_tick(postgres_url_factory):
+    public_db_url = postgres_url_factory("pub")
     session = DummySession(
         [
             {
@@ -1023,7 +1044,7 @@ def test_amend_rounds_tail_stop_to_contract_tick(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         public_db_url=public_db_url,
         session=cast(Any, session),
     )
@@ -1047,7 +1068,7 @@ def test_amend_rounds_tail_stop_to_contract_tick(tmp_path):
     assert ack.price == 74757.5
 
 
-def test_amend_invalid_price_maps_to_rejected_ack(tmp_path):
+def test_amend_invalid_price_maps_to_rejected_ack(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -1066,7 +1087,7 @@ def test_amend_invalid_price_maps_to_rejected_ack(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -1075,7 +1096,7 @@ def test_amend_invalid_price_maps_to_rejected_ack(tmp_path):
     assert ack.status == "Rejected"
 
 
-def test_cancel_sparse_response_maps_to_canceled_status(tmp_path):
+def test_cancel_sparse_response_maps_to_canceled_status(postgres_url_factory):
     session = DummySession([{"result": "success", "cancelStatus": {"order_id": "OID-1"}}])
     adapter = KrakenFuturesAdapter(
         api_key="k",
@@ -1083,7 +1104,7 @@ def test_cancel_sparse_response_maps_to_canceled_status(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -1093,7 +1114,7 @@ def test_cancel_sparse_response_maps_to_canceled_status(tmp_path):
     assert ack.status == "Canceled"
 
 
-def test_live_order_normalization_reads_camel_case_price_and_quantity(tmp_path):
+def test_live_order_normalization_reads_camel_case_price_and_quantity(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -1118,7 +1139,7 @@ def test_live_order_normalization_reads_camel_case_price_and_quantity(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
         session=cast(Any, session),
     )
 
@@ -1142,7 +1163,7 @@ def test_live_order_normalization_reads_camel_case_price_and_quantity(tmp_path):
     ]
 
 
-def test_validate_symbol_syncs_instrument_rules_to_public_db(tmp_path):
+def test_validate_symbol_syncs_instrument_rules_to_public_db(postgres_url_factory):
     session = DummySession(
         [
             {
@@ -1165,8 +1186,8 @@ def test_validate_symbol_syncs_instrument_rules_to_public_db(tmp_path):
         base_url="https://demo-futures.kraken.com",
         symbol="PI_XBTUSD",
         environment="demo",
-        account_db_url=f"sqlite:///{tmp_path / 'prv.sqlite'}",
-        public_db_url=f"sqlite:///{tmp_path / 'pub.sqlite'}",
+        account_db_url=postgres_url_factory("prv"),
+        public_db_url=postgres_url_factory("pub"),
         session=cast(Any, session),
     )
 

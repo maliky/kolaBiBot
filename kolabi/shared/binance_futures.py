@@ -24,9 +24,9 @@ _BINANCE_FUTURES_ENVIRONMENTS = {
         public_ws_url="wss://stream.binancefuture.com/stream",
         private_ws_url="wss://stream.binancefuture.com/ws",
         rest_url="https://testnet.binancefuture.com",
-        public_db_url="sqlite:///dbs/pub-binance-futures-demo-BTCUSDT.sqlite",
-        private_db_url="sqlite:///dbs/prv-binance-futures-demo.sqlite",
-        critical_private_db_url="sqlite:///dbs/prv-binance-futures-demo-critical.sqlite",
+        public_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market",
+        private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
+        critical_private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical",
         api_key_env="BINANCE_FUTURES_DEMO_API_KEY",
         api_secret_env="BINANCE_FUTURES_DEMO_API_SECRET",
     ),
@@ -35,9 +35,9 @@ _BINANCE_FUTURES_ENVIRONMENTS = {
         public_ws_url="wss://fstream.binance.com/stream",
         private_ws_url="wss://fstream.binance.com/ws",
         rest_url="https://fapi.binance.com",
-        public_db_url="sqlite:///dbs/pub-binance-futures-live-BTCUSDT.sqlite",
-        private_db_url="sqlite:///dbs/prv-binance-futures-live.sqlite",
-        critical_private_db_url="sqlite:///dbs/prv-binance-futures-live-critical.sqlite",
+        public_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market",
+        private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
+        critical_private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical",
         api_key_env="BINANCE_FUTURES_API_KEY",
         api_secret_env="BINANCE_FUTURES_API_SECRET",
     ),
@@ -64,18 +64,20 @@ def binance_futures_environment(environment: str) -> BinanceFuturesEnvironment:
 def binance_futures_public_db_url(environment: str, symbol: str) -> str:
     """Return the default public DB URL for one Binance Futures instrument."""
 
-    env_cfg = binance_futures_environment(environment)
-    safe_symbol = _db_safe_symbol(symbol.strip() or "BTCUSDT")
-    return f"sqlite:///dbs/pub-binance-futures-{env_cfg.environment}-{safe_symbol}.sqlite"
+    del symbol
+    return binance_futures_environment(environment).public_db_url
 
 
 def binance_futures_private_db_url(environment: str, account_scope: str = "default") -> str:
     """Return the default private account DB URL for one Binance account scope."""
 
-    env_cfg = binance_futures_environment(environment)
+    binance_futures_environment(environment)
     safe_scope = _db_safe_symbol(account_scope.strip() or "default")
-    suffix = "" if safe_scope == "default" else f"-{safe_scope}"
-    return f"sqlite:///dbs/prv-binance-futures-{env_cfg.environment}{suffix}.sqlite"
+    suffix = "" if safe_scope == "default" else f"_{safe_scope}"
+    return (
+        "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/"
+        f"kolabi_account{suffix}"
+    )
 
 
 def binance_futures_critical_db_url(
@@ -84,12 +86,12 @@ def binance_futures_critical_db_url(
 ) -> str:
     """Return the default critical private DB URL for one Binance account scope."""
 
-    env_cfg = binance_futures_environment(environment)
+    binance_futures_environment(environment)
     safe_scope = _db_safe_symbol(account_scope.strip() or "default")
-    suffix = "" if safe_scope == "default" else f"-{safe_scope}"
+    suffix = "" if safe_scope == "default" else f"_{safe_scope}"
     return (
-        f"sqlite:///dbs/prv-binance-futures-{env_cfg.environment}"
-        f"{suffix}-critical.sqlite"
+        "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/"
+        f"kolabi_critical{suffix}"
     )
 
 
@@ -99,9 +101,13 @@ def binance_futures_audit_db_url(
 ) -> str:
     """Return the default Binance REST audit DB URL for one account scope."""
 
-    env_cfg = binance_futures_environment(environment)
+    binance_futures_environment(environment)
     safe_scope = _db_safe_symbol(account_scope.strip() or "default")
-    return f"sqlite:///dbs/audit-binance-futures-{env_cfg.environment}-{safe_scope}.sqlite"
+    suffix = "" if safe_scope == "default" else f"_{safe_scope}"
+    return (
+        "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/"
+        f"kolabi_audit{suffix}"
+    )
 
 
 def binance_futures_telemetry_db_url(
@@ -110,9 +116,10 @@ def binance_futures_telemetry_db_url(
 ) -> str:
     """Return the default Binance bot telemetry DB URL for one account scope."""
 
-    env_cfg = binance_futures_environment(environment)
+    binance_futures_environment(environment)
     safe_scope = _db_safe_symbol(account_scope.strip() or "default")
+    suffix = "" if safe_scope == "default" else f"_{safe_scope}"
     return (
-        f"sqlite:///dbs/telemetry-binance-futures-"
-        f"{env_cfg.environment}-{safe_scope}.sqlite"
+        "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/"
+        f"kolabi_telemetry{suffix}"
     )

@@ -39,8 +39,8 @@ class BinanceConfig(KrakenConfig):
 
     pair: str = "BTCUSDT"
     ws_url: str = "wss://stream.binancefuture.com/stream"
-    db_url: str = "sqlite:///dbs/pub-binance-futures-demo-BTCUSDT.sqlite"
-    private_db_url: str = "sqlite:///dbs/prv-binance-futures-demo.sqlite"
+    db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market"
+    private_db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account"
     rest_url: str = "https://testnet.binancefuture.com"
     exchange: str = "binance"
 

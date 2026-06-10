@@ -28,9 +28,9 @@ def _body_query(call: responses.Call) -> dict[str, list[str]]:
 
 
 @responses.activate
-def test_order_round_trip_uses_futures_api_and_client_id(tmp_path) -> None:
+def test_order_round_trip_uses_futures_api_and_client_id(postgres_url_factory) -> None:
     base = "https://test-fapi"
-    audit = f"sqlite:///{tmp_path}/audit.sqlite"
+    audit = postgres_url_factory("audit")
     responses.add(responses.GET, f"{base}/fapi/v1/exchangeInfo", json=EXCHANGE_INFO)
     responses.add(
         responses.POST,
@@ -99,9 +99,9 @@ def test_order_round_trip_uses_futures_api_and_client_id(tmp_path) -> None:
 
 
 @responses.activate
-def test_stop_market_maps_mark_price_and_reduce_only(tmp_path) -> None:
+def test_stop_market_maps_mark_price_and_reduce_only(postgres_url_factory) -> None:
     base = "https://test-fapi"
-    audit = f"sqlite:///{tmp_path}/audit.sqlite"
+    audit = postgres_url_factory("audit")
     responses.add(responses.GET, f"{base}/fapi/v1/exchangeInfo", json=EXCHANGE_INFO)
     responses.add(
         responses.POST,
@@ -136,8 +136,8 @@ def test_stop_market_maps_mark_price_and_reduce_only(tmp_path) -> None:
     assert post_qs["workingType"] == ["MARK_PRICE"]
 
 
-def test_unsupported_index_price_fails_before_request(tmp_path) -> None:
-    audit = f"sqlite:///{tmp_path}/audit.sqlite"
+def test_unsupported_index_price_fails_before_request(postgres_url_factory) -> None:
+    audit = postgres_url_factory("audit")
     adapter = BinanceAdapter("key", "secret", "https://test-fapi", "BTCUSDT", audit_db_url=audit)
     with pytest.raises(ValueError, match="IndexPrice"):
         adapter.place_order(

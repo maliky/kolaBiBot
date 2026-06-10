@@ -290,10 +290,9 @@ scripts/kolabidb private logs --account-scope advers
 * PostgreSQL local DB lanes
 
 - PostgreSQL is the default =kolabidb= backend.
-- Use SQLite explicitly with =--backend sqlite= when you want disposable file-backed smoke tests.
 - The host already has =postgres:16= available.
 - The compose file uses =127.0.0.1:15433= to avoid the existing Tusis PostgreSQL on =127.0.0.1:15432=.
-- PostgreSQL files live under =dbs/postgres= so local DB state is visible beside SQLite fallback files.
+- PostgreSQL files live under =dbs/postgres= so local DB state is visible under the repo-local =dbs= directory.
 - Main and adversarial accounts use separate private, critical, audit, and telemetry databases.
 - Both accounts share the public market database.
 
@@ -334,7 +333,7 @@ mkdir -p dbs/postgres
 docker-compose -f docker-compose.postgres.yml up -d
 #+end_src
 
-Use the helper when you want PostgreSQL to feel like the SQLite background feeder workflow. Feeder logs still live under =./logs=; container logs come from the =postgres= target:
+Use the helper when you want background feeders. Feeder logs still live under =./logs=; container logs come from the =postgres= target:
 
 #+begin_src bash
 scripts/kolabidb postgres start
@@ -345,7 +344,6 @@ scripts/kolabidb private start
 scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
 scripts/kolabidb public logs
 scripts/kolabidb private logs
-scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
 #+end_src
 
 Start the shared public market feeder:
@@ -469,9 +467,9 @@ Private options:
                                 Default: reuse.
 
 Common options:
-  --backend postgres|sqlite    DB lane defaults to use for public/private feeders. Default: postgres.
+  --backend postgres           DB lane defaults to use for public/private feeders. Default: postgres.
   --postgres                   Shortcut for --backend postgres.
-  --env-file PATH              PostgreSQL env file loaded for --backend postgres and postgres target.
+  --env-file PATH              PostgreSQL env file loaded for feeders and the postgres target.
                                Default: .env.postgres.
   --log-level LEVEL             Python log level. Default: INFO.
   --tail-lines N                Lines printed before following logs. Default: 80.
@@ -481,8 +479,6 @@ Common options:
 Examples:
   scripts/kolabidb public start --pair PI_XBTUSD
   scripts/kolabidb private start
-  scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
-  scripts/kolabidb --backend sqlite private start
   scripts/kolabidb postgres logs
   scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
   scripts/kolabidb private start --public spawn --pair PI_XBTUSD
@@ -511,7 +507,7 @@ Shared options:
 |------------------------------------+-------------------------------------------|
 | =--pair=                           | Futures product id, for example PI_XBTUSD |
 | =--environment {demo,live}=        | endpoint family                           |
-| =--db-url=                         | public SQLite DB location, instrument-scoped by default |
+| =--db-url=                         | public PostgreSQL DB URL |
 | =--private-db-url=                 | private DB location used for correlation  |
 | =--ws-url=                         | override public websocket URL             |
 | =--trace-ws=                       | print websocket payload traces            |
@@ -544,7 +540,7 @@ Shared options:
 
 | Option                      | Meaning                                 |
 |-----------------------------+-----------------------------------------|
-| =--account-db-url=          | private SQLite DB location              |
+| =--account-db-url=          | private PostgreSQL DB URL               |
 | =--critical-db-url=         | critical open_orders/fills DB location  |
 | =--exchange=                | exchange label stored in DB             |
 | =--environment {demo,live}= | endpoint family                         |
@@ -585,7 +581,7 @@ Important options:
 | Option                    | Meaning |
 |---------------------------+---------|
 | =-h, --help=              | print helper usage and examples |
-| =--backend postgres\vert sqlite= | choose PostgreSQL lane defaults or SQLite file defaults; default is PostgreSQL |
+| =--backend postgres=       | choose PostgreSQL lane defaults; default is PostgreSQL |
 | =--env-file=              | PostgreSQL env file, default =.env.postgres= |
 | =--pair=                  | instrument for public DB naming, for example =PI_XBTUSD= |
 | =--public reuse\vert spawn= | private start reuses an existing public feeder by default; =spawn= starts one too |
@@ -607,8 +603,6 @@ scripts/kolabidb private logs
 scripts/kolabidb private stop
 scripts/kolabidb postgres start
 scripts/kolabidb postgres logs
-scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
-scripts/kolabidb --backend sqlite private logs
 #+end_src
 
 * bot run

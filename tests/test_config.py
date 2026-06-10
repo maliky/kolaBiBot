@@ -52,14 +52,14 @@ def test_load_exchange_config_missing_credentials(monkeypatch) -> None:
 def test_load_exchange_config_kraken_demo(monkeypatch) -> None:
     monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_KEY", "demo-key")
     monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_SECRET", "demo-secret")
-    monkeypatch.setenv("KRAKEN_FUTURE_AUDIT_DB_URL", "sqlite:///audit.sqlite")
+    monkeypatch.setenv("KRAKEN_FUTURE_AUDIT_DB_URL", "postgresql://audit")
 
     cfg = load_exchange_config("kraken", symbol="PI_XBTUSD", environment="demo")
 
     assert cfg.api_key == "demo-key"
     assert cfg.base_url == "https://demo-futures.kraken.com"
     assert cfg.adapter_kwargs["environment"] == "demo"
-    assert cfg.adapter_kwargs["audit_db_url"] == "sqlite:///audit.sqlite"
+    assert cfg.adapter_kwargs["audit_db_url"] == "postgresql://audit"
 
 
 def test_load_exchange_config_accepts_credential_env_name_overrides(monkeypatch) -> None:
@@ -91,37 +91,37 @@ def test_load_exchange_config_kraken_live(monkeypatch) -> None:
     assert cfg.adapter_kwargs["environment"] == "live"
 
 
-def test_kraken_futures_default_sqlite_paths_live_under_dbs() -> None:
+def test_kraken_futures_default_postgres_lanes() -> None:
     demo = kraken_futures_environment("demo")
     live = kraken_futures_environment("live")
 
-    assert demo.public_db_url == "sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite"
-    assert demo.private_db_url == "sqlite:///dbs/prv-futures-demo.sqlite"
-    assert demo.critical_private_db_url == "sqlite:///dbs/prv-futures-demo-critical.sqlite"
-    assert live.public_db_url == "sqlite:///dbs/pub-futures-live-PI_XBTUSD.sqlite"
-    assert live.private_db_url == "sqlite:///dbs/prv-futures-live.sqlite"
-    assert live.critical_private_db_url == "sqlite:///dbs/prv-futures-live-critical.sqlite"
+    assert demo.public_db_url == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market"
+    assert demo.private_db_url == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account"
+    assert demo.critical_private_db_url == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical"
+    assert live.public_db_url == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market"
+    assert live.private_db_url == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account"
+    assert live.critical_private_db_url == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical"
 
 
-def test_kraken_futures_public_db_path_is_instrument_scoped() -> None:
+def test_kraken_futures_public_db_url_uses_shared_market_lane() -> None:
     assert (
         kraken_futures_public_db_url("demo", "PI_ADAUSD")
-        == "sqlite:///dbs/pub-futures-demo-PI_ADAUSD.sqlite"
+        == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market"
     )
     assert (
         kraken_futures_public_db_url("live", "PF_SOLUSD")
-        == "sqlite:///dbs/pub-futures-live-PF_SOLUSD.sqlite"
+        == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market"
     )
 
 
 def test_kraken_futures_audit_and_telemetry_paths_are_account_scoped() -> None:
     assert (
         kraken_futures_audit_db_url("demo", "default")
-        == "sqlite:///dbs/audit-futures-demo-default.sqlite"
+        == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_audit"
     )
     assert (
         kraken_futures_telemetry_db_url("demo", "advers")
-        == "sqlite:///dbs/telemetry-futures-demo-advers.sqlite"
+        == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_telemetry_advers"
     )
 
 
@@ -132,21 +132,21 @@ def test_binance_futures_default_paths_are_exchange_scoped() -> None:
     assert demo.api_key_env == "BINANCE_FUTURES_DEMO_API_KEY"
     assert (
         binance_futures_public_db_url("demo", "BTCUSDT")
-        == "sqlite:///dbs/pub-binance-futures-demo-BTCUSDT.sqlite"
+        == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market"
     )
     assert (
         binance_futures_private_db_url("demo", "advers")
-        == "sqlite:///dbs/prv-binance-futures-demo-advers.sqlite"
+        == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account_advers"
     )
     assert (
         binance_futures_critical_db_url("demo", "advers")
-        == "sqlite:///dbs/prv-binance-futures-demo-advers-critical.sqlite"
+        == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical_advers"
     )
     assert (
         binance_futures_audit_db_url("demo", "advers")
-        == "sqlite:///dbs/audit-binance-futures-demo-advers.sqlite"
+        == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_audit_advers"
     )
     assert (
         binance_futures_telemetry_db_url("demo", "advers")
-        == "sqlite:///dbs/telemetry-binance-futures-demo-advers.sqlite"
+        == "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_telemetry_advers"
     )

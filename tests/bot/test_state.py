@@ -15,9 +15,9 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 
-def test_runtime_state_reports_ready_when_public_and_private_are_fresh(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_runtime_state_reports_ready_when_public_and_private_are_fresh(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     Base.metadata.create_all(market_engine)
@@ -106,9 +106,9 @@ def test_runtime_state_reports_ready_when_public_and_private_are_fresh(tmp_path)
     assert state.reasons == ()
 
 
-def test_runtime_state_reports_missing_public_schema_as_not_ready(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'empty-pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_runtime_state_reports_missing_public_schema_as_not_ready(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("empty-pub")
+    account_db = postgres_url_factory("prv")
     account_engine = create_engine(account_db)
     Base.metadata.create_all(account_engine)
     now = datetime.now(timezone.utc)
@@ -141,11 +141,11 @@ def test_runtime_state_reports_missing_public_schema_as_not_ready(tmp_path) -> N
 
 
 def test_runtime_state_reports_missing_critical_private_schema_as_not_ready(
-    tmp_path,
+    postgres_url_factory,
 ) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
-    critical_db = f"sqlite:///{tmp_path / 'empty-critical.sqlite'}"
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
+    critical_db = postgres_url_factory("empty-critical")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     Base.metadata.create_all(market_engine)
@@ -188,10 +188,10 @@ def test_runtime_state_reports_missing_critical_private_schema_as_not_ready(
     assert state.fill_count == 0
 
 
-def test_runtime_state_tolerates_missing_broad_account_schema(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'empty-account.sqlite'}"
-    critical_db = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+def test_runtime_state_tolerates_missing_broad_account_schema(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("empty-account")
+    critical_db = postgres_url_factory("critical")
     market_engine = create_engine(market_db)
     critical_engine = create_engine(critical_db)
     Base.metadata.create_all(market_engine)
@@ -247,9 +247,9 @@ def test_runtime_state_tolerates_missing_broad_account_schema(tmp_path) -> None:
     assert state.position_entry_price is None
 
 
-def test_runtime_state_flags_stale_public_market(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_runtime_state_flags_stale_public_market(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     Base.metadata.create_all(market_engine)
@@ -313,9 +313,9 @@ def test_runtime_state_flags_stale_public_market(tmp_path) -> None:
     assert "public market data is stale" in state.reasons
 
 
-def test_runtime_state_accepts_recent_indicator_write_when_book_is_unchanged(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_runtime_state_accepts_recent_indicator_write_when_book_is_unchanged(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     Base.metadata.create_all(market_engine)
@@ -392,9 +392,9 @@ def test_runtime_state_accepts_recent_indicator_write_when_book_is_unchanged(tmp
     assert state.public.age_seconds <= 10.0
 
 
-def test_runtime_state_ignores_stale_rest_reconcile_error(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_runtime_state_ignores_stale_rest_reconcile_error(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     Base.metadata.create_all(market_engine)
@@ -460,9 +460,9 @@ def test_runtime_state_ignores_stale_rest_reconcile_error(tmp_path) -> None:
     assert state.ready is True
 
 
-def test_runtime_state_falls_back_to_private_ws_critical_when_alias_missing(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_runtime_state_falls_back_to_private_ws_critical_when_alias_missing(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     Base.metadata.create_all(market_engine)
@@ -524,10 +524,10 @@ def test_runtime_state_falls_back_to_private_ws_critical_when_alias_missing(tmp_
     assert state.ready is True
 
 
-def test_runtime_state_reads_order_lifecycle_from_critical_db(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
-    critical_db = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+def test_runtime_state_reads_order_lifecycle_from_critical_db(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
+    critical_db = postgres_url_factory("critical")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     critical_engine = create_engine(critical_db)
@@ -625,9 +625,109 @@ def test_runtime_state_reads_order_lifecycle_from_critical_db(tmp_path) -> None:
     assert records[0].client_order_id == "CID-T"
 
 
-def test_private_order_records_use_raw_execution_price_when_column_is_empty(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_runtime_state_open_order_count_uses_latest_identity_row(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
+    critical_db = postgres_url_factory("critical")
+    market_engine = create_engine(market_db)
+    account_engine = create_engine(account_db)
+    critical_engine = create_engine(critical_db)
+    Base.metadata.create_all(market_engine)
+    Base.metadata.create_all(account_engine)
+    Base.metadata.create_all(critical_engine)
+    now = datetime.now(timezone.utc)
+    with Session(market_engine) as session:
+        session.add(
+            MarketSnapshot(
+                local_uuid="snap-latest-count",
+                exchange="kraken",
+                environment="demo",
+                market_type="futures",
+                symbol="PI_XBTUSD",
+                best_bid=100.0,
+                best_ask=101.0,
+                avg_bid=99.5,
+                avg_ask=101.5,
+                mid_price=100.5,
+                spread=1.0,
+                imbalance=0.55,
+                source_timestamp=now - timedelta(seconds=1),
+                local_timestamp=now - timedelta(seconds=1),
+            )
+        )
+        session.commit()
+    with Session(critical_engine) as session:
+        session.add_all(
+            [
+                ExchangeConnection(
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    stream_kind="private_ws",
+                    status="healthy",
+                    last_heartbeat_at=now - timedelta(seconds=2),
+                    updated_at=now - timedelta(seconds=2),
+                ),
+                ExchangeOrder(
+                    local_uuid="order-latest-count-open",
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    account_scope="default",
+                    symbol="PI_XBTUSD",
+                    exchange_order_id="OID-LATEST",
+                    client_order_id="CID-LATEST",
+                    side="sell",
+                    order_type="stop",
+                    status="open",
+                    price=99.0,
+                    quantity=4.0,
+                    filled_quantity=0.0,
+                    reduce_only=True,
+                    raw_payload={},
+                    source_timestamp=now - timedelta(seconds=20),
+                    local_timestamp=now - timedelta(seconds=20),
+                ),
+                ExchangeOrder(
+                    local_uuid="order-latest-count-canceled",
+                    exchange="kraken",
+                    environment="demo",
+                    market_type="futures",
+                    account_scope="default",
+                    symbol="PI_XBTUSD",
+                    exchange_order_id="OID-LATEST",
+                    client_order_id="CID-LATEST",
+                    side="sell",
+                    order_type="stop",
+                    status="canceled",
+                    price=99.0,
+                    quantity=4.0,
+                    filled_quantity=0.0,
+                    reduce_only=True,
+                    raw_payload={},
+                    source_timestamp=now,
+                    local_timestamp=now,
+                ),
+            ]
+        )
+        session.commit()
+
+    client = KrakenRuntimeStateClient(
+        market_db_url=market_db,
+        account_db_url=account_db,
+        critical_account_db_url=critical_db,
+        symbol="PI_XBTUSD",
+    )
+
+    state = client.fetch_runtime_state()
+
+    assert state.ready is True
+    assert state.open_order_count == 0
+
+
+def test_private_order_records_use_raw_execution_price_when_column_is_empty(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     Base.metadata.create_all(market_engine)
@@ -673,10 +773,10 @@ def test_private_order_records_use_raw_execution_price_when_column_is_empty(tmp_
 
 
 def test_runtime_state_does_not_accept_fresh_account_stream_when_private_ws_stale(
-    tmp_path,
+    postgres_url_factory,
 ) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     Base.metadata.create_all(market_engine)

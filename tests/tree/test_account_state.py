@@ -39,9 +39,8 @@ from kolabi.tree.account import (
     sign_rest_auth,
     stream_kind_uses_critical_db,
     subscribe_messages,
-    upgrade_private_schema,
 )
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.orm import Session
 
 
@@ -49,8 +48,8 @@ def _result_items(result: dict[str, object], key: str) -> list[Any]:
     return cast(list[Any], result[key])
 
 
-def test_account_state_status_is_empty_before_events(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_account_state_status_is_empty_before_events(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
 
     status = store.latest_status("private_ws")
@@ -59,8 +58,8 @@ def test_account_state_status_is_empty_before_events(tmp_path):
     assert status["stream_kind"] == "private_ws"
 
 
-def test_record_connection_status_updates_existing_row(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_record_connection_status_updates_existing_row(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     first_time = datetime(2026, 5, 6, 1, 0, tzinfo=timezone.utc)
     second_time = datetime(2026, 5, 6, 1, 1, tzinfo=timezone.utc)
@@ -73,8 +72,8 @@ def test_record_connection_status_updates_existing_row(tmp_path):
     assert second.last_heartbeat_at == second_time.replace(tzinfo=None)
 
 
-def test_reconnecting_status_does_not_refresh_connection_heartbeat(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_reconnecting_status_does_not_refresh_connection_heartbeat(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     healthy_time = datetime(2026, 5, 6, 1, 0, tzinfo=timezone.utc)
     reconnect_time = datetime(2026, 5, 6, 1, 1, tzinfo=timezone.utc)
@@ -94,8 +93,8 @@ def test_reconnecting_status_does_not_refresh_connection_heartbeat(tmp_path):
     assert reconnecting.last_error == "server rejected WebSocket connection: HTTP 503"
 
 
-def test_critical_liveness_refresh_updates_private_ws_alias(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_critical_liveness_refresh_updates_private_ws_alias(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     config = AccountStreamConfig(db_url=db_url, health_write_seconds=1.0)
     store = AccountStateStore(config)
     profile = PrivateStreamProfile(
@@ -126,8 +125,8 @@ def test_critical_liveness_refresh_updates_private_ws_alias(tmp_path):
     assert datetime.fromisoformat(str(status_critical["updated_at"])) > baseline_naive
 
 
-def test_account_liveness_refresh_does_not_touch_private_ws_alias(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_account_liveness_refresh_does_not_touch_private_ws_alias(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     config = AccountStreamConfig(db_url=db_url, health_write_seconds=1.0)
     store = AccountStateStore(config)
     profile = PrivateStreamProfile(
@@ -164,9 +163,9 @@ def test_private_ws_status_uses_critical_db_selector() -> None:
     assert stream_kind_uses_critical_db("rest_reconciler") is False
 
 
-def test_critical_stream_writes_critical_db_and_mirrors_account_db(tmp_path):
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
-    critical_db = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+def test_critical_stream_writes_critical_db_and_mirrors_account_db(postgres_url_factory):
+    account_db = postgres_url_factory("prv")
+    critical_db = postgres_url_factory("critical")
     config = AccountStreamConfig(db_url=account_db, critical_db_url=critical_db)
     account_store = AccountStateStore(config)
     critical_config = critical_private_config(config)
@@ -236,8 +235,8 @@ def test_critical_stream_writes_critical_db_and_mirrors_account_db(tmp_path):
         stream.stop()
 
 
-def test_record_order_and_fill(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_record_order_and_fill(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
 
     order = store.record_order(
@@ -363,8 +362,8 @@ def test_map_open_order_delta_to_normalized_order():
     assert order.source_timestamp == datetime(2026, 5, 6, tzinfo=timezone.utc)
 
 
-def test_map_fill_event_and_record_with_placeholder_order(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_map_fill_event_and_record_with_placeholder_order(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     event = map_fill_event(
         {
@@ -391,8 +390,8 @@ def test_map_fill_event_and_record_with_placeholder_order(tmp_path):
         assert orders[0].exchange_order_id == "OID-2"
 
 
-def test_fill_event_persists_client_order_id_from_cli_ord_id(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_fill_event_persists_client_order_id_from_cli_ord_id(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     event = map_fill_event(
         {
@@ -414,8 +413,8 @@ def test_fill_event_persists_client_order_id_from_cli_ord_id(tmp_path):
         assert order.client_order_id == "kolabi-M-head-1"
 
 
-def test_kraken_fill_payload_maps_side_type_and_raw_payload(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_kraken_fill_payload_maps_side_type_and_raw_payload(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     payload = {
         "buy": True,
@@ -449,8 +448,8 @@ def test_kraken_fill_payload_maps_side_type_and_raw_payload(tmp_path):
         assert stored_fill.raw_payload["order_id"] == "OID-3"
 
 
-def test_duplicate_fill_id_is_idempotent(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_duplicate_fill_id_is_idempotent(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     event = map_fill_event(
         {
@@ -472,8 +471,8 @@ def test_duplicate_fill_id_is_idempotent(tmp_path):
         assert len(session.execute(select(ExchangeFill)).scalars().all()) == 1
 
 
-def test_handle_message_persists_raw_event_and_fill_snapshot(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_persists_raw_event_and_fill_snapshot(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "fills_snapshot",
@@ -512,8 +511,8 @@ def test_handle_message_persists_raw_event_and_fill_snapshot(tmp_path):
         assert fill.exchange_fill_id == "FID-5"
 
 
-def test_handle_message_logs_order_delta_event(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_logs_order_delta_event(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "open_orders",
@@ -549,8 +548,8 @@ def test_handle_message_logs_order_delta_event(tmp_path, caplog):
     assert "reason=new_placed_order_by_user" in caplog.text
 
 
-def test_handle_message_logs_cancel_status_on_order_event(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_logs_cancel_status_on_order_event(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "open_orders",
@@ -581,8 +580,8 @@ def test_handle_message_logs_cancel_status_on_order_event(tmp_path, caplog):
     assert "status=canceled" in caplog.text
 
 
-def test_handle_message_logs_cancel_status_for_root_order_delta(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_logs_cancel_status_for_root_order_delta(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "open_orders",
@@ -605,8 +604,8 @@ def test_handle_message_logs_cancel_status_for_root_order_delta(tmp_path, caplog
     assert "reason=cancelled_by_user" in caplog.text
 
 
-def test_handle_message_enriches_root_cancel_with_existing_order_state(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_enriches_root_cancel_with_existing_order_state(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
 
@@ -648,8 +647,8 @@ def test_handle_message_enriches_root_cancel_with_existing_order_state(tmp_path,
     assert "status=canceled" in caplog.text
 
 
-def test_handle_message_logs_fill_delta_event(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_logs_fill_delta_event(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "fills",
@@ -683,8 +682,8 @@ def test_handle_message_logs_fill_delta_event(tmp_path, caplog):
     assert "fee_ccy=BTC" in caplog.text
 
 
-def test_handle_message_logs_snapshot_summary_only(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_logs_snapshot_summary_only(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "open_orders_snapshot",
@@ -722,8 +721,8 @@ def test_handle_message_logs_snapshot_summary_only(tmp_path, caplog):
     assert "order_event feed=open_orders_snapshot" not in caplog.text
 
 
-def test_open_orders_snapshot_tombstones_missing_open_order(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_open_orders_snapshot_tombstones_missing_open_order(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     config = AccountStreamConfig(db_url=db_url, snapshot_tombstone_grace_seconds=0.0)
     store = AccountStateStore(config)
     stream = KrakenFuturesPrivateStream(
@@ -762,8 +761,8 @@ def test_open_orders_snapshot_tombstones_missing_open_order(tmp_path, caplog):
     assert "private_snapshot feed=open_orders_snapshot rows=0 tombstoned=1" in caplog.text
 
 
-def test_open_orders_snapshot_tombstones_missing_untouched_order(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_open_orders_snapshot_tombstones_missing_untouched_order(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     config = AccountStreamConfig(db_url=db_url, snapshot_tombstone_grace_seconds=0.0)
     store = AccountStateStore(config)
     store.record_order(
@@ -800,8 +799,8 @@ def test_open_orders_snapshot_tombstones_missing_untouched_order(tmp_path, caplo
     assert "private_snapshot feed=open_orders_snapshot rows=0 tombstoned=1" in caplog.text
 
 
-def test_open_orders_snapshot_does_not_tombstone_fresh_missing_order(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_open_orders_snapshot_does_not_tombstone_fresh_missing_order(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     config = AccountStreamConfig(db_url=db_url)
     store = AccountStateStore(config)
     stream = KrakenFuturesPrivateStream(
@@ -836,9 +835,9 @@ def test_open_orders_snapshot_does_not_tombstone_fresh_missing_order(tmp_path):
     assert row.status == "open"
 
 
-def test_rest_reconcile_tombstones_missing_open_order_in_critical_db(tmp_path):
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
-    critical_db = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+def test_rest_reconcile_tombstones_missing_open_order_in_critical_db(postgres_url_factory):
+    account_db = postgres_url_factory("prv")
+    critical_db = postgres_url_factory("critical")
     config = AccountStreamConfig(
         db_url=account_db,
         critical_db_url=critical_db,
@@ -931,18 +930,16 @@ def test_rest_reconcile_failure_logs_immediately_and_counts_next_summary(caplog)
     assert "kraken_reconcile\tlive\t2\t1\t10\t10.0s\t1\t1\ttimeout" in messages
 
 
-def test_critical_mirror_config_uses_short_sqlite_timeout() -> None:
+def test_critical_mirror_config_uses_broad_account_lane() -> None:
     config = AccountStreamConfig(
-        db_url="sqlite:///main.sqlite",
-        critical_db_url="sqlite:///critical.sqlite",
-        sqlite_busy_timeout_seconds=30.0,
-        critical_mirror_busy_timeout_seconds=0.5,
+        db_url="postgresql+psycopg://x/main",
+        critical_db_url="postgresql+psycopg://x/critical",
     )
 
     mirror = critical_mirror_config(config)
 
-    assert mirror.db_url == config.db_url
-    assert mirror.sqlite_busy_timeout_seconds == 0.5
+    assert mirror is config
+    assert mirror.db_url == "postgresql+psycopg://x/main"
 
 
 def test_reconciler_status_write_failure_is_fail_open(caplog) -> None:
@@ -964,11 +961,11 @@ def test_reconciler_status_write_failure_is_fail_open(caplog) -> None:
     assert "snapshot lane locked" in caplog.text
 
 
-def test_private_ingest_mirror_skips_sqlite_lock(caplog) -> None:
+def test_private_ingest_mirror_logs_write_failure(caplog) -> None:
     class _LockedStore:
         def ingest_message(self, *args, **kwargs):
             del args, kwargs
-            raise RuntimeError("sqlite3.OperationalError: database is locked")
+            raise RuntimeError("mirror write failed")
 
     logger = logging.getLogger("test-private-mirror")
     mirror = PrivateIngestMirror(
@@ -988,11 +985,12 @@ def test_private_ingest_mirror_skips_sqlite_lock(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger=logger.name):
         mirror._run()
 
-    assert "critical mirror skipped locked message" in caplog.text
+    assert "kraken_account critical mirror failed" in caplog.text
+    assert "mirror write failed" in caplog.text
 
 
-def test_handle_message_logs_balance_delta_event(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_logs_balance_delta_event(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "balances",
@@ -1011,8 +1009,8 @@ def test_handle_message_logs_balance_delta_event(tmp_path, caplog):
     assert "balance_event feed=balances asset=USD" in caplog.text
 
 
-def test_handle_message_suppresses_unchanged_balance_logs(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_suppresses_unchanged_balance_logs(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "balances",
@@ -1032,8 +1030,8 @@ def test_handle_message_suppresses_unchanged_balance_logs(tmp_path, caplog):
     assert caplog.text.count("balance_event feed=balances asset=USD") == 1
 
 
-def test_handle_message_suppresses_balance_log_if_same_as_db(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_suppresses_balance_log_if_same_as_db(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     config = AccountStreamConfig(db_url=db_url)
     store = AccountStateStore(config)
     store.record_balance(
@@ -1061,8 +1059,8 @@ def test_handle_message_suppresses_balance_log_if_same_as_db(tmp_path, caplog):
     assert "balance_event feed=balances asset=USD" not in caplog.text
 
 
-def test_handle_message_suppresses_null_balance_logs(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_suppresses_null_balance_logs(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "balances",
@@ -1081,8 +1079,8 @@ def test_handle_message_suppresses_null_balance_logs(tmp_path, caplog):
     assert "balance_event feed=balances asset=USD" not in caplog.text
 
 
-def test_handle_message_logs_position_delta_event(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_logs_position_delta_event(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "open_positions",
@@ -1110,8 +1108,8 @@ def test_handle_message_logs_position_delta_event(tmp_path, caplog):
     assert "side=long" in caplog.text
 
 
-def test_handle_message_suppresses_unchanged_position_event(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_suppresses_unchanged_position_event(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "open_positions",
@@ -1139,8 +1137,8 @@ def test_handle_message_suppresses_unchanged_position_event(tmp_path, caplog):
     assert caplog.text.count("position_event feed=open_positions symbol=PI_XBTUSD") == 1
 
 
-def test_empty_open_positions_snapshot_records_flat_position(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_empty_open_positions_snapshot_records_flat_position(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     from kolabi.tree.account import KrakenFuturesCredentials, KrakenFuturesPrivateStream
 
@@ -1188,8 +1186,8 @@ def test_empty_open_positions_snapshot_records_flat_position(tmp_path, caplog):
     assert "size=0.00000000" in caplog.text
 
 
-def test_handle_message_logs_private_notice_delta_event(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_logs_private_notice_delta_event(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "notifications_auth",
@@ -1210,8 +1208,8 @@ def test_handle_message_logs_private_notice_delta_event(tmp_path, caplog):
     assert "order_id=OID-N1" in caplog.text
 
 
-def test_handle_message_suppresses_empty_unknown_private_notice_info(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_suppresses_empty_unknown_private_notice_info(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "notifications_auth",
@@ -1230,8 +1228,8 @@ def test_handle_message_suppresses_empty_unknown_private_notice_info(tmp_path, c
     assert "private_notice_ignored feed=notifications_auth" not in caplog.text
 
 
-def test_handle_message_logs_unknown_private_notice_with_order_id(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_handle_message_logs_unknown_private_notice_with_order_id(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {
         "feed": "notifications_auth",
@@ -1272,8 +1270,8 @@ def test_map_balances_handles_flex_futures_currencies_shape():
     assert by_asset["BTC"].total == 0.02
 
 
-def test_raw_event_retention_limit_keeps_latest_events(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_raw_event_retention_limit_keeps_latest_events(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(
         AccountStreamConfig(
             db_url=db_url,
@@ -1299,8 +1297,8 @@ def test_raw_event_retention_limit_keeps_latest_events(tmp_path):
         assert [row.exchange_sequence for row in rows] == ["1", "2"]
 
 
-def test_raw_event_time_retention_deletes_old_events(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_raw_event_time_retention_deletes_old_events(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(
         AccountStreamConfig(
             db_url=db_url,
@@ -1331,8 +1329,8 @@ def test_raw_event_time_retention_deletes_old_events(tmp_path):
         assert [row.exchange_sequence for row in rows] == ["new"]
 
 
-def test_private_storage_maintenance_prunes_duplicate_state_and_audits(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_private_storage_maintenance_prunes_duplicate_state_and_audits(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(
         AccountStreamConfig(
             db_url=db_url,
@@ -1489,8 +1487,8 @@ def test_private_storage_maintenance_prunes_duplicate_state_and_audits(tmp_path)
     assert len(audits) == 2
 
 
-def test_critical_private_storage_shields_raw_and_ingest_audits(tmp_path, caplog):
-    db_url = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+def test_critical_private_storage_shields_raw_and_ingest_audits(postgres_url_factory, caplog):
+    db_url = postgres_url_factory("critical")
     store = AccountStateStore(
         AccountStreamConfig(
             db_url=db_url,
@@ -1533,8 +1531,8 @@ def test_critical_private_storage_shields_raw_and_ingest_audits(tmp_path, caplog
     assert "FORENSIC_SHIELD stream=private_ws_critical" in caplog.text
 
 
-def test_critical_private_storage_prunes_when_forensic_prune_is_allowed(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+def test_critical_private_storage_prunes_when_forensic_prune_is_allowed(postgres_url_factory):
+    db_url = postgres_url_factory("critical")
     store = AccountStateStore(
         AccountStreamConfig(
             db_url=db_url,
@@ -1576,8 +1574,8 @@ def test_critical_private_storage_prunes_when_forensic_prune_is_allowed(tmp_path
     assert len(audits) == 1
 
 
-def test_raw_event_consecutive_duplicate_is_collapsed_with_counter(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_raw_event_consecutive_duplicate_is_collapsed_with_counter(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     message = {"feed": "notifications_auth", "notifications": []}
 
@@ -1599,8 +1597,8 @@ def test_raw_event_consecutive_duplicate_is_collapsed_with_counter(tmp_path):
         assert rows[0].last_seen_at >= rows[0].received_at
 
 
-def test_raw_event_dedup_is_scoped_by_event_and_stream(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_raw_event_dedup_is_scoped_by_event_and_stream(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     payload: dict[str, list[object]] = {"notifications": []}
 
@@ -1629,39 +1627,18 @@ def test_raw_event_dedup_is_scoped_by_event_and_stream(tmp_path):
         ]
 
 
-def test_schema_upgrade_skips_non_sqlite_engines(monkeypatch):
-    class Dialect:
-        name = "postgresql"
-
-    class Engine:
-        dialect = Dialect()
-
-    def fail_inspect(_engine):
-        raise AssertionError("inspect should not run for non-sqlite engines")
-
-    monkeypatch.setattr(account_module, "inspect", fail_inspect)
-
-    upgrade_private_schema(Engine())
-
-
-def test_private_schema_adds_raw_event_latest_lookup_index(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_private_schema_adds_raw_event_latest_lookup_index(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
 
-    with store.engine.connect() as connection:
-        indexes = {
-            str(row[1])
-            for row in connection.exec_driver_sql(
-                "PRAGMA index_list(raw_exchange_events)"
-            )
-        }
+    indexes = {index["name"] for index in inspect(store.engine).get_indexes("raw_exchange_events")}
 
     assert "ix_raw_exchange_events_event_latest" in indexes
 
 
-def test_main_handles_ctrl_c_as_clean_stop(tmp_path, monkeypatch, capsys):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
-    critical_db_url = f"sqlite:///{tmp_path / 'critical.sqlite'}"
+def test_main_handles_ctrl_c_as_clean_stop(postgres_url_factory, monkeypatch, capsys):
+    db_url = postgres_url_factory("prv-market")
+    critical_db_url = postgres_url_factory("critical")
     monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_KEY", "key")
     monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_SECRET", "secret")
 
@@ -1707,14 +1684,14 @@ def test_account_parser_uses_critical_db_url_only() -> None:
         [
             "run",
             "--account-db-url",
-            "sqlite:///account.sqlite",
+            "postgresql+psycopg://x/account",
             "--critical-db-url",
-            "sqlite:///critical.sqlite",
+            "postgresql+psycopg://x/critical",
         ]
     )
 
-    assert args.db_url == "sqlite:///account.sqlite"
-    assert args.critical_db_url == "sqlite:///critical.sqlite"
+    assert args.db_url == "postgresql+psycopg://x/account"
+    assert args.critical_db_url == "postgresql+psycopg://x/critical"
     config = account_module.config_from_args(args)
     assert config.forensic_shield_critical is True
     with pytest.raises(SystemExit):
@@ -1722,7 +1699,7 @@ def test_account_parser_uses_critical_db_url_only() -> None:
             [
                 "run",
                 "--critical-account-db-url",
-                "sqlite:///critical.sqlite",
+                "postgresql+psycopg://x/critical",
             ]
         )
 
@@ -1741,8 +1718,8 @@ def test_account_parser_can_explicitly_allow_critical_forensic_prune() -> None:
     assert config.forensic_shield_critical is False
 
 
-def test_map_balances_and_positions_are_persisted(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_map_balances_and_positions_are_persisted(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     balances = map_balances(
         {
@@ -1781,8 +1758,8 @@ def test_map_balances_and_positions_are_persisted(tmp_path):
         assert position_rows[0].funding_rate == 0.0001
 
 
-def test_unchanged_balance_snapshots_are_throttled(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_unchanged_balance_snapshots_are_throttled(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(
         AccountStreamConfig(
             db_url=db_url,
@@ -1823,8 +1800,8 @@ def test_unchanged_balance_snapshots_are_throttled(tmp_path):
     assert len(_result_items(third, "balances")) == 1
 
 
-def test_changed_balance_snapshot_bypasses_throttle(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_changed_balance_snapshot_bypasses_throttle(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(
         AccountStreamConfig(
             db_url=db_url,
@@ -1857,8 +1834,8 @@ def test_default_balance_snapshot_throttle_is_longer_than_positions() -> None:
     assert AccountStreamConfig.position_write_min_interval_seconds == 60.0
 
 
-def test_balance_assets_are_normalized_and_payloads_are_compact(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_balance_assets_are_normalized_and_payloads_are_compact(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     received_at = datetime(2026, 5, 30, 1, 0, tzinfo=timezone.utc)
 
@@ -1896,8 +1873,8 @@ def test_balance_assets_are_normalized_and_payloads_are_compact(tmp_path):
         assert "flex_futures" not in row.raw_payload
 
 
-def test_zero_balance_noise_is_skipped_until_nonzero_transition(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_zero_balance_noise_is_skipped_until_nonzero_transition(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
     first_at = datetime(2026, 5, 30, 1, 0, tzinfo=timezone.utc)
 
@@ -1932,8 +1909,8 @@ def test_zero_balance_noise_is_skipped_until_nonzero_transition(tmp_path):
     assert [row.total for row in rows] == [10.0, 0.0]
 
 
-def test_unchanged_position_snapshots_are_throttled(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_unchanged_position_snapshots_are_throttled(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(
         AccountStreamConfig(
             db_url=db_url,
@@ -1980,8 +1957,8 @@ def test_unchanged_position_snapshots_are_throttled(tmp_path):
     assert len(_result_items(third, "positions")) == 1
 
 
-def test_changed_position_snapshot_bypasses_throttle(tmp_path):
-    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+def test_changed_position_snapshot_bypasses_throttle(postgres_url_factory):
+    db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(
         AccountStreamConfig(
             db_url=db_url,

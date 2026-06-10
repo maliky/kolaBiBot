@@ -13,7 +13,6 @@ from uuid import uuid4
 
 import requests
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.kraken_contract import build_send_order_contract
@@ -37,9 +36,6 @@ from kolabi.shared.pruning import DEFAULT_PRUNING
 from kolabi.tree.account import sign_rest_auth
 
 _LOGGER = logging.getLogger("kola")
-_REST_AUDIT_LOCK_RETRIES = 3
-_REST_AUDIT_LOCK_SLEEP_SECONDS = 0.05
-_REST_AUDIT_SQLITE_BUSY_TIMEOUT_SECONDS = 0.5
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
@@ -60,13 +56,9 @@ def _default_audit_db_url(
     account_scope: str,
     account_db_url: str | None,
 ) -> str:
-    """Keep explicit account DB tests local while splitting audit writes by default."""
+    """Return the default PostgreSQL audit lane."""
 
-    if account_db_url and account_db_url.startswith("sqlite:///"):
-        path = account_db_url.removeprefix("sqlite:///")
-        if path.endswith(".sqlite"):
-            return f"sqlite:///{path[:-7]}-audit.sqlite"
-        return f"{account_db_url}-audit"
+    del account_db_url
     return kraken_futures_audit_db_url(environment, account_scope)
 
 
@@ -120,10 +112,7 @@ class KrakenFuturesAdapter(ExchangeABC):
         self.dummyID = ""
         self._last_nonce = 0
         self._engine = create_persistence_engine(self.account_db_url)
-        self._audit_engine = create_persistence_engine(
-            self.audit_db_url,
-            sqlite_busy_timeout_seconds=_REST_AUDIT_SQLITE_BUSY_TIMEOUT_SECONDS,
-        )
+        self._audit_engine = create_persistence_engine(self.audit_db_url)
         self._public_engine = create_persistence_engine(self.public_db_url)
         self._sessionmaker = sessionmaker(
             bind=self._engine,
@@ -327,61 +316,46 @@ class KrakenFuturesAdapter(ExchangeABC):
         ack_order_id = endpoint_order_id
         ack_client_order_id = client_order_id
         with self._audit_sessionmaker() as session:
-            for retry in range(_REST_AUDIT_LOCK_RETRIES + 1):
-                try:
-                    session.add(
-                        ExchangeRestCall(
-                            local_uuid=str(uuid4()),
-                            exchange="kraken",
-                            environment=self.environment,
-                            market_type="futures",
-                            account_scope=self.account_scope,
-                            symbol=self.symbol,
-                            method=method.upper(),
-                            path=path,
-                            request_params=request_payload,
-                            attempt_count=attempt_count,
-                            http_status=http_status,
-                            result_kind=result_kind,
-                            response_payload=payload,
-                            error_text=error_text,
-                            client_order_id=client_order_id,
-                            exchange_order_id=exchange_order_id,
-                            endpoint_order_id=endpoint_order_id,
-                            correlation_id=client_order_id or endpoint_order_id or request_order_id,
-                            ack_status=ack_status,
-                            ack_order_id=ack_order_id,
-                            ack_client_order_id=ack_client_order_id,
-                        )
-                    )
-                    session.commit()
-                    self._prune_rest_audit_if_due(session)
-                    return
-                except OperationalError as exc:
-                    session.rollback()
-                    if _is_sqlite_locked_error(exc) and retry < _REST_AUDIT_LOCK_RETRIES:
-                        time.sleep(_REST_AUDIT_LOCK_SLEEP_SECONDS * (retry + 1))
-                        continue
-                    self._record_rest_audit_failure(
-                        method=method,
+            try:
+                session.add(
+                    ExchangeRestCall(
+                        local_uuid=str(uuid4()),
+                        exchange="kraken",
+                        environment=self.environment,
+                        market_type="futures",
+                        account_scope=self.account_scope,
+                        symbol=self.symbol,
+                        method=method.upper(),
                         path=path,
+                        request_params=request_payload,
+                        attempt_count=attempt_count,
+                        http_status=http_status,
+                        result_kind=result_kind,
+                        response_payload=payload,
+                        error_text=error_text,
                         client_order_id=client_order_id,
+                        exchange_order_id=exchange_order_id,
                         endpoint_order_id=endpoint_order_id,
-                        retry=retry,
-                        exc=exc,
+                        correlation_id=client_order_id or endpoint_order_id or request_order_id,
+                        ack_status=ack_status,
+                        ack_order_id=ack_order_id,
+                        ack_client_order_id=ack_client_order_id,
                     )
-                    return
-                except Exception as exc:
-                    session.rollback()
-                    self._record_rest_audit_failure(
-                        method=method,
-                        path=path,
-                        client_order_id=client_order_id,
-                        endpoint_order_id=endpoint_order_id,
-                        retry=retry,
-                        exc=exc,
-                    )
-                    return
+                )
+                session.commit()
+                self._prune_rest_audit_if_due(session)
+                return
+            except Exception as exc:
+                session.rollback()
+                self._record_rest_audit_failure(
+                    method=method,
+                    path=path,
+                    client_order_id=client_order_id,
+                    endpoint_order_id=endpoint_order_id,
+                    retry=0,
+                    exc=exc,
+                )
+                return
 
     def _record_rest_audit_failure(
         self,
@@ -1293,23 +1267,6 @@ def _payload_has_client_order_id(payload: Sequence[tuple[str, Any]]) -> bool:
 
 def _generated_client_order_id() -> str:
     return f"k-{uuid4().hex}"
-
-
-def _is_sqlite_locked_error(exc: BaseException) -> bool:
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        message = str(current).lower()
-        if "database is locked" in message or "database table is locked" in message:
-            return True
-        nested = getattr(current, "orig", None)
-        if isinstance(nested, BaseException):
-            current = nested
-            continue
-        cause = current.__cause__
-        current = cause if isinstance(cause, BaseException) else None
-    return False
 
 
 def _compact_error(exc: BaseException) -> str:

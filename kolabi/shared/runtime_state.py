@@ -2,7 +2,7 @@
 
 Purpose: provide typed public/private state snapshots used by bot runtime
 preflight and pair-cycle execution.
-Inputs: SQLite URLs, exchange/environment/symbol filters.
+Inputs: PostgreSQL URLs, exchange/environment/symbol filters.
 Outputs: `PublicMarketState`, `PrivateFeedState`, `StrategyRuntimeState`.
 Side effects: database reads and polling sleeps in wait loops.
 Important types: typed DB records (`PublicBookRecord`, `PrivateOrderRecord`,
@@ -171,7 +171,7 @@ def _missing_private_feed_state(stream_kind: str) -> PrivateFeedState:
 
 
 class KrakenRuntimeStateClient:
-    """Read strategy-facing public and private state from local SQLite stores."""
+    """Read strategy-facing public and private state from PostgreSQL stores."""
 
     def __init__(
         self,
@@ -351,7 +351,7 @@ class KrakenRuntimeStateClient:
                 ExchangeOrder.symbol == target_symbol,
             ]
             if after_local_timestamp is not None:
-                cursor_timestamp = _sqlite_cursor_timestamp(after_local_timestamp)
+                cursor_timestamp = _cursor_timestamp(after_local_timestamp)
                 if after_local_id is None:
                     predicates.append(ExchangeOrder.local_timestamp >= cursor_timestamp)
                 else:
@@ -391,7 +391,7 @@ class KrakenRuntimeStateClient:
                 ExchangeOrder.symbol == target_symbol,
             ]
             if after_local_timestamp is not None:
-                cursor_timestamp = _sqlite_cursor_timestamp(after_local_timestamp)
+                cursor_timestamp = _cursor_timestamp(after_local_timestamp)
                 if after_local_id is None:
                     predicates.append(ExchangeFill.local_timestamp >= cursor_timestamp)
                 else:
@@ -638,6 +638,10 @@ class KrakenRuntimeStateClient:
                         ExchangeOrder.market_type == self.market_type,
                         ExchangeOrder.symbol == symbol,
                     )
+                    .order_by(
+                        ExchangeOrder.local_timestamp.desc(),
+                        ExchangeOrder.id.desc(),
+                    )
                 )
                 .scalars()
                 .all()
@@ -809,17 +813,17 @@ def _instrument_tick_size(
 
 
 def _normalise_cursor_timestamp(value: datetime, peer: datetime) -> datetime:
-    """Compare SQLite naive timestamps with aware runtime cursors safely."""
+    """Compare stored timestamps with runtime cursors safely."""
     if value.tzinfo is None or peer.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
 
 
-def _sqlite_cursor_timestamp(value: datetime) -> datetime:
-    """Normalise an aware runtime cursor for SQLite DATETIME comparisons."""
+def _cursor_timestamp(value: datetime) -> datetime:
+    """Normalise a runtime cursor for database timestamp comparisons."""
     if value.tzinfo is not None:
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
-    return value
+        return value.astimezone(timezone.utc)
+    return value.replace(tzinfo=timezone.utc)
 
 
 def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:

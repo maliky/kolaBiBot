@@ -35,8 +35,8 @@ JsonDictT = dict[str, Any]
 class BinanceAccountConfig:
     """Configuration for Binance USD-M Futures private DB ingestion."""
 
-    db_url: str = "sqlite:///dbs/prv-binance-futures-demo.sqlite"
-    critical_db_url: str = "sqlite:///dbs/prv-binance-futures-demo-critical.sqlite"
+    db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account"
+    critical_db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical"
     exchange: str = "binance"
     environment: str = "demo"
     market_type: str = "futures"
@@ -51,7 +51,6 @@ class BinanceAccountConfig:
     rest_reconcile_seconds: float = 10.0
     balance_write_min_interval_seconds: float = 300.0
     position_write_min_interval_seconds: float = 60.0
-    sqlite_busy_timeout_seconds: float = 30.0
     log_level: str = "INFO"
 
 
@@ -543,7 +542,6 @@ def account_config(config: BinanceAccountConfig, *, critical: bool = False) -> A
         api_secret_env=config.api_secret_env,
         balance_write_min_interval_seconds=config.balance_write_min_interval_seconds,
         position_write_min_interval_seconds=config.position_write_min_interval_seconds,
-        sqlite_busy_timeout_seconds=config.sqlite_busy_timeout_seconds,
         log_level=config.log_level,
     )
 

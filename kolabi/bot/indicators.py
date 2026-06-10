@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Protocol
 
-from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from kolabi.shared.persistence import create_persistence_engine
 from kolabi.tree.kraken import latest_indicator_values, latest_snapshot
 
 
@@ -29,7 +29,7 @@ class DummyIndicatorClient:
 class KrakenDbIndicatorClient:
     """Lit les indicateurs compacts produits par le service KrakenTree."""
 
-    db_url: str = "sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite"
+    db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market"
     exchange: str = "kraken"
     environment: str = "demo"
     market_type: str = "futures"
@@ -46,7 +46,7 @@ class KrakenDbIndicatorClient:
             Mapping plat avec les indicateurs compacts, ou payload vide si la
             DB locale ne contient encore aucune ligne pour cette paire.
         """
-        engine = create_engine(self.db_url)
+        engine = create_persistence_engine(self.db_url)
         with Session(engine) as session:
             # Commentaire FR: le client ouvre une session courte pour ne pas
             # garder de verrou de lecture pendant que KrakenTree ecrit.

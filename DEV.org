@@ -715,32 +715,28 @@ Demo and live databases are separated. Public and private databases are also sep
 
 | Purpose      | Demo DB                         | Live DB                         |
 |--------------+----------------------------------+----------------------------------|
-| Public book  | sqlite:///dbs/pub-futures-demo-PI_XBTUSD.sqlite | sqlite:///dbs/pub-futures-live-PI_XBTUSD.sqlite |
-| Private data | sqlite:///dbs/prv-futures-demo.sqlite | sqlite:///dbs/prv-futures-live.sqlite |
-| Critical private data | sqlite:///dbs/prv-futures-demo-critical.sqlite | sqlite:///dbs/prv-futures-live-critical.sqlite |
+| Public book  | postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market | postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market |
+| Private data | postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account | postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account |
+| Critical private data | postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical | postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical |
 
 The public service stores market-book snapshots.
-Public DB files are instrument-scoped. For example, =PI_ADAUSD= defaults to =sqlite:///dbs/pub-futures-demo-PI_ADAUSD.sqlite=.
+All instruments share the PostgreSQL public market lane. Public rows remain scoped by exchange, environment, market type, and symbol.
 The private service stores orders, fills, balances, positions, margin fields, and connection health.
-Private DB files are account-scope scoped, not instrument-scoped. =--account-scope= is the logical account/persona label stored with private rows, for example =default= or =advers=.
+Private DB lanes are account-scope scoped, not instrument-scoped. =--account-scope= is the logical account/persona label stored with private rows, for example =default= or =advers=.
 Bot-side REST audit and tail telemetry use separate low-priority lanes so they cannot lock the private account DB during order/fill lifecycle decisions:
 
 | Lane       | Default demo URL                                      | Purpose                                        |
 |------------+-------------------------------------------------------+------------------------------------------------|
-| Audit      | sqlite:///dbs/audit-futures-demo-default.sqlite       | Forensic REST send/amend/cancel audit rows     |
-| Telemetry  | sqlite:///dbs/telemetry-futures-demo-default.sqlite   | Bot tail metrics and non-critical diagnostics  |
+| Audit      | postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_audit       | Forensic REST send/amend/cancel audit rows     |
+| Telemetry  | postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_telemetry   | Bot tail metrics and non-critical diagnostics  |
 
 The runtime flags are =--audit-db-url= and =--telemetry-db-url=. These lanes are not platform truth. If they are locked or unavailable, exchange commands and lifecycle state must continue.
 
 Critical order/fill forensic shielding is enabled by default. Private-feed maintenance must not prune raw =private_ws= or =private_ws_critical= payloads, nor their ingest audit rows, unless the operator passes =--allow-critical-forensic-prune=. Account state, REST audit, and tail telemetry stay bounded by their own retention knobs because they are diagnostic or sampled lanes, not lifecycle ground truth.
 
-** Queued writer option
+** PostgreSQL persistence
 
-If SQLite lock contention persists under multi-pair stress, the next SQLite step is a per-lane queued writer: one writer thread owns one SQLAlchemy sessionmaker per DB lane, producers enqueue immutable row payloads, and the writer flushes batches in order. This keeps Chronos/Ogun non-blocking and preserves the functional boundary because reducers still emit values, not DB side effects.
-
-** PostgreSQL persistence replacement plan
-
-PostgreSQL is the default =kolabidb= backend for long-running concurrent bots and multi-account tests. It removes SQLite's single-writer file lock and lets the current SQLAlchemy models use normal multi-connection transactions. It does not remove the need for lane separation: critical lifecycle truth, broad account state, audit, and telemetry should remain logically separated so low-priority writes cannot obscure operator reasoning. SQLite remains available explicitly with =--backend sqlite= and stores files under =dbs/=.
+PostgreSQL is the =kolabidb= backend for long-running concurrent bots and multi-account tests. It lets the current SQLAlchemy models use normal multi-connection transactions. It does not remove the need for lane separation: critical lifecycle truth, broad account state, audit, and telemetry should remain logically separated so low-priority writes cannot obscure operator reasoning.
 
 Host findings:
 - This host already has =postgres:16= locally.
@@ -753,7 +749,7 @@ Kolabi Docker files:
 - =psycopg[binary]= is a runtime dependency because SQLAlchemy PostgreSQL URLs use the =postgresql+psycopg= driver.
 
 Pros of storing PostgreSQL files under =dbs/postgres=:
-- The DB location is visible beside the SQLite fallback files.
+- The DB location is visible under the repo-local =dbs= directory.
 - Backups, local resets, and disk-usage checks are straightforward.
 - The repo-local helper can manage all DB lanes with one mental model.
 
@@ -798,7 +794,7 @@ mkdir -p dbs/postgres
 docker-compose -f docker-compose.postgres.yml up -d
 #+end_src
 
-Helper equivalents keep the same feel as the old SQLite helper while separating PostgreSQL feeder logs and PID files. PostgreSQL is the default backend:
+Helper commands manage PostgreSQL feeder logs and PID files:
 
 #+begin_src bash
 scripts/kolabidb postgres start
@@ -809,7 +805,6 @@ scripts/kolabidb private start
 scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
 scripts/kolabidb public logs
 scripts/kolabidb private logs
-scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
 #+end_src
 
 Start the shared public market DB feeder:
@@ -878,46 +873,31 @@ python -m kolabi.bot run \
 #+end_src
 
 Acceptance:
-- No =database is locked= errors.
+- No persistence backpressure warnings in the runtime logs.
 - Main and adversarial private lanes remain separated.
 - Both bots share the public market lane.
 - Order/fill lifecycle still comes from the critical private lane.
 - Audit and telemetry writes remain non-critical.
-- SQLite fallback remains available with =--backend sqlite=.
 
 Queued writer note: the queued writer remains compatible with PostgreSQL, but is deferred until PostgreSQL testing shows whether audit/telemetry still need buffering. If implemented later, keep it as an edge adapter only; reducers, Isis, Chronos, and pair semantics must not know about queues or writer threads.
 
 Local inspection commands:
 #+BEGIN_SRC bash  -i
 # list tables
-sqlite3 dbs/pub-futures-demo-PI_XBTUSD.sqlite '.tables'
+PGPASSWORD="$KOLABI_POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$KOLABI_POSTGRES_PORT" -U "$KOLABI_POSTGRES_USER" -d kolabi_market -c '\dt'
 #+END_SRC
-
-#+RESULTS:
-| account_balances     | exchange_orders        | market_snapshots    |
-| account_positions    | kraken_orderbook       | order_events        |
-| exchange_connections | kraken_orderbook_level | order_runs          |
-| exchange_fills       | market_indicators      | raw_exchange_events |
-| exchange_instruments | market_levels          |                     |
 
 #+begin_src bash
 # inspect all cached instrument rules
-sqlite3 dbs/pub-futures-demo-PI_XBTUSD.sqlite \
+PGPASSWORD="$KOLABI_POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$KOLABI_POSTGRES_PORT" -U "$KOLABI_POSTGRES_USER" -d kolabi_market -c \
   "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments ORDER BY symbol;"
 #+end_src
 
-#+RESULTS:
-| PI_ADAUSD |   |   | 1.0 |   | 1 | 2026-05-14 | 12:48:25.591722 |
-| PI_XBTUSD |   |   | 1.0 |   | 1 | 2026-05-14 | 12:48:25.591722 |
-
 #+BEGIN_SRC bash  -i
 # inspect one instrument
-sqlite3 dbs/pub-futures-demo-PI_XBTUSD.sqlite \
+PGPASSWORD="$KOLABI_POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$KOLABI_POSTGRES_PORT" -U "$KOLABI_POSTGRES_USER" -d kolabi_market -c \
   "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments WHERE symbol = 'PI_XBTUSD';"
 #+END_SRC
-
-#+RESULTS:
-| PI_XBTUSD |   |   | 1.0 |   | 1 | 2026-05-14 12:48:25.591722 |
 
 * Useful Kraken Commands
 

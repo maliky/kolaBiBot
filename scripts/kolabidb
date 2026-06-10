@@ -64,9 +64,9 @@ Private options:
                                 Default: reuse.
 
 Common options:
-  --backend postgres|sqlite    DB lane defaults to use for public/private feeders. Default: postgres.
+  --backend postgres           DB lane defaults to use for public/private feeders. Default: postgres.
   --postgres                   Shortcut for --backend postgres.
-  --env-file PATH              PostgreSQL env file loaded for --backend postgres and postgres target.
+  --env-file PATH              PostgreSQL env file loaded for feeders and the postgres target.
                                Default: .env.postgres.
   --log-level LEVEL             Python log level. Default: INFO.
   --tail-lines N                Lines printed before following logs. Default: 80.
@@ -78,8 +78,6 @@ Examples:
   scripts/kolabidb private start
   scripts/kolabidb public start --exchange binance --pair BTCUSDT
   scripts/kolabidb private start --exchange binance
-  scripts/kolabidb --backend sqlite public start --pair PI_XBTUSD
-  scripts/kolabidb --backend sqlite private start
   scripts/kolabidb postgres logs
   scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
   scripts/kolabidb private start --public spawn --pair PI_XBTUSD
@@ -111,44 +109,15 @@ safe_name() {
 }
 
 public_db_default() {
-    local exchange="$1"
-    local env="$2"
-    local pair="$3"
-    if [[ "$exchange" == "binance" ]]; then
-        printf 'sqlite:///dbs/pub-binance-futures-%s-%s.sqlite' "$(safe_name "$env")" "$(safe_name "$pair")"
-    else
-        printf 'sqlite:///dbs/pub-futures-%s-%s.sqlite' "$(safe_name "$env")" "$(safe_name "$pair")"
-    fi
+    require_url KOLABI_MARKET_DB_URL
 }
 
 private_db_default() {
-    local exchange="$1"
-    local env="$2"
-    local scope="$3"
-    local suffix=""
-    if [[ "$scope" != "default" ]]; then
-        suffix="-$(safe_name "$scope")"
-    fi
-    if [[ "$exchange" == "binance" ]]; then
-        printf 'sqlite:///dbs/prv-binance-futures-%s%s.sqlite' "$(safe_name "$env")" "$suffix"
-    else
-        printf 'sqlite:///dbs/prv-futures-%s%s.sqlite' "$(safe_name "$env")" "$suffix"
-    fi
+    postgres_account_db_default
 }
 
 critical_db_default() {
-    local exchange="$1"
-    local env="$2"
-    local scope="$3"
-    local suffix=""
-    if [[ "$scope" != "default" ]]; then
-        suffix="-$(safe_name "$scope")"
-    fi
-    if [[ "$exchange" == "binance" ]]; then
-        printf 'sqlite:///dbs/prv-binance-futures-%s%s-critical.sqlite' "$(safe_name "$env")" "$suffix"
-    else
-        printf 'sqlite:///dbs/prv-futures-%s%s-critical.sqlite' "$(safe_name "$env")" "$suffix"
-    fi
+    postgres_critical_db_default
 }
 
 load_backend_env() {
@@ -212,48 +181,34 @@ postgres_critical_db_default() {
 market_db_url() {
     if [[ -n "$PUBLIC_DB_URL" ]]; then
         printf '%s' "$PUBLIC_DB_URL"
-    elif [[ "$DB_BACKEND" == "postgres" ]]; then
-        require_url KOLABI_MARKET_DB_URL
     else
-        public_db_default "$EXCHANGE" "$ENVIRONMENT" "$PAIR"
+        public_db_default
     fi
 }
 
 account_db_url() {
     if [[ -n "$ACCOUNT_DB_URL" ]]; then
         printf '%s' "$ACCOUNT_DB_URL"
-    elif [[ "$DB_BACKEND" == "postgres" ]]; then
-        postgres_account_db_default
     else
-        private_db_default "$EXCHANGE" "$ENVIRONMENT" "$ACCOUNT_SCOPE"
+        private_db_default
     fi
 }
 
 critical_db_url() {
     if [[ -n "$CRITICAL_DB_URL" ]]; then
         printf '%s' "$CRITICAL_DB_URL"
-    elif [[ "$DB_BACKEND" == "postgres" ]]; then
-        postgres_critical_db_default
     else
-        critical_db_default "$EXCHANGE" "$ENVIRONMENT" "$ACCOUNT_SCOPE"
+        critical_db_default
     fi
 }
 
 unit_name() {
     case "$1" in
         public)
-            if [[ "$DB_BACKEND" == "sqlite" ]]; then
-                printf 'kolabidb-public-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$PAIR")"
-            else
-                printf 'kolabidb-public-%s-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$PAIR")"
-            fi
+            printf 'kolabidb-public-%s-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$PAIR")"
             ;;
         private)
-            if [[ "$DB_BACKEND" == "sqlite" ]]; then
-                printf 'kolabidb-private-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$ACCOUNT_SCOPE")"
-            else
-                printf 'kolabidb-private-%s-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$ACCOUNT_SCOPE")"
-            fi
+            printf 'kolabidb-private-%s-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$ACCOUNT_SCOPE")"
             ;;
         postgres)
             printf 'kolabidb-postgres'
@@ -615,7 +570,7 @@ parse_args() {
 validate() {
     [[ -n "$TARGET" ]] || die "missing target public|private|postgres"
     [[ -n "$ACTION" ]] || die "missing action start|status|stop|reload|logs"
-    [[ "$DB_BACKEND" == "sqlite" || "$DB_BACKEND" == "postgres" ]] || die "--backend must be sqlite or postgres"
+    [[ "$DB_BACKEND" == "postgres" ]] || die "SQLite backend is no longer supported; use PostgreSQL"
     [[ "$EXCHANGE" == "kraken" || "$EXCHANGE" == "binance" ]] || die "--exchange must be kraken or binance"
     if [[ "$EXCHANGE" == "binance" && "$PAIR_SET" -eq 0 ]]; then
         PAIR="BTCUSDT"

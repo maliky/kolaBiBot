@@ -19,7 +19,6 @@ from urllib.parse import urlencode
 from uuid import uuid4
 
 import requests
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from kolabi.shared.binance_futures import binance_futures_audit_db_url
@@ -35,9 +34,6 @@ from kolabi.shared.persistence import (
 
 _LOGGER = logging.getLogger("kola")
 
-_REST_AUDIT_SQLITE_BUSY_TIMEOUT_SECONDS = 0.5
-_REST_AUDIT_LOCK_RETRIES = 3
-_REST_AUDIT_LOCK_SLEEP_SECONDS = 0.15
 _REST_AUDIT_MAINTENANCE_SECONDS = 60.0
 
 
@@ -89,10 +85,7 @@ class BinanceAdapter(ExchangeABC):
             environment,
             account_scope,
         )
-        self._audit_engine = create_persistence_engine(
-            self.audit_db_url,
-            sqlite_busy_timeout_seconds=_REST_AUDIT_SQLITE_BUSY_TIMEOUT_SECONDS,
-        )
+        self._audit_engine = create_persistence_engine(self.audit_db_url)
         Base.metadata.create_all(self._audit_engine)
         self._audit_sessionmaker = sessionmaker(
             bind=self._audit_engine,
@@ -224,63 +217,48 @@ class BinanceAdapter(ExchangeABC):
         )
         correlation_id = client_order_id or endpoint_order_id or request_order_id
         with self._audit_sessionmaker() as session:
-            for retry in range(_REST_AUDIT_LOCK_RETRIES + 1):
-                try:
-                    session.add(
-                        ExchangeRestCall(
-                            local_uuid=str(uuid4()),
-                            exchange="binance",
-                            environment=self.environment,
-                            market_type="futures",
-                            account_scope=self.account_scope,
-                            symbol=optional_str(
-                                order_like.get("symbol") or request_payload.get("symbol")
-                            ),
-                            method=method.upper(),
-                            path=path,
-                            request_params=request_payload,
-                            attempt_count=attempt_count,
-                            http_status=http_status,
-                            result_kind=result_kind,
-                            response_payload=payload,
-                            error_text=error_text,
-                            client_order_id=client_order_id,
-                            exchange_order_id=endpoint_order_id,
-                            endpoint_order_id=endpoint_order_id,
-                            correlation_id=correlation_id,
-                            ack_status=optional_str(order_like.get("status")),
-                            ack_order_id=endpoint_order_id,
-                            ack_client_order_id=client_order_id,
-                        )
-                    )
-                    session.commit()
-                    self._prune_rest_audit_if_due(session)
-                    return
-                except OperationalError as exc:
-                    session.rollback()
-                    if _is_sqlite_locked_error(exc) and retry < _REST_AUDIT_LOCK_RETRIES:
-                        time.sleep(_REST_AUDIT_LOCK_SLEEP_SECONDS * (retry + 1))
-                        continue
-                    self._record_rest_audit_failure(
-                        method=method,
+            try:
+                session.add(
+                    ExchangeRestCall(
+                        local_uuid=str(uuid4()),
+                        exchange="binance",
+                        environment=self.environment,
+                        market_type="futures",
+                        account_scope=self.account_scope,
+                        symbol=optional_str(
+                            order_like.get("symbol") or request_payload.get("symbol")
+                        ),
+                        method=method.upper(),
                         path=path,
+                        request_params=request_payload,
+                        attempt_count=attempt_count,
+                        http_status=http_status,
+                        result_kind=result_kind,
+                        response_payload=payload,
+                        error_text=error_text,
                         client_order_id=client_order_id,
+                        exchange_order_id=endpoint_order_id,
                         endpoint_order_id=endpoint_order_id,
-                        retry=retry,
-                        exc=exc,
+                        correlation_id=correlation_id,
+                        ack_status=optional_str(order_like.get("status")),
+                        ack_order_id=endpoint_order_id,
+                        ack_client_order_id=client_order_id,
                     )
-                    return
-                except Exception as exc:
-                    session.rollback()
-                    self._record_rest_audit_failure(
-                        method=method,
-                        path=path,
-                        client_order_id=client_order_id,
-                        endpoint_order_id=endpoint_order_id,
-                        retry=retry,
-                        exc=exc,
-                    )
-                    return
+                )
+                session.commit()
+                self._prune_rest_audit_if_due(session)
+                return
+            except Exception as exc:
+                session.rollback()
+                self._record_rest_audit_failure(
+                    method=method,
+                    path=path,
+                    client_order_id=client_order_id,
+                    endpoint_order_id=endpoint_order_id,
+                    retry=0,
+                    exc=exc,
+                )
+                return
 
     def _record_rest_audit_failure(
         self,
@@ -871,19 +849,6 @@ def _has_exec_flag(exec_inst: str, flag: str) -> bool:
 
 def _generated_client_order_id() -> str:
     return f"b-{uuid4().hex[:30]}"
-
-
-def _is_sqlite_locked_error(exc: BaseException) -> bool:
-    current: BaseException | None = exc
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        message = str(current).lower()
-        if "database is locked" in message or "database table is locked" in message:
-            return True
-        nested = getattr(current, "orig", None)
-        current = nested if isinstance(nested, BaseException) else current.__cause__
-    return False
 
 
 def _compact_error(exc: BaseException) -> str:

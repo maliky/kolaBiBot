@@ -63,9 +63,9 @@ def percent_tail_pair(name: str) -> OrderPairSpec:
     )
 
 
-def test_private_order_poller_emits_head_confirmation_from_db(tmp_path) -> None:
-    market_db = f"sqlite:///{tmp_path / 'pub.sqlite'}"
-    account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
+def test_private_order_poller_emits_head_confirmation_from_db(postgres_url_factory) -> None:
+    market_db = postgres_url_factory("pub")
+    account_db = postgres_url_factory("prv")
     market_engine = create_engine(market_db)
     account_engine = create_engine(account_db)
     Base.metadata.create_all(market_engine)

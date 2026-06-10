@@ -49,14 +49,14 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
         "--audit-db-url",
         help=(
             "Optional REST audit DB URL. Defaults to "
-            "sqlite:///dbs/audit-futures-<env>-<account-scope>.sqlite."
+            "the PostgreSQL audit lane for the exchange environment."
         ),
     )
     parser.add_argument(
         "--telemetry-db-url",
         help=(
             "Optional bot telemetry DB URL. Defaults to "
-            "sqlite:///dbs/telemetry-futures-<env>-<account-scope>.sqlite."
+            "the PostgreSQL telemetry lane for the exchange environment."
         ),
     )
     parser.add_argument(
