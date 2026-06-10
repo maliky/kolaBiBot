@@ -78,6 +78,15 @@ from kolabi.shared.core.runtime_types import (
 
 _LOGGER = logging.getLogger("kola")
 _DEFAULT_HEAD_FILL_REFERENCE_GRACE_SECONDS = 20.0
+_LEGEND_GAP = "    "
+
+
+def _legend_fields(*fields: object) -> str:
+    return _LEGEND_GAP.join(str(field) for field in fields)
+
+
+def _runtime_fields(*values: object) -> str:
+    return " ".join(str(value) for value in values)
 
 
 class CommandExecutor(Protocol):
@@ -231,6 +240,30 @@ class _LatentHeadDeadline:
     attempt_index: int
     started_at: datetime
     deadline_at: datetime
+
+
+_LEASE_PENDING_PLACE = "PENDING_PLACE"
+_LEASE_LIVE = "LIVE"
+_LEASE_CANCEL_REQUESTED = "CANCEL_REQUESTED"
+_LEASE_CLOSED = "CLOSED"
+
+
+@dataclass(frozen=True)
+class _OrderLease:
+    pair_name: str
+    attempt_index: int
+    role: str
+    symbol: str
+    client_order_id: str | None
+    exchange_order_id: str | None
+    side: str | None
+    quantity: Decimal | None
+    price: Decimal | None
+    stop_price: Decimal | None
+    status: str
+    created_at: datetime
+    last_seen_at: datetime | None = None
+    cancel_sent_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -688,6 +721,7 @@ class StrategyRuntime:
         self._live_command_identities: dict[str, OrderIdentity] = {}
         self._head_fill_deadlines: dict[_CommandSlot, _HeadFillDeadline] = {}
         self._latent_head_deadlines: dict[tuple[str, int], _LatentHeadDeadline] = {}
+        self._order_leases: dict[_CommandSlot, _OrderLease] = {}
         self._pending_tail_visibility: dict[_CommandSlot, _TailVisibilityWindow] = {}
         self._pending_tail_amends: dict[_CommandSlot, _TailAmendPending] = {}
         self._last_gate_logs: dict[str, datetime] = {}
@@ -713,7 +747,34 @@ class StrategyRuntime:
 
     @property
     def should_keep_sources_alive(self) -> bool:
-        return bool(self.chronos.pending_repeats)
+        return bool(self.chronos.pending_repeats or self.active_order_leases())
+
+    def active_order_leases(self) -> tuple[_OrderLease, ...]:
+        """Return live exchange-order leases that still need DB evidence."""
+
+        return tuple(
+            lease
+            for lease in self._order_leases.values()
+            if lease.status != _LEASE_CLOSED
+        )
+
+    def active_order_identities(self) -> tuple[OrderIdentity, ...]:
+        """Expose active live order identities for service-level cleanup."""
+
+        identities: list[OrderIdentity] = []
+        for lease in self.active_order_leases():
+            if lease.client_order_id is None and lease.exchange_order_id is None:
+                continue
+            identities.append(
+                OrderIdentity(
+                    pair_name=lease.pair_name,
+                    role=lease.role,
+                    client_order_id=lease.client_order_id,
+                    exchange_order_id=lease.exchange_order_id,
+                    symbol=lease.symbol,
+                )
+            )
+        return tuple(identities)
 
     async def enqueue(self, event: EggMove) -> None:
         await self.event_queue.put(event)
@@ -774,6 +835,7 @@ class StrategyRuntime:
                 self._prune_live_command_identities()
                 self._check_latent_head_deadlines(current_time)
                 self._check_head_fill_deadlines(current_time)
+                self._check_order_lease_deadlines(current_time)
                 self._check_tail_visibility_deadlines(current_time)
                 self._check_tail_amend_deadlines(current_time)
                 self._log_gate_waits(current_time)
@@ -799,6 +861,7 @@ class StrategyRuntime:
                     and not self._pending_commands
                     and not self._pending_head_commands
                     and not self._latent_head_deadlines
+                    and not self.active_order_leases()
                     and not self.chronos.pending_repeats
                 ):
                     break
@@ -810,10 +873,12 @@ class StrategyRuntime:
                     continue
                 previous_pairs = dict(self.state.pairs)
                 previous_repeats = dict(self.chronos.pending_repeats)
+                self._record_private_event_for_leases(event)
                 self._record_head_lifecycle(event)
                 commands = self.chronos.process_event(event)
                 self.state = self.chronos.state
                 self._prune_latent_head_deadlines()
+                self._prune_order_leases()
                 self._sync_head_fill_deadline(event)
                 self._log_new_pending_repeats(previous_repeats)
                 self._log_chain_releases(previous_pairs)
@@ -838,11 +903,10 @@ class StrategyRuntime:
             if isinstance(prepared, PlaceHeadCommand) and not self._head_capacity_available(prepared):
                 self._pending_head_commands.append(prepared)
                 _LOGGER.info(
-                    "HEAD_WAIT (%s#%s): active_pairs=%s max_active_pairs=%s",
+                    "HEAD_WAIT (%s#%s): %s",
                     prepared.pair_name,
                     slot.attempt_index,
-                    self._active_pair_count(),
-                    self.max_active_pairs,
+                    _runtime_fields(self._active_pair_count(), self.max_active_pairs),
                 )
                 continue
             if slot not in self._inflight_commands:
@@ -883,11 +947,10 @@ class StrategyRuntime:
         except BaseException as exc:
             if isinstance(prepared, CancelCommand):
                 _LOGGER.warning(
-                    "COMMAND_FAILED (%s#%s %s): %s",
+                    "COMMAND_FAILED (%s#%s): %s",
                     prepared.pair_name,
                     self._command_slot(prepared).attempt_index,
-                    prepared.reason,
-                    _compact_error(exc),
+                    _runtime_fields(prepared.reason, _compact_error(exc)),
                 )
                 return
             failure = _command_failure_event(
@@ -899,11 +962,10 @@ class StrategyRuntime:
             if failure is None:
                 raise
             _LOGGER.warning(
-                "COMMAND_FAILED (%s#%s %s): %s",
+                "COMMAND_FAILED (%s#%s): %s",
                 prepared.pair_name,
                 self._command_slot(prepared).attempt_index,
-                prepared.reason,
-                _compact_error(exc),
+                _runtime_fields(prepared.reason, _compact_error(exc)),
             )
             await self.enqueue(failure)
             return
@@ -1082,25 +1144,26 @@ class StrategyRuntime:
                     continue
                 self._last_tail_metrics[row.pair_name] = signature
                 _LOGGER.info(
-                    "METRICS (%s#%s): (%s--%s) ref=%s stop=%s ID=%s CD=%s SG=%s UR=%s LU=%s src=%s px=B:%s A:%s MID:%s L:%s MK:%s I:%s",
+                    "METRICS (%s#%s): %s",
                     row.pair_name,
                     signature[0],
-                    row.head_state,
-                    row.tail_state,
-                    signature[3],
-                    signature[4],
-                    signature[5],
-                    signature[6],
-                    signature[7],
-                    signature[8],
-                    signature[9],
-                    signature[10],
-                    signature[11],
-                    signature[12],
-                    signature[13],
-                    signature[14],
-                    signature[15],
-                    signature[16],
+                    _runtime_fields(
+                        f"{row.head_state}--{row.tail_state}",
+                        signature[3],
+                        signature[4],
+                        signature[5],
+                        signature[6],
+                        signature[7],
+                        signature[8],
+                        signature[9],
+                        signature[10],
+                        signature[11],
+                        signature[12],
+                        signature[13],
+                        signature[14],
+                        signature[15],
+                        signature[16],
+                    ),
                 )
             await asyncio.sleep(interval)
 
@@ -1181,12 +1244,14 @@ class StrategyRuntime:
                 if self._last_pair_updates.get(pair_name) != head_cancel_signature:
                     self._last_pair_updates[pair_name] = head_cancel_signature
                     _LOGGER.info(
-                        "HEAD_CANCELLED (%s#%s): PQ=%s HCID=%s HOID=%s",
+                        "HEAD_CANCELLED (%s#%s): %s",
                         pair_name,
                         head_cancel_signature[0],
-                        head_cancel_signature[2],
-                        head_cancel_signature[3],
-                        head_cancel_signature[4],
+                        _runtime_fields(
+                            head_cancel_signature[2],
+                            head_cancel_signature[3],
+                            head_cancel_signature[4],
+                        ),
                     )
                 continue
             if current.head_state not in {HeadState.LIVING, HeadState.CLOSED} and current.tail_state not in {
@@ -1234,20 +1299,19 @@ class StrategyRuntime:
                     if head_lifecycle.filled_at is not None
                     else "-",
                 )
-                message = (
-                    "UPDATE (%s#%s): (%s--%s) PQ=%s DS=%s HFS=%s HFQ=%s HFP=%s HFT=%s"
-                )
+                message = "UPDATE (%s#%s): %s"
                 message_args = (
                     pair_name,
                     update_signature[0],
-                    update_signature[1],
-                    update_signature[2],
-                    update_signature[3],
-                    update_signature[4],
-                    update_signature[5],
-                    update_signature[6],
-                    update_signature[7],
-                    update_signature[8],
+                    _runtime_fields(
+                        f"{update_signature[1]}--{update_signature[2]}",
+                        update_signature[3],
+                        update_signature[4],
+                        update_signature[5],
+                        update_signature[6],
+                        update_signature[7],
+                        update_signature[8],
+                    ),
                 )
             elif transition[0] == "closed" and transition[1] in {"closed", "failed"}:
                 tail_lifecycle = self._tail_order_lifecycle.get(
@@ -1268,21 +1332,20 @@ class StrategyRuntime:
                     if tail_lifecycle.filled_at is not None
                     else "-",
                 )
-                message = (
-                    "UPDATE (%s#%s): (%s--%s) PQ=%s CS=%s DS=%s TFS=%s TFQ=%s TFP=%s TFT=%s"
-                )
+                message = "UPDATE (%s#%s): %s"
                 message_args = (
                     pair_name,
                     update_signature[0],
-                    update_signature[1],
-                    update_signature[2],
-                    update_signature[3],
-                    update_signature[4],
-                    update_signature[5],
-                    update_signature[6],
-                    update_signature[7],
-                    update_signature[8],
-                    update_signature[9],
+                    _runtime_fields(
+                        f"{update_signature[1]}--{update_signature[2]}",
+                        update_signature[3],
+                        update_signature[4],
+                        update_signature[5],
+                        update_signature[6],
+                        update_signature[7],
+                        update_signature[8],
+                        update_signature[9],
+                    ),
                 )
             elif transition in {("closed", "submitted"), ("closed", "living")}:
                 tail_identity = current.tail_identity
@@ -1303,20 +1366,19 @@ class StrategyRuntime:
                     if current.tail_trail is None or current.tail_trail.last_confirmed_at is None
                     else current.tail_trail.last_confirmed_at.isoformat(),
                 )
-                message = (
-                    "UPDATE (%s#%s): (%s--%s) PQ=%s CS=%s DS=%s TCID=%s TOID=%s TLU=%s"
-                )
+                message = "UPDATE (%s#%s): %s"
                 message_args = (
                     pair_name,
                     update_signature[0],
-                    update_signature[1],
-                    update_signature[2],
-                    update_signature[3],
-                    update_signature[4],
-                    update_signature[5],
-                    update_signature[6],
-                    update_signature[7],
-                    update_signature[8],
+                    _runtime_fields(
+                        f"{update_signature[1]}--{update_signature[2]}",
+                        update_signature[3],
+                        update_signature[4],
+                        update_signature[5],
+                        update_signature[6],
+                        update_signature[7],
+                        update_signature[8],
+                    ),
                 )
             else:
                 update_signature = (
@@ -1327,15 +1389,16 @@ class StrategyRuntime:
                     _fmt_compact_price(stop_current),
                     _fmt_compact_price(desired_stop),
                 )
-                message = "UPDATE (%s#%s): (%s--%s) PQ=%s CS=%s DS=%s"
+                message = "UPDATE (%s#%s): %s"
                 message_args = (
                     pair_name,
                     update_signature[0],
-                    update_signature[1],
-                    update_signature[2],
-                    update_signature[3],
-                    update_signature[4],
-                    update_signature[5],
+                    _runtime_fields(
+                        f"{update_signature[1]}--{update_signature[2]}",
+                        update_signature[3],
+                        update_signature[4],
+                        update_signature[5],
+                    ),
                 )
             if self._last_pair_updates.get(pair_name) == update_signature:
                 continue
@@ -1346,9 +1409,84 @@ class StrategyRuntime:
         if self._legend_logged:
             return
         self._legend_logged = True
-        _LOGGER.info(
-            "RAPPEL: AI=attempt_index PU=pair_update HS=head_state TS=tail_state PQ=played_qty CS=confirmed_stop DS=desired_stop ID=initial_dist CD=current_dist LU=last_update TCID=tail_client_id TOID=tail_order_id TLU=tail_last_update HFS/HFQ/HFP/HFT=head_fill_fields(closed--hooked) TFS/TFQ/TFP/TFT=tail_fill_fields(closed--closed)"
+        legends = (
+            (
+                "GENERAL",
+                (
+                    "AI=attempt_index",
+                    "PU=pair_update",
+                    "HS=head_state",
+                    "TS=tail_state",
+                    "PQ=played_qty",
+                    "CS=confirmed_stop",
+                    "DS=desired_stop",
+                    "ID=initial_dist",
+                    "CD=current_dist",
+                    "LU=last_update",
+                    "TCID=tail_client_id",
+                    "TOID=tail_order_id",
+                    "TLU=tail_last_update",
+                    "HCID=head_client_id",
+                    "HOID=head_order_id",
+                    "HFS/HFQ/HFP/HFT=head_fill_fields(closed--hooked)",
+                    "TFS/TFQ/TFP/TFT=tail_fill_fields(closed--closed)",
+                ),
+            ),
+            ("UPDATE", ("HS--TS", "PQ", "CS/DS", "ids/fill_fields/as_applicable")),
+            (
+                "METRICS",
+                (
+                    "HS--TS",
+                    "ref",
+                    "stop",
+                    "ID",
+                    "CD",
+                    "SG=spread_guard",
+                    "UR=unblock_requirement",
+                    "LU",
+                    "src",
+                    "bid",
+                    "ask",
+                    "mid",
+                    "last",
+                    "mark",
+                    "index",
+                ),
+            ),
+            ("GATE_WAIT-1", ("status", "hook/window", "oType", "oDelta", "tOut")),
+            (
+                "GATE_WAIT-2",
+                ("status", "src", "ref", "base", "move", "gate", "unit", "oType", "oDelta", "tOut"),
+            ),
+            ("GATE_WAIT-ERR", ("status", "symbol", "error")),
+            ("LATENT_TIMEOUT_ARMED", ("deadline",)),
+            ("LATENT_TIMEOUT", ("waited", "reason")),
+            ("HEAD_WAIT", ("active_pairs", "max_active_pairs")),
+            ("HEAD_SENT", ("HCID", "side", "type", "qty", "price", "stop")),
+            ("HEAD_ACK", ("HCID", "HOID", "tOut_deadline")),
+            ("HEAD_TIMEOUT", ("status", "waited", "HCID", "HOID")),
+            ("HEAD_CANCEL_SENT", ("CID", "reason")),
+            ("CANCEL_SENT", ("CID", "reason")),
+            ("HEAD_CANCELLED", ("PQ", "HCID", "HOID")),
+            ("HEAD_CANCEL_ACK_STALE", ("current_attempt", "CID")),
+            ("LEASE_OPEN", ("role", "HCID/TCID", "HOID/TOID", "status")),
+            ("LEASE_CLOSED", ("role", "HCID/TCID", "HOID/TOID", "status")),
+            ("CANCEL_PENDING", ("role", "CID", "reason")),
+            ("CANCEL_RETRY", ("role", "CID", "reason")),
+            ("ORDER_SAFETY_BLOCKED", ("role", "status", "reason")),
+            ("TAIL_PENDING", ("TCID", "TOID", "waited", "timeout")),
+            ("TAIL_VISIBLE", ("TCID", "TOID", "waited")),
+            ("AMEND_SENT", ("CS", "DS", "ref", "src", "TCID", "TOID")),
+            ("AMEND_PENDING", ("CS", "DS", "TCID", "TOID", "waited")),
+            ("AMEND_REJECTED", ("status", "TCID", "TOID")),
+            ("COMMAND_FAILED", ("reason", "error")),
+            ("REPEAT_WAIT", ("ready_at",)),
+            ("REPEAT_READY", ("status", "window", "baseline")),
+            ("REPEAT_START", ("commands",)),
+            ("CHAIN_READY", ("origin", "status", "closed_at")),
         )
+        for name, fields in legends:
+            _LOGGER.info("LEGEND--%s: %s", name, _legend_fields(*fields))
 
     def _log_gate_waits(self, now: datetime) -> None:
         """Log latent head gates so quiet strategies are observable."""
@@ -1364,13 +1502,9 @@ class StrategyRuntime:
                     pair_state=pair_state,
                     now=now,
                     signature=("chain_wait", pair.hook_name),
-                    message=(
-                        "GATE_WAIT (%s#%s): status=chain_wait hook=%s "
-                        "oType=%s oDelta=%s tOut=%s"
-                    ),
-                    message_args=(
-                        pair_name,
-                        pair_state.attempt_index,
+                    label="GATE_WAIT-1",
+                    values=(
+                        "chain_wait",
                         pair.hook_name,
                         pair.head.order_type,
                         _fmt_compact_price(
@@ -1391,16 +1525,10 @@ class StrategyRuntime:
                     pair_state=pair_state,
                     now=now,
                     signature=(status,),
-                    message=(
-                        "GATE_WAIT (%s#%s): status=%s window=%s..%s "
-                        "oType=%s oDelta=%s tOut=%s"
-                    ),
-                    message_args=(
-                        pair_name,
-                        pair_state.attempt_index,
+                    label="GATE_WAIT-1",
+                    values=(
                         status,
-                        pair.window.start_minutes,
-                        pair.window.end_minutes,
+                        f"{pair.window.start_minutes}..{pair.window.end_minutes}",
                         pair.head.order_type,
                         _fmt_compact_price(
                             None if pair.head.delta is None else Decimal(str(pair.head.delta))
@@ -1415,11 +1543,14 @@ class StrategyRuntime:
                 source, reference = executable_head_reference_price(pair, market)
             except Exception as exc:
                 _LOGGER.warning(
-                    "GATE_WAIT (%s#%s): status=market_unavailable symbol=%s error=%s",
+                    "GATE_WAIT-ERR (%s#%s): %s",
                     pair_name,
                     pair_state.attempt_index,
-                    symbol,
-                    " ".join(str(exc).split()),
+                    _runtime_fields(
+                        "market_unavailable",
+                        symbol,
+                        " ".join(str(exc).split()),
+                    ),
                 )
                 continue
             if reference <= 0:
@@ -1446,20 +1577,14 @@ class StrategyRuntime:
                 pair_state=pair_state,
                 now=now,
                 signature=signature,
-                message=(
-                    "GATE_WAIT (%s#%s): status=%s src=%s ref=%s base=%s "
-                    "move=%s gate=%s..%s unit=%s oType=%s oDelta=%s tOut=%s"
-                ),
-                message_args=(
-                    pair_name,
-                    pair_state.attempt_index,
+                label="GATE_WAIT-2",
+                values=(
                     status,
                     source,
                     _fmt_compact_price(current),
                     _fmt_compact_price(baseline),
                     _fmt_compact_price(measurement),
-                    _fmt_compact_price(low),
-                    _fmt_compact_price(high),
+                    f"{_fmt_compact_price(low)}..{_fmt_compact_price(high)}",
                     unit,
                     pair.head.order_type,
                     _fmt_compact_price(
@@ -1476,8 +1601,8 @@ class StrategyRuntime:
         pair_state: PairCycleState,
         now: datetime,
         signature: tuple[str, ...],
-        message: str,
-        message_args: tuple[object, ...],
+        label: str,
+        values: tuple[object, ...],
     ) -> None:
         key = f"{pair_name}#{pair_state.attempt_index}"
         last_at = self._last_gate_logs.get(key)
@@ -1490,7 +1615,13 @@ class StrategyRuntime:
             return
         self._last_gate_logs[key] = now
         self._last_gate_signatures[key] = signature
-        _LOGGER.info(message, *message_args)
+        _LOGGER.info(
+            "%s (%s#%s): %s",
+            label,
+            pair_name,
+            pair_state.attempt_index,
+            _runtime_fields(*values),
+        )
 
     def _record_head_lifecycle(self, move: EggMove) -> None:
         if move.role not in {OrderRole.HEAD, OrderRole.TAIL} or move.reply is None:
@@ -1528,6 +1659,263 @@ class StrategyRuntime:
                 else previous.filled_at
             ),
         )
+
+    def _record_private_event_for_leases(self, move: EggMove) -> None:
+        if not move.is_private or move.role not in {OrderRole.HEAD, OrderRole.TAIL}:
+            return
+        pair_name = move.pair_name or resolve_pair_name(self.state, move)
+        if pair_name is None:
+            return
+        pair_state = self.state.pairs.get(pair_name)
+        if pair_state is None:
+            return
+        role = "head" if move.role == OrderRole.HEAD else "tail"
+        slot = _CommandSlot(
+            pair_name=pair_name,
+            attempt_index=pair_state.attempt_index,
+            role=role,
+        )
+        lease = self._order_leases.get(slot)
+        if lease is None:
+            lease = self._lease_from_private_event(slot, move)
+        if lease is None:
+            return
+        updated = self._lease_with_private_event(lease, move)
+        self._order_leases[slot] = updated
+        if lease.status != updated.status:
+            _LOGGER.info(
+                "LEASE_%s (%s#%s): %s",
+                "CLOSED" if updated.status == _LEASE_CLOSED else "OPEN",
+                updated.pair_name,
+                updated.attempt_index,
+                _runtime_fields(
+                    updated.role,
+                    updated.client_order_id or "-",
+                    updated.exchange_order_id or "-",
+                    updated.status,
+                ),
+            )
+
+    def _lease_from_private_event(
+        self,
+        slot: _CommandSlot,
+        move: EggMove,
+    ) -> _OrderLease | None:
+        reply = move.reply or {}
+        client_order_id = _string_payload(reply.get("clOrdID"))
+        exchange_order_id = _string_payload(reply.get("orderID"))
+        if client_order_id is None and exchange_order_id is None:
+            return None
+        return _OrderLease(
+            pair_name=slot.pair_name,
+            attempt_index=slot.attempt_index,
+            role=slot.role,
+            symbol=move.symbol or self.symbol,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            side=_string_payload(reply.get("side")),
+            quantity=_decimal_payload(reply.get("orderQty")),
+            price=_decimal_payload(reply.get("price")),
+            stop_price=_decimal_payload(reply.get("stopPx")),
+            status=_LEASE_PENDING_PLACE,
+            created_at=_as_utc_aware(move.occurred_at),
+        )
+
+    def _lease_with_private_event(
+        self,
+        lease: _OrderLease,
+        move: EggMove,
+    ) -> _OrderLease:
+        reply = move.reply or {}
+        status = _private_order_lease_status(_string_payload(reply.get("ordStatus")))
+        if lease.status == _LEASE_CANCEL_REQUESTED and status == _LEASE_LIVE:
+            status = _LEASE_CANCEL_REQUESTED
+        return replace(
+            lease,
+            client_order_id=_string_payload(reply.get("clOrdID")) or lease.client_order_id,
+            exchange_order_id=_string_payload(reply.get("orderID")) or lease.exchange_order_id,
+            side=_string_payload(reply.get("side")) or lease.side,
+            quantity=_decimal_payload(reply.get("orderQty")) or lease.quantity,
+            price=_decimal_payload(reply.get("price")) or lease.price,
+            stop_price=_decimal_payload(reply.get("stopPx")) or lease.stop_price,
+            status=status or lease.status,
+            last_seen_at=_as_utc_aware(move.occurred_at),
+        )
+
+    def _upsert_order_lease_from_place_command(
+        self,
+        slot: _CommandSlot,
+        command: PlaceHeadCommand | PlaceTailCommand,
+        identity: OrderIdentity | None,
+    ) -> None:
+        if self.simulate:
+            return
+        now = datetime.now(timezone.utc)
+        request = command.request
+        role = "head" if isinstance(command, PlaceHeadCommand) else "tail"
+        lease = _OrderLease(
+            pair_name=command.pair_name,
+            attempt_index=slot.attempt_index,
+            role=role,
+            symbol=str(command.symbol),
+            client_order_id=None if identity is None else identity.client_order_id,
+            exchange_order_id=None if identity is None else identity.exchange_order_id,
+            side=request.side,
+            quantity=_decimal_payload(request.orderQty),
+            price=_decimal_payload(request.price),
+            stop_price=_decimal_payload(request.stopPx),
+            status=_LEASE_PENDING_PLACE,
+            created_at=now,
+        )
+        self._order_leases[_CommandSlot(command.pair_name, slot.attempt_index, role)] = lease
+        _LOGGER.info(
+            "LEASE_OPEN (%s#%s): %s",
+            lease.pair_name,
+            lease.attempt_index,
+            _runtime_fields(
+                lease.role,
+                lease.client_order_id or "-",
+                lease.exchange_order_id or "-",
+                lease.status,
+            ),
+        )
+
+    def _enrich_order_lease_from_ack(self, command: DragonSong, ack: OrderAck) -> None:
+        if self.simulate or not isinstance(command, (PlaceHeadCommand, PlaceTailCommand)):
+            return
+        pair_state = self.state.pairs.get(command.pair_name)
+        attempt_index = 1 if pair_state is None else pair_state.attempt_index
+        role = "head" if isinstance(command, PlaceHeadCommand) else "tail"
+        slot = _CommandSlot(command.pair_name, attempt_index, role)
+        lease = self._order_leases.get(slot)
+        if lease is None:
+            return
+        self._order_leases[slot] = replace(
+            lease,
+            exchange_order_id=str(ack.order_id) if ack.order_id else lease.exchange_order_id,
+        )
+
+    def _mark_cancel_requested_from_command(self, command: CancelCommand) -> None:
+        cancel_id = command.request.clOrdID
+        now = datetime.now(timezone.utc)
+        for slot, lease in tuple(self._order_leases.items()):
+            if lease.status == _LEASE_CLOSED:
+                continue
+            if lease.pair_name != command.pair_name:
+                continue
+            if str(command.symbol) != lease.symbol:
+                continue
+            if not _lease_matches_identity(
+                lease,
+                client_order_id=cancel_id,
+                exchange_order_id=cancel_id,
+            ):
+                continue
+            self._order_leases[slot] = replace(
+                lease,
+                status=_LEASE_CANCEL_REQUESTED,
+                cancel_sent_at=now,
+            )
+            _LOGGER.info(
+                "CANCEL_PENDING (%s#%s): %s",
+                lease.pair_name,
+                lease.attempt_index,
+                _runtime_fields(lease.role, cancel_id, command.reason),
+            )
+            return
+
+    def _check_order_lease_deadlines(self, now: datetime) -> None:
+        if self.simulate:
+            return
+        now = _as_utc_aware(now)
+        for lease in tuple(self._order_leases.values()):
+            if lease.status == _LEASE_CLOSED:
+                continue
+            pair_state = self.state.pairs.get(lease.pair_name)
+            if pair_state is None or pair_state.attempt_index != lease.attempt_index:
+                continue
+            if lease.role == "head" and lease.status == _LEASE_PENDING_PLACE:
+                waited = (now - lease.created_at).total_seconds()
+                if waited >= self.tail_visibility_timeout_seconds:
+                    self._dispatch_lease_cancel(
+                        lease,
+                        reason="head_visibility_timeout",
+                        now=now,
+                    )
+                    continue
+            if lease.status != _LEASE_CANCEL_REQUESTED:
+                continue
+            if lease.cancel_sent_at is not None and (
+                now - _as_utc_aware(lease.cancel_sent_at)
+            ).total_seconds() < self._head_cancel_retry_seconds():
+                continue
+            self._dispatch_lease_cancel(lease, reason="cancel_retry", now=now)
+
+    def _dispatch_lease_cancel(
+        self,
+        lease: _OrderLease,
+        *,
+        reason: str,
+        now: datetime,
+    ) -> None:
+        cancel_id = lease.exchange_order_id or lease.client_order_id
+        if not cancel_id:
+            _LOGGER.warning(
+                "ORDER_SAFETY_BLOCKED (%s#%s): %s",
+                lease.pair_name,
+                lease.attempt_index,
+                _runtime_fields(lease.role, "missing_identity", reason),
+            )
+            return
+        cancel_slot = _CommandSlot(
+            pair_name=lease.pair_name,
+            attempt_index=lease.attempt_index,
+            role="cancel",
+        )
+        if cancel_slot in self._inflight_commands:
+            return
+        command = CancelCommand(
+            kind=RuntimeCommandKind.CANCEL,
+            symbol=Symbol(lease.symbol),
+            pair_name=lease.pair_name,
+            request=CancelOrderCommandRequest(
+                pair_name=lease.pair_name,
+                clOrdID=cancel_id,
+            ),
+            reason=reason,
+        )
+        _LOGGER.warning(
+            "CANCEL_RETRY (%s#%s): %s",
+            lease.pair_name,
+            lease.attempt_index,
+            _runtime_fields(lease.role, cancel_id, reason),
+        )
+        self._dispatch_commands((command,))
+        slot = _CommandSlot(lease.pair_name, lease.attempt_index, lease.role)
+        current = self._order_leases.get(slot, lease)
+        self._order_leases[slot] = replace(
+            current,
+            status=_LEASE_CANCEL_REQUESTED,
+            cancel_sent_at=now,
+        )
+
+    def _prune_order_leases(self) -> None:
+        for slot, lease in tuple(self._order_leases.items()):
+            if lease.status == _LEASE_CLOSED:
+                continue
+            pair_state = self.state.pairs.get(lease.pair_name)
+            if pair_state is None or pair_state.attempt_index != lease.attempt_index:
+                continue
+            if lease.role == "head" and pair_state.head_state in {
+                HeadState.CLOSED,
+                HeadState.FAILED,
+            }:
+                self._order_leases[slot] = replace(lease, status=_LEASE_CLOSED)
+            elif lease.role == "tail" and pair_state.tail_state in {
+                TailState.CLOSED,
+                TailState.FAILED,
+            }:
+                self._order_leases[slot] = replace(lease, status=_LEASE_CLOSED)
 
     def _prune_live_command_identities(self) -> None:
         stale: list[str] = []
@@ -1567,6 +1955,19 @@ class StrategyRuntime:
 
     def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
         record_symbol = _record_symbol(record)
+        for slot, lease in self._order_leases.items():
+            if lease.status == _LEASE_CLOSED:
+                continue
+            if lease.role not in {"head", "tail"}:
+                continue
+            pair_state = self.state.pairs.get(lease.pair_name)
+            if pair_state is None or pair_state.attempt_index != lease.attempt_index:
+                continue
+            if record_symbol is not None and _pair_symbol(pair_state, self.symbol) != record_symbol:
+                continue
+            if _record_matches_lease(record, lease):
+                role = OrderRole.HEAD if lease.role == "head" else OrderRole.TAIL
+                return pair_state, role
         for identity in self._identity_map_from_pair_and_commands().values():
             if identity.role not in {"head", "tail"}:
                 continue
@@ -1603,6 +2004,15 @@ class StrategyRuntime:
                 identities[_identity_key(pair_state.head_identity)] = pair_state.head_identity
             if pair_state.tail_identity is not None:
                 identities[_identity_key(pair_state.tail_identity)] = pair_state.tail_identity
+        for lease in self.active_order_leases():
+            identity = OrderIdentity(
+                pair_name=lease.pair_name,
+                role=lease.role,
+                client_order_id=lease.client_order_id,
+                exchange_order_id=lease.exchange_order_id,
+                symbol=lease.symbol,
+            )
+            identities[_identity_key(identity)] = identity
         identities.update(self._live_command_identities)
         for entry in self._inflight_commands.values():
             identity = self._command_identity_from_command(entry.command)
@@ -1683,6 +2093,7 @@ class StrategyRuntime:
     def _record_live_ack(self, command: DragonSong, ack: OrderAck) -> None:
         if self.simulate:
             return
+        self._enrich_order_lease_from_ack(command, ack)
         identity = self._command_identity_from_command(command)
         if identity is None:
             return
@@ -1694,6 +2105,8 @@ class StrategyRuntime:
             symbol=identity.symbol,
         )
         self._live_command_identities[_identity_key(merged)] = merged
+        if isinstance(command, CancelCommand):
+            return
         if isinstance(command, AmendTailCommand) and _ack_is_rejected(ack):
             pair_state = self.state.pairs.get(command.pair_name)
             attempt_index = 1 if pair_state is None else pair_state.attempt_index
@@ -1704,12 +2117,14 @@ class StrategyRuntime:
             )
             self._pending_tail_amends.pop(slot, None)
             _LOGGER.warning(
-                "AMEND_REJECTED (%s#%s): status=%s TCID=%s TOID=%s",
+                "AMEND_REJECTED (%s#%s): %s",
                 command.pair_name,
                 attempt_index,
-                ack.status,
-                merged.client_order_id or "-",
-                merged.exchange_order_id or "-",
+                _runtime_fields(
+                    ack.status,
+                    merged.client_order_id or "-",
+                    merged.exchange_order_id or "-",
+                ),
             )
         if not isinstance(command, PlaceTailCommand):
             return
@@ -1742,10 +2157,13 @@ class StrategyRuntime:
             if now < deadline.deadline_at:
                 continue
             _LOGGER.warning(
-                "LATENT_TIMEOUT (%s#%s): waited=%ss reason=price_gate",
+                "LATENT_TIMEOUT (%s#%s): %s",
                 deadline.pair_name,
                 deadline.attempt_index,
-                f"{(now - deadline.started_at).total_seconds():.1f}",
+                _runtime_fields(
+                    f"{(now - deadline.started_at).total_seconds():.1f}s",
+                    "price_gate",
+                ),
             )
             self.event_queue.put_nowait(
                 _latent_head_timeout_event(
@@ -1775,7 +2193,7 @@ class StrategyRuntime:
             )
             self._latent_head_deadlines[key] = deadline
             _LOGGER.info(
-                "LATENT_TIMEOUT_ARMED (%s#%s): deadline=%s",
+                "LATENT_TIMEOUT_ARMED (%s#%s): %s",
                 pair_name,
                 pair_state.attempt_index,
                 deadline.deadline_at.isoformat(),
@@ -1890,12 +2308,14 @@ class StrategyRuntime:
         )
         self._head_fill_deadlines[slot] = deadline
         _LOGGER.info(
-            "HEAD_ACK (%s#%s): HCID=%s HOID=%s tOut_deadline=%s",
+            "HEAD_ACK (%s#%s): %s",
             pair_name,
             pair_state.attempt_index,
-            identity.client_order_id or "-",
-            identity.exchange_order_id or "-",
-            deadline.deadline_at.isoformat(),
+            _runtime_fields(
+                identity.client_order_id or "-",
+                identity.exchange_order_id or "-",
+                deadline.deadline_at.isoformat(),
+            ),
         )
 
     def _check_head_fill_deadlines(self, now: datetime) -> None:
@@ -1916,10 +2336,15 @@ class StrategyRuntime:
             cancel_id = deadline.exchange_order_id or deadline.client_order_id
             if not cancel_id:
                 _LOGGER.warning(
-                    "HEAD_TIMEOUT (%s#%s): cannot_cancel missing_identity waited=%ss",
+                    "HEAD_TIMEOUT (%s#%s): %s",
                     deadline.pair_name,
                     deadline.attempt_index,
-                    f"{(_as_utc_aware(now) - deadline.started_at).total_seconds():.1f}",
+                    _runtime_fields(
+                        "missing_identity",
+                        f"{(_as_utc_aware(now) - deadline.started_at).total_seconds():.1f}s",
+                        "-",
+                        "-",
+                    ),
                 )
                 continue
             cancel_slot = _CommandSlot(
@@ -1937,12 +2362,15 @@ class StrategyRuntime:
                 continue
             if deadline.cancel_dispatched_at is None:
                 _LOGGER.warning(
-                    "HEAD_TIMEOUT (%s#%s): waited=%ss HCID=%s HOID=%s",
+                    "HEAD_TIMEOUT (%s#%s): %s",
                     deadline.pair_name,
                     deadline.attempt_index,
-                    f"{(_as_utc_aware(now) - deadline.started_at).total_seconds():.1f}",
-                    deadline.client_order_id or "-",
-                    deadline.exchange_order_id or "-",
+                    _runtime_fields(
+                        "expired",
+                        f"{(_as_utc_aware(now) - deadline.started_at).total_seconds():.1f}s",
+                        deadline.client_order_id or "-",
+                        deadline.exchange_order_id or "-",
+                    ),
                 )
             command = _head_timeout_cancel_command(
                 pair_state,
@@ -1974,12 +2402,14 @@ class StrategyRuntime:
             ):
                 if window.last_warned_at is not None:
                     _LOGGER.info(
-                        "TAIL_VISIBLE (%s#%s): TCID=%s TOID=%s waited=%ss",
+                        "TAIL_VISIBLE (%s#%s): %s",
                         window.pair_name,
                         window.attempt_index,
-                        window.client_order_id or "-",
-                        window.exchange_order_id or "-",
-                        f"{(now - window.started_at).total_seconds():.1f}",
+                        _runtime_fields(
+                            window.client_order_id or "-",
+                            window.exchange_order_id or "-",
+                            f"{(now - window.started_at).total_seconds():.1f}s",
+                        ),
                     )
                 stale_slots.append(slot)
                 continue
@@ -1995,13 +2425,15 @@ class StrategyRuntime:
             ):
                 continue
             _LOGGER.warning(
-                "TAIL_PENDING (%s#%s): TCID=%s TOID=%s waited=%ss timeout=%ss",
+                "TAIL_PENDING (%s#%s): %s",
                 window.pair_name,
                 window.attempt_index,
-                window.client_order_id or "-",
-                window.exchange_order_id or "-",
-                f"{(now - window.started_at).total_seconds():.1f}",
-                f"{self.tail_visibility_timeout_seconds:.1f}",
+                _runtime_fields(
+                    window.client_order_id or "-",
+                    window.exchange_order_id or "-",
+                    f"{(now - window.started_at).total_seconds():.1f}s",
+                    f"{self.tail_visibility_timeout_seconds:.1f}s",
+                ),
             )
             delayed_slots[slot] = replace(window, last_warned_at=now)
         for slot in stale_slots:
@@ -2025,14 +2457,16 @@ class StrategyRuntime:
             if now < pending.deadline_at:
                 continue
             _LOGGER.warning(
-                "AMEND_PENDING (%s#%s): CS=%s DS=%s TCID=%s TOID=%s waited=%ss",
+                "AMEND_PENDING (%s#%s): %s",
                 pending.pair_name,
                 pending.attempt_index,
-                _fmt_compact_price(confirmed_stop),
-                _fmt_compact_price(pending.desired_stop_price),
-                pending.client_order_id or "-",
-                pending.exchange_order_id or "-",
-                f"{(now - pending.started_at).total_seconds():.1f}",
+                _runtime_fields(
+                    _fmt_compact_price(confirmed_stop),
+                    _fmt_compact_price(pending.desired_stop_price),
+                    pending.client_order_id or "-",
+                    pending.exchange_order_id or "-",
+                    f"{(now - pending.started_at).total_seconds():.1f}s",
+                ),
             )
             stale_slots.append(slot)
         for slot in stale_slots:
@@ -2048,27 +2482,33 @@ class StrategyRuntime:
             pair_state = self.state.pairs.get(command.pair_name)
             attempt_index = slot.attempt_index if pair_state is None else pair_state.attempt_index
             self._discard_latent_head_deadline(command.pair_name, attempt_index)
+            self._upsert_order_lease_from_place_command(slot, command, identity)
             _LOGGER.info(
-                "HEAD_SENT (%s#%s): HCID=%s side=%s type=%s qty=%s price=%s stop=%s",
+                "HEAD_SENT (%s#%s): %s",
                 command.pair_name,
                 attempt_index,
-                "-" if identity is None else identity.client_order_id or "-",
-                command.request.side,
-                command.request.ordType,
-                _fmt_compact_price(command.request.orderQty),
-                _fmt_compact_price(command.request.price),
-                _fmt_compact_price(command.request.stopPx),
+                _runtime_fields(
+                    "-" if identity is None else identity.client_order_id or "-",
+                    command.request.side,
+                    command.request.ordType,
+                    _fmt_compact_price(command.request.orderQty),
+                    _fmt_compact_price(command.request.price),
+                    _fmt_compact_price(command.request.stopPx),
+                ),
             )
+            return
+        if isinstance(command, PlaceTailCommand):
+            self._upsert_order_lease_from_place_command(slot, command, identity)
             return
         if isinstance(command, CancelCommand):
             label = "HEAD_CANCEL_SENT" if command.reason == "head_timeout" else "CANCEL_SENT"
+            self._mark_cancel_requested_from_command(command)
             _LOGGER.info(
-                "%s (%s#%s): CID=%s reason=%s",
+                "%s (%s#%s): %s",
                 label,
                 command.pair_name,
                 slot.attempt_index,
-                command.request.clOrdID,
-                command.reason,
+                _runtime_fields(command.request.clOrdID, command.reason),
             )
             return
         if not isinstance(command, AmendTailCommand):
@@ -2090,15 +2530,17 @@ class StrategyRuntime:
             ref_source, ref_price_value = tail_reference_price(pair_state.pair, market)
             ref_price = to_decimal(ref_price_value)
         _LOGGER.info(
-            "AMEND_SENT (%s#%s): CS=%s DS=%s ref=%s src=%s TCID=%s TOID=%s",
+            "AMEND_SENT (%s#%s): %s",
             command.pair_name,
             pair_state.attempt_index,
-            _fmt_compact_price(confirmed_stop),
-            _fmt_compact_price(desired_stop),
-            _fmt_compact_price(ref_price),
-            ref_source,
-            "-" if identity is None else identity.client_order_id or "-",
-            "-" if identity is None else identity.exchange_order_id or "-",
+            _runtime_fields(
+                _fmt_compact_price(confirmed_stop),
+                _fmt_compact_price(desired_stop),
+                _fmt_compact_price(ref_price),
+                ref_source,
+                "-" if identity is None else identity.client_order_id or "-",
+                "-" if identity is None else identity.exchange_order_id or "-",
+            ),
         )
         self._pending_tail_amends[slot] = _TailAmendPending(
             pair_name=command.pair_name,
@@ -2118,7 +2560,7 @@ class StrategyRuntime:
             if previous_repeats.get(pair_name) == pending:
                 continue
             _LOGGER.info(
-                "REPEAT_WAIT (%s#%s): ready_at=%s",
+                "REPEAT_WAIT (%s#%s): %s",
                 pair_name,
                 pending.next_attempt,
                 pending.ready_at.isoformat(),
@@ -2133,12 +2575,14 @@ class StrategyRuntime:
             if token is None or previous.dependency_token == token:
                 continue
             _LOGGER.info(
-                "CHAIN_READY (%s#%s <- %s#%s): waiting_for_price_gate closed_at=%s",
+                "CHAIN_READY (%s#%s): %s",
                 pair_name,
                 current.attempt_index,
-                token.origin_pair_name,
-                token.origin_attempt_index,
-                token.closed_at.isoformat(),
+                _runtime_fields(
+                    f"{token.origin_pair_name}#{token.origin_attempt_index}",
+                    "waiting_for_price_gate",
+                    token.closed_at.isoformat(),
+                ),
             )
 
     def _log_repeat_attempts(self, previous_pairs: Mapping[str, PairCycleState]) -> None:
@@ -2149,11 +2593,14 @@ class StrategyRuntime:
             if current.attempt_index <= previous.attempt_index:
                 continue
             _LOGGER.info(
-                "REPEAT_READY (%s#%s): waiting_for_price_gate window=%s..%s baseline=-",
+                "REPEAT_READY (%s#%s): %s",
                 pair_name,
                 current.attempt_index,
-                current.pair.window.start_minutes,
-                current.pair.window.end_minutes,
+                _runtime_fields(
+                    "waiting_for_price_gate",
+                    f"{current.pair.window.start_minutes}..{current.pair.window.end_minutes}",
+                    "-",
+                ),
             )
 
     def _log_repeat_start(self, commands: tuple[DragonSong, ...]) -> None:
@@ -2167,7 +2614,7 @@ class StrategyRuntime:
                 continue
             started.add(key)
             _LOGGER.info(
-                "REPEAT_START (%s#%s): commands=%s",
+                "REPEAT_START (%s#%s): %s",
                 key[0],
                 key[1],
                 sum(1 for item in commands if item.pair_name == key[0]),
@@ -2189,6 +2636,10 @@ class StrategyRuntime:
                     kind=EggMoveKind.TAIL_AMEND_REJECTED,
                 ),
             )
+        if not self.simulate and isinstance(command, CancelCommand):
+            # Live/demo lifecycle is DB-grounded; cancel ACKs are intent
+            # correlation only. A private DB row must close the order.
+            return ()
         if isinstance(command, CancelCommand) and command.reason == "head_timeout":
             pair_state = self.state.pairs.get(command.pair_name)
             expected_attempt = (
@@ -2198,11 +2649,13 @@ class StrategyRuntime:
             )
             if pair_state is None or pair_state.attempt_index != expected_attempt:
                 _LOGGER.info(
-                    "HEAD_CANCEL_ACK_STALE (%s#%s): current_attempt=%s CID=%s",
+                    "HEAD_CANCEL_ACK_STALE (%s#%s): %s",
                     command.pair_name,
                     expected_attempt,
-                    "-" if pair_state is None else pair_state.attempt_index,
-                    command.request.clOrdID,
+                    _runtime_fields(
+                        "-" if pair_state is None else pair_state.attempt_index,
+                        command.request.clOrdID,
+                    ),
                 )
                 return ()
             timeout_cancel = _head_timeout_cancel_event_from_ack(
@@ -2631,6 +3084,72 @@ def _ack_is_zero_fill_cancel(ack: OrderAck) -> bool:
     if status not in {"canceled", "cancelled", "notfound", "notfoundcancelled"}:
         return False
     return to_decimal(ack.executed_qty) == Decimal("0")
+
+
+def _private_order_lease_status(status: str | None) -> str | None:
+    key = _status_key(status)
+    if key in {
+        "new",
+        "open",
+        "untouched",
+        "partiallyfilled",
+        "partialfill",
+        "partially_filled",
+        "living",
+    }:
+        return _LEASE_LIVE
+    if key in {
+        "canceled",
+        "cancelled",
+        "closed",
+        "filled",
+        "failed",
+        "rejected",
+        "notfound",
+        "notfoundcancelled",
+    }:
+        return _LEASE_CLOSED
+    return None
+
+
+def _status_key(status: str | None) -> str:
+    return str(status or "").replace(" ", "").replace("-", "").lower()
+
+
+def _string_payload(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _decimal_payload(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float, Decimal, str)):
+        return to_decimal(value)
+    return None
+
+
+def _record_matches_lease(record: object, lease: _OrderLease) -> bool:
+    return _lease_matches_identity(
+        lease,
+        client_order_id=getattr(record, "client_order_id", None),
+        exchange_order_id=getattr(record, "exchange_order_id", None),
+    )
+
+
+def _lease_matches_identity(
+    lease: _OrderLease,
+    *,
+    client_order_id: str | None,
+    exchange_order_id: str | None,
+) -> bool:
+    if client_order_id and lease.client_order_id == client_order_id:
+        return True
+    if exchange_order_id and lease.exchange_order_id == exchange_order_id:
+        return True
+    return False
 
 
 def _record_matches_identity(record, identity: OrderIdentity) -> bool:

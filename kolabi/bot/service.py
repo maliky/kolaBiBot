@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import time
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Optional, Protocol, TypeVar, cast
 
-from kolabi.bot.domain import OrderPairSpec, StrategySpec
+from kolabi.bot.domain import OrderIdentity, OrderPairSpec, StrategySpec
 from kolabi.bot.indicators import (
     DummyIndicatorClient,
     IndicatorClient,
@@ -49,6 +51,7 @@ from kolabi.shared.core.runtime_types import (
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
     PlaceTailCommand,
+    PrivateOrderRecord,
     RuntimeCommandKind,
     Symbol,
 )
@@ -65,6 +68,7 @@ from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntim
 
 _LOGGER = logging.getLogger("kola")
 _T = TypeVar("_T")
+_KOLABI_ORDER_CLIENT_ID_RE = re.compile(r"^[HT][1-9][0-9]*[A-Za-z]+-\d{12}$")
 
 
 def _env_scope_key(account_scope: str) -> str:
@@ -324,6 +328,7 @@ class BotService:
         stale_states = tuple(state for state in states if not state.ready)
         if stale_states:
             raise TimeoutError(self._format_wait_timeouts(stale_states))
+        self._cleanup_startup_orphans(tuple(item.symbol for item in states))
         state = states[0]
         public_ages = ",".join(
             f"{item.symbol}:{item.public.age_seconds or 0.0:.2f}s"
@@ -372,6 +377,108 @@ class BotService:
             f"private_age={private_age} private_last_heartbeat={private_last_heartbeat} "
             f"account_scope={self.config.account_scope}{public_hint}{hint})"
         )
+
+    def _cleanup_startup_orphans(self, symbols: tuple[str, ...]) -> None:
+        if self.runtime_state is None:
+            return
+        orphans = self._open_kolabi_orders(symbols)
+        if not orphans:
+            return
+        for record in orphans:
+            self.logger.warning(
+                "ORPHAN_FOUND (%s): %s",
+                record.symbol,
+                _runtime_admin_fields(
+                    record.client_order_id or "-",
+                    record.exchange_order_id or "-",
+                    record.side or "-",
+                    record.quantity if record.quantity is not None else "-",
+                    record.stop_price if record.stop_price is not None else record.price or "-",
+                ),
+            )
+        port = self._build_admin_port()
+        executor = OgunExecutor(port)
+        for record in orphans:
+            cancel_id = record.exchange_order_id or record.client_order_id
+            if cancel_id is None:
+                continue
+            command = CancelCommand(
+                kind=RuntimeCommandKind.CANCEL,
+                symbol=Symbol(record.symbol),
+                pair_name="__startup_orphan__",
+                request=CancelOrderCommandRequest(
+                    pair_name="__startup_orphan__",
+                    clOrdID=cancel_id,
+                ),
+                reason="startup_orphan",
+            )
+            try:
+                asyncio.run(executor.execute(command))
+            except Exception as exc:
+                raise RuntimeError(
+                    "startup orphan cancel failed "
+                    f"symbol={record.symbol} client_id={record.client_order_id or '-'} "
+                    f"order_id={record.exchange_order_id or '-'} error={_compact_admin_error(exc)}"
+                ) from exc
+            self.logger.warning(
+                "ORPHAN_CANCEL_SENT (%s): %s",
+                record.symbol,
+                _runtime_admin_fields(
+                    record.client_order_id or "-",
+                    record.exchange_order_id or "-",
+                    "startup_orphan",
+                ),
+            )
+        survivors = self._wait_for_private_orders_closed(
+            symbols,
+            orphans,
+            timeout_seconds=self.config.ready_timeout_seconds,
+            poll_seconds=self.config.ready_poll_seconds,
+        )
+        if survivors:
+            details = ", ".join(_private_order_summary(record) for record in survivors)
+            raise RuntimeError(f"startup orphan orders still open after cancel: {details}")
+
+    def _open_kolabi_orders(self, symbols: tuple[str, ...]) -> tuple[PrivateOrderRecord, ...]:
+        if self.runtime_state is None:
+            return ()
+        rows: list[PrivateOrderRecord] = []
+        for symbol in symbols:
+            fetch_latest = getattr(self.runtime_state, "fetch_latest_private_orders", None)
+            if not callable(fetch_latest):
+                continue
+            for record in fetch_latest(symbol=symbol, open_only=True):
+                if _is_kolabi_order_record(record):
+                    rows.append(record)
+        return tuple(rows)
+
+    def _wait_for_private_orders_closed(
+        self,
+        symbols: tuple[str, ...],
+        targets: Iterable[PrivateOrderRecord],
+        *,
+        timeout_seconds: float,
+        poll_seconds: float,
+    ) -> tuple[PrivateOrderRecord, ...]:
+        target_keys = {_private_order_key(record) for record in targets}
+        target_keys.discard(None)
+        if not target_keys:
+            return ()
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        sleep_seconds = max(0.05, poll_seconds)
+        while True:
+            survivors = tuple(
+                record
+                for record in self._open_kolabi_orders(symbols)
+                if _private_order_key(record) in target_keys
+            )
+            if not survivors:
+                for key in target_keys:
+                    self.logger.info("ORPHAN_CLOSED: %s", key)
+                return ()
+            if time.monotonic() >= deadline:
+                return survivors
+            time.sleep(sleep_seconds)
 
     def run_strategy(
         self,
@@ -484,14 +591,15 @@ class BotService:
             )
             return
         self.logger.info(
-            "%s cleanup pairs=%s tail_cancelled=%s close_orders=%s qty_before=%s qty_after=%s errors=%s",
+            "%s cleanup pairs=%s order_cancelled=%s close_orders=%s qty_before=%s qty_after=%s errors=%s survivors=%s",
             reason,
             cleanup["pairs"],
-            cleanup["tail_cancelled"],
+            cleanup.get("order_cancelled", cleanup["tail_cancelled"]),
             cleanup["close_orders"],
             cleanup["position_before_qty"],
             cleanup["position_after_qty"],
             cleanup["errors"],
+            ",".join(cleanup.get("survivors", ())) or "-",
         )
 
     def run_orders(self, pairs: Iterable[OrderPairSpec], *, dry_run: bool = False, simulate: bool = False) -> StrategyRunResult:
@@ -748,13 +856,24 @@ class BotService:
         return cancelled
 
     def cleanup_interrupted_pairs(self, runtime: StrategyRuntime) -> dict[str, object]:
-        """Cancel active tails and close associated head-opened exposure."""
+        """Cancel active live orders and close associated head-opened exposure."""
         port = self._build_admin_port()
         adapter = port.adapter
         targets = _interrupt_cleanup_targets(runtime)
         cancelled: list[OrderAck] = []
         close_acks: list[OrderAck] = []
         errors = 0
+        seen_cancel_ids: set[str] = set()
+        active_identities = runtime.active_order_identities()
+        for identity in active_identities:
+            cancel_id = identity.exchange_order_id or identity.client_order_id
+            if not cancel_id or cancel_id in seen_cancel_ids:
+                continue
+            seen_cancel_ids.add(cancel_id)
+            try:
+                cancelled.append(adapter.cancel_order(cancel_id))
+            except Exception:
+                errors += 1
         position_before = adapter.get_position()
         remaining_long = max(0.0, float(position_before.qty))
         remaining_short = max(0.0, -float(position_before.qty))
@@ -764,7 +883,8 @@ class BotService:
                 target.tail_exchange_order_id,
                 target.tail_client_order_id,
             )
-            if cancel_id is not None:
+            if cancel_id is not None and cancel_id not in seen_cancel_ids:
+                seen_cancel_ids.add(cancel_id)
                 try:
                     cancelled.append(adapter.cancel_order(cancel_id))
                 except Exception:
@@ -790,13 +910,42 @@ class BotService:
             except Exception:
                 errors += 1
         position_after = adapter.get_position()
+        survivors: tuple[PrivateOrderRecord, ...] = ()
+        if active_identities and self.runtime_state is not None:
+            survivor_targets = tuple(
+                PrivateOrderRecord(
+                    symbol=identity.symbol or self.config.symbol,
+                    status="open",
+                    exchange_order_id=identity.exchange_order_id,
+                    client_order_id=identity.client_order_id,
+                )
+                for identity in active_identities
+            )
+            survivors = self._wait_for_private_orders_closed(
+                tuple(sorted({record.symbol for record in survivor_targets})),
+                survivor_targets,
+                timeout_seconds=self.config.tail_verify_timeout_seconds,
+                poll_seconds=self.config.tail_verify_poll_seconds,
+            )
+            for survivor in survivors:
+                self.logger.warning(
+                    "ORDER_SAFETY_BLOCKED (%s): %s",
+                    survivor.symbol,
+                    _runtime_admin_fields(
+                        survivor.client_order_id or "-",
+                        survivor.exchange_order_id or "-",
+                        "shutdown_survivor",
+                    ),
+                )
         return {
             "pairs": len(targets),
             "tail_cancelled": len(cancelled),
+            "order_cancelled": len(cancelled),
             "close_orders": len(close_acks),
             "position_before_qty": float(position_before.qty),
             "position_after_qty": float(position_after.qty),
             "errors": errors,
+            "survivors": tuple(_private_order_summary(record) for record in survivors),
         }
 
 
@@ -1155,6 +1304,33 @@ def _extract_cancelable_order_id(order: dict[str, object]) -> str | None:
         if value:
             return str(value)
     return None
+
+
+def _is_kolabi_order_record(record: PrivateOrderRecord) -> bool:
+    client_id = record.client_order_id or ""
+    return bool(_KOLABI_ORDER_CLIENT_ID_RE.match(client_id))
+
+
+def _private_order_key(record: PrivateOrderRecord) -> str | None:
+    if record.exchange_order_id:
+        return f"exchange:{record.exchange_order_id}"
+    if record.client_order_id:
+        return f"client:{record.client_order_id}"
+    return None
+
+
+def _private_order_summary(record: PrivateOrderRecord) -> str:
+    return (
+        f"symbol={record.symbol} client_id={record.client_order_id or '-'} "
+        f"order_id={record.exchange_order_id or '-'} side={record.side or '-'} "
+        f"qty={record.quantity if record.quantity is not None else '-'} "
+        f"price={record.stop_price if record.stop_price is not None else record.price or '-'} "
+        f"status={record.status}"
+    )
+
+
+def _runtime_admin_fields(*values: object) -> str:
+    return " ".join(str(value) for value in values)
 
 
 def _compact_admin_error(exc: BaseException) -> str:

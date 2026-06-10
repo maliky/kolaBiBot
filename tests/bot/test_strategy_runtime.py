@@ -339,6 +339,44 @@ class _HeadOpenOnlySource:
             await asyncio.sleep(0.01)
 
 
+class _HeadOpenThenCancelSource(_HeadOpenOnlySource):
+    async def pump(self, runtime) -> None:
+        await runtime.enqueue(
+            EggMove(
+                kind=EggMoveKind.HEAD_HOOKED,
+                occurred_at=datetime.now(timezone.utc),
+                symbol=runtime.symbol,
+                pair_name=self.pair_name,
+                event_id=f"test:{self.pair_name}:head-hooked",
+            )
+        )
+        head_command = await _wait_for_command(runtime, PlaceHeadCommand, self.pair_name)
+        head_client_id = _require_client_id(head_command)
+        head_order_id = await _wait_for_executor_order_id(self.executor, head_client_id)
+        self.db.write_order(
+            order_id=head_order_id,
+            client_order_id=head_client_id,
+            side="buy",
+            order_type="limit",
+            quantity="1",
+            price="100",
+        )
+        await _wait_for_command(runtime, CancelCommand, self.pair_name)
+        self.db.write_order(
+            order_id=head_order_id,
+            client_order_id=head_client_id,
+            side="buy",
+            order_type="limit",
+            quantity="1",
+            price="100",
+            status="canceled",
+            reason="cancelled_by_user",
+            is_cancel=True,
+        )
+        while runtime.running:
+            await asyncio.sleep(0.01)
+
+
 def _command_quantity(command: DragonSong) -> float | None:
     quantity = getattr(command.request, "orderQty", None)
     if quantity is None:
@@ -507,13 +545,16 @@ def test_db_backed_runtime_completes_one_lifecycle_with_amend_and_tail_fill(
         PlaceTailCommand,
         AmendTailCommand,
     ]
-    assert "UPDATE (pair-a#1): (closed--hooked)" in caplog.text
-    assert "HFP=100.00" in caplog.text
-    assert "UPDATE (pair-a#1): (closed--living)" in caplog.text
+    assert "UPDATE (pair-a#1): closed--hooked" in caplog.text
+    assert "buy 1.00 100.00" in caplog.text
+    assert "UPDATE (pair-a#1): closed--living" in caplog.text
     assert "AMEND_SENT (pair-a#1):" in caplog.text
-    assert "UPDATE (pair-a#1): (closed--closed)" in caplog.text
-    assert "TFP=" in caplog.text
-    assert "TAIL_PENDING" not in caplog.text
+    assert "UPDATE (pair-a#1): closed--closed" in caplog.text
+    assert "HFP=" not in caplog.text
+    assert "TFP=" not in caplog.text
+    assert not any(
+        record.getMessage().startswith("TAIL_PENDING (") for record in caplog.records
+    )
 
 
 def test_head_timeout_cancels_unfilled_platform_ack(
@@ -556,7 +597,7 @@ def test_head_timeout_cancels_unfilled_platform_ack(
     assert "HEAD_CANCEL_SENT (pair-a#1):" in caplog.text
 
 
-def test_head_timeout_cancel_ack_terminates_unfilled_head_without_retries(
+def test_head_timeout_cancel_ack_does_not_terminate_unfilled_head_without_db(
     tmp_path,
     caplog,
 ) -> None:
@@ -585,36 +626,24 @@ def test_head_timeout_cancel_ack_terminates_unfilled_head_without_retries(
     ]
     assert len(cancel_commands) == 1
     pair_state = result.state.pairs["pair-a"]
-    assert pair_state.head_state == HeadState.FAILED
-    assert pair_state.tail_state == TailState.LATENT
+    assert pair_state.head_state == HeadState.NEW
+    assert pair_state.tail_state is None
     assert pair_state.played_quantity == Decimal("0.0")
-    assert "HEAD_CANCELLED (pair-a#1): PQ=0.0" in caplog.text
+    assert "HEAD_CANCELLED (pair-a#1):" not in caplog.text
+    assert "CANCEL_PENDING (pair-a#1):" in caplog.text
 
 
-def test_head_timeout_cancel_ack_without_cumqty_terminates_unfilled_head(
+def test_head_timeout_private_db_cancel_terminates_unfilled_head(
     tmp_path,
 ) -> None:
-    class SparseCancelAckExecutor(_CancelAckLiveExecutor):
-        async def execute(self, command: DragonSong) -> OrderAck:
-            ack = await super().execute(command)
-            if isinstance(command, CancelCommand):
-                return OrderAck(
-                    order_id=ack.order_id,
-                    status=ack.status,
-                    orig_qty=ack.orig_qty,
-                    executed_qty=None,
-                    side=ack.side,
-                )
-            return ack
-
     db = _PrivateDbHarness(tmp_path)
-    executor = SparseCancelAckExecutor()
+    executor = _CancelAckLiveExecutor()
     pair = replace(sample_strategy()[0], timeout=0.001)
     runtime = StrategyRuntime(
         strategy=StrategySpec(name="head-timeout", pairs=(pair,)),
         symbol="PI_XBTUSD",
         executor=executor,
-        public_source=_HeadOpenOnlySource(db, executor),
+        public_source=_HeadOpenThenCancelSource(db, executor),
         private_source=KrakenPrivateOrderPollingSource(
             db.reader,
             poll_seconds=0.01,
@@ -726,7 +755,7 @@ def test_stale_head_timeout_cancel_ack_does_not_fail_new_attempt(caplog) -> None
 
     assert followups == ()
     assert runtime.state.pairs["pair-a"].head_state == HeadState.NEW
-    assert "HEAD_CANCEL_ACK_STALE (pair-a#1): current_attempt=2" in caplog.text
+    assert "HEAD_CANCEL_ACK_STALE" not in caplog.text
 
 
 def test_old_live_head_identity_is_pruned_after_repeat_resets_to_latent() -> None:
@@ -839,7 +868,9 @@ def test_price_gated_latent_head_times_out_without_platform_cancel(caplog) -> No
     assert not any(isinstance(command, CancelCommand) for command in result.commands)
     assert "LATENT_TIMEOUT_ARMED (pair-a#1):" in caplog.text
     assert "LATENT_TIMEOUT (pair-a#1):" in caplog.text
-    assert "HEAD_CANCEL_SENT" not in caplog.text
+    assert not any(
+        record.getMessage().startswith("HEAD_CANCEL_SENT (") for record in caplog.records
+    )
 
 
 def test_latent_timeout_repeats_with_fresh_relative_price_baseline(caplog) -> None:
@@ -985,9 +1016,31 @@ def test_gate_wait_logs_unchanged_status_every_five_minutes(caplog) -> None:
     gate_waits = [
         record.getMessage()
         for record in caplog.records
-        if record.getMessage().startswith("GATE_WAIT (pair-a#1):")
+        if record.getMessage().startswith("GATE_WAIT-2 (pair-a#1):")
     ]
     assert len(gate_waits) == 2
+    assert "status=" not in gate_waits[0]
+    assert "src=" not in gate_waits[0]
+
+
+def test_runtime_legend_logs_once_with_compact_columns(caplog) -> None:
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="legend", pairs=sample_strategy()),
+        symbol="PI_XBTUSD",
+        simulate=False,
+    )
+
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._log_runtime_legend_once()
+        runtime._log_runtime_legend_once()
+
+    messages = [record.getMessage() for record in caplog.records]
+    general = [message for message in messages if message.startswith("LEGEND--GENERAL:")]
+    assert len(general) == 1
+    assert "AI=attempt_index    PU=pair_update" in general[0]
+    assert any(message.startswith("LEGEND--HEAD_SENT:") for message in messages)
+    assert any(message.startswith("LEGEND--GATE_WAIT-2:") for message in messages)
+    assert "RAPPEL:" not in caplog.text
 
 
 def test_runtime_dispatches_different_pairs_concurrently() -> None:
@@ -2592,10 +2645,11 @@ def test_update_log_closed_hooked_includes_head_fill_fields(caplog) -> None:
     with caplog.at_level("INFO", logger="kola"):
         runtime._log_living_updates({"pair-a": previous})
 
-    assert "UPDATE (pair-a#1): (closed--hooked)" in caplog.text
-    assert "HFS=buy" in caplog.text
-    assert "HFQ=1.00" in caplog.text
-    assert "HFP=100.00" in caplog.text
+    assert "UPDATE (pair-a#1): closed--hooked" in caplog.text
+    assert "buy 1.00 100.00" in caplog.text
+    assert "HFS=" not in caplog.text
+    assert "HFQ=" not in caplog.text
+    assert "HFP=" not in caplog.text
 
 
 def test_update_log_closed_submitted_omits_head_fill_fields(caplog) -> None:
@@ -2636,9 +2690,10 @@ def test_update_log_closed_submitted_omits_head_fill_fields(caplog) -> None:
     with caplog.at_level("INFO", logger="kola"):
         runtime._log_living_updates({"pair-a": previous})
 
-    assert "UPDATE (pair-a#1): (closed--submitted)" in caplog.text
-    assert "TCID=CID-T" in caplog.text
-    assert "TOID=OID-T" in caplog.text
+    assert "UPDATE (pair-a#1): closed--submitted" in caplog.text
+    assert "1 99.00 99.00 CID-T OID-T" in caplog.text
+    assert "TCID=" not in caplog.text
+    assert "TOID=" not in caplog.text
     assert "HFS=" not in caplog.text
 
 
@@ -2679,10 +2734,11 @@ def test_update_log_closed_tail_includes_tail_fill_fields(caplog) -> None:
     with caplog.at_level("INFO", logger="kola"):
         runtime._log_living_updates({"pair-a": previous})
 
-    assert "UPDATE (pair-a#1): (closed--closed)" in caplog.text
-    assert "TFS=sell" in caplog.text
-    assert "TFQ=1.00" in caplog.text
-    assert "TFP=98.50" in caplog.text
+    assert "UPDATE (pair-a#1): closed--closed" in caplog.text
+    assert "sell 1.00 98.50" in caplog.text
+    assert "TFS=" not in caplog.text
+    assert "TFQ=" not in caplog.text
+    assert "TFP=" not in caplog.text
 
 
 def test_update_log_emits_when_desired_stop_changes_only(caplog) -> None:
@@ -2719,9 +2775,10 @@ def test_update_log_emits_when_desired_stop_changes_only(caplog) -> None:
     with caplog.at_level("INFO", logger="kola"):
         runtime._log_living_updates({"pair-a": previous})
 
-    assert "UPDATE (pair-a#1): (closed--submitted)" in caplog.text
-    assert "CS=99.00" in caplog.text
-    assert "DS=98.00" in caplog.text
+    assert "UPDATE (pair-a#1): closed--submitted" in caplog.text
+    assert "1 99.00 98.00 CID-T OID-T" in caplog.text
+    assert "CS=" not in caplog.text
+    assert "DS=" not in caplog.text
 
 
 def test_amend_dispatch_logs_and_tracks_pending_confirmation(caplog) -> None:
@@ -2776,8 +2833,9 @@ def test_amend_dispatch_logs_and_tracks_pending_confirmation(caplog) -> None:
         runtime._on_command_dispatched(slot, command, identity)
 
     assert "AMEND_SENT (pair-a#1):" in caplog.text
-    assert "CS=99.00" in caplog.text
-    assert "DS=98.50" in caplog.text
+    assert "AMEND_SENT (pair-a#1): 99.00 98.50" in caplog.text
+    assert "CS=" not in caplog.text
+    assert "DS=" not in caplog.text
     assert slot in runtime._pending_tail_amends
 
 

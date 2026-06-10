@@ -447,6 +447,45 @@ class KrakenRuntimeStateClient:
             rows = session.execute(statement).scalars().all()
         return tuple(_private_order_record(row) for row in rows)
 
+    def fetch_latest_private_orders(
+        self,
+        *,
+        symbol: str | None = None,
+        open_only: bool = False,
+    ) -> tuple[PrivateOrderRecord, ...]:
+        """Return latest private order state per exchange/client identity."""
+
+        target_symbol = symbol or self.symbol
+        with self._critical_account_sessionmaker() as session:
+            rows = (
+                session.execute(
+                    select(ExchangeOrder)
+                    .where(
+                        ExchangeOrder.exchange == self.exchange,
+                        ExchangeOrder.environment == self.environment,
+                        ExchangeOrder.market_type == self.market_type,
+                        ExchangeOrder.account_scope == self.account_scope,
+                        ExchangeOrder.symbol == target_symbol,
+                    )
+                    .order_by(
+                        ExchangeOrder.local_timestamp.desc(),
+                        ExchangeOrder.id.desc(),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        latest: dict[tuple[str, str], ExchangeOrder] = {}
+        for row in rows:
+            identity = _order_identity_key(row)
+            if identity is None or identity in latest:
+                continue
+            latest[identity] = row
+        records = tuple(_private_order_record(row) for row in latest.values())
+        if not open_only:
+            return records
+        return tuple(record for record in records if _private_order_record_is_open(record))
+
     def fetch_private_fills_for_identities(
         self,
         *,
@@ -607,12 +646,16 @@ class KrakenRuntimeStateClient:
             if not _is_missing_schema_error(exc):
                 raise
             return 0
-        open_statuses = {"new", "open", "partiallyfilled", "partialfill"}
-        order_records = [_private_order_record(row) for row in rows]
+        latest: dict[tuple[str, str], ExchangeOrder] = {}
+        for row in rows:
+            identity = _order_identity_key(row)
+            if identity is None or identity in latest:
+                continue
+            latest[identity] = row
         return sum(
             1
-            for row in order_records
-            if row.status.replace(" ", "").replace("_", "").lower() in open_statuses
+            for row in latest.values()
+            if _private_order_record_is_open(_private_order_record(row))
         )
 
     def _count_fills(self, session: Session, symbol: str) -> int:
@@ -805,6 +848,26 @@ def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
         local_timestamp=row.local_timestamp.isoformat(),
         local_id=row.id,
     )
+
+
+def _order_identity_key(row: ExchangeOrder) -> tuple[str, str] | None:
+    if row.exchange_order_id:
+        return ("exchange", row.exchange_order_id)
+    if row.client_order_id:
+        return ("client", row.client_order_id)
+    return None
+
+
+def _private_order_record_is_open(record: PrivateOrderRecord) -> bool:
+    key = record.status.replace(" ", "").replace("_", "").replace("-", "").lower()
+    return key in {
+        "new",
+        "open",
+        "untouched",
+        "partiallyfilled",
+        "partialfill",
+        "living",
+    }
 
 
 def _order_reason_flags_from_payload(

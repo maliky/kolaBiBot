@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,7 +16,12 @@ from kolabi.bot.domain import (
 )
 from kolabi.bot.indicators import DummyIndicatorClient
 from kolabi.bot.service import AdapterExchangePort, BotConfig, BotService
-from kolabi.bot.strategy_runtime import StrategyRunResult, StrategyRuntime
+from kolabi.bot.strategy_runtime import (
+    StrategyRunResult,
+    StrategyRuntime,
+    _CommandSlot,
+    _OrderLease,
+)
 from kolabi.bot.tsv import read_strategy_file
 from kolabi.shared.config import ExchangeConfig
 from kolabi.shared.core.models import OrderAck, Position
@@ -23,6 +29,7 @@ from kolabi.shared.core.runtime_types import (
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
     PlaceTailCommand,
+    PrivateOrderRecord,
     RuntimeCommandKind,
     Symbol,
 )
@@ -394,6 +401,115 @@ def test_interrupt_cleanup_cancels_tail_by_exchange_id_and_reverses_played_qty(m
     assert summary["close_orders"] == 1
     assert summary["position_before_qty"] == initial_position
     assert summary["position_after_qty"] == expected_after
+
+
+def test_interrupt_cleanup_cancels_active_head_lease(monkeypatch) -> None:
+    strategy = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
+    pair = strategy.pairs[0]
+    service = BotService(BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False))
+    runtime = StrategyRuntime(strategy=strategy, symbol="PI_XBTUSD", simulate=False)
+    runtime._order_leases[
+        _CommandSlot(pair.name, 1, "head")
+    ] = _OrderLease(
+        pair_name=pair.name,
+        attempt_index=1,
+        role="head",
+        symbol="PI_XBTUSD",
+        client_order_id="H1test-260609220000",
+        exchange_order_id="OID-H",
+        side="buy",
+        quantity=Decimal("1"),
+        price=None,
+        stop_price=Decimal("100"),
+        status="LIVE",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    class FakeAdapter:
+        def __init__(self) -> None:
+            self.cancelled: list[str] = []
+
+        def cancel_order(self, order_id: str) -> OrderAck:
+            self.cancelled.append(order_id)
+            return OrderAck(order_id=order_id, status="Canceled")
+
+        def get_position(self) -> Position:
+            return Position(symbol="PI_XBTUSD", qty=0.0)
+
+    adapter = FakeAdapter()
+    monkeypatch.setattr(
+        service,
+        "_build_admin_port",
+        lambda: type("Port", (), {"adapter": adapter})(),
+    )
+
+    summary = service.cleanup_interrupted_pairs(runtime)
+
+    assert adapter.cancelled == ["OID-H"]
+    assert summary["order_cancelled"] == 1
+    assert summary["close_orders"] == 0
+
+
+def test_startup_quarantine_cancels_only_kolabi_orphans(monkeypatch) -> None:
+    service = BotService(BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False))
+    kolabi_record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="untouched",
+        exchange_order_id="OID-K",
+        client_order_id="H1clean-260609220000",
+        side="buy",
+        order_type="stop",
+        quantity=1.0,
+        stop_price=100.0,
+    )
+    manual_record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="untouched",
+        exchange_order_id="OID-M",
+        client_order_id="manual-order",
+        side="buy",
+        order_type="stop",
+        quantity=1.0,
+        stop_price=101.0,
+    )
+
+    class FakeRuntimeState:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def fetch_latest_private_orders(self, *, symbol=None, open_only=False):
+            del symbol, open_only
+            return (manual_record,) if self.closed else (kolabi_record, manual_record)
+
+    class FakeExecutorAdapter:
+        def __init__(self, state: FakeRuntimeState) -> None:
+            self.state = state
+            self.cancelled: list[str] = []
+
+        def cancel_order(self, order_id: str) -> OrderAck:
+            self.cancelled.append(order_id)
+            self.state.closed = True
+            return OrderAck(order_id=order_id, status="Canceled")
+
+    state = FakeRuntimeState()
+    adapter = FakeExecutorAdapter(state)
+    service.runtime_state = state  # type: ignore[assignment]
+    class FakePort:
+        def __init__(self, wrapped: FakeExecutorAdapter) -> None:
+            self.adapter = wrapped
+
+        async def cancel(self, command) -> OrderAck:
+            return self.adapter.cancel_order(command.request.clOrdID)
+
+    monkeypatch.setattr(
+        service,
+        "_build_admin_port",
+        lambda: FakePort(adapter),
+    )
+
+    service._cleanup_startup_orphans(("PI_XBTUSD",))
+
+    assert adapter.cancelled == ["OID-K"]
 
 
 def test_interrupt_cleanup_resolves_tail_exchange_id_from_client_id(monkeypatch) -> None:

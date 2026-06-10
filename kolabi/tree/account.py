@@ -43,6 +43,116 @@ from kolabi.tree.kraken import build_engine
 
 JsonMapT = Mapping[str, Any]
 JsonDictT = dict[str, Any]
+_REST_RECONCILE_LOG_SECONDS = 300.0
+_REST_RECONCILE_HEADER_EVERY = 50
+
+
+def format_rest_reconcile_header() -> str:
+    """Return the compact private REST reconcile status header."""
+
+    return "kraken_reconcile\tenv\torders\tpositions\tbalances\tinterval\tok\tfail\tlast_error"
+
+
+def format_rest_reconcile_status(
+    *,
+    environment: str,
+    stats: Mapping[str, int],
+    interval_seconds: float,
+    ok_count: int,
+    fail_count: int,
+    last_error: str,
+) -> str:
+    """Return one compact private REST reconcile status row."""
+
+    return (
+        f"kraken_reconcile\t{environment}\t{stats.get('orders', 0)}\t"
+        f"{stats.get('positions', 0)}\t{stats.get('balances', 0)}\t"
+        f"{interval_seconds:.1f}s\t{ok_count}\t{fail_count}\t{last_error or '-'}"
+    )
+
+
+def format_rest_reconcile_failure(
+    *,
+    environment: str,
+    interval_seconds: float,
+    error: str,
+) -> str:
+    """Return one compact private REST reconcile failure row."""
+
+    return f"kraken_reconcile_failed\t{environment}\t{interval_seconds:.1f}s\t{error}"
+
+
+@dataclass
+class _RestReconcileLogState:
+    environment: str
+    interval_seconds: float
+    summary_seconds: float = _REST_RECONCILE_LOG_SECONDS
+    ok_count: int = 0
+    fail_count: int = 0
+    rows_logged: int = 0
+    last_summary_at: float | None = None
+    last_error: str = "-"
+    header_logged: bool = False
+
+    def log_start(self, logger: logging.Logger) -> None:
+        if self.header_logged:
+            return
+        logger.info(format_rest_reconcile_header())
+        self.header_logged = True
+
+    def log_success(
+        self,
+        logger: logging.Logger,
+        stats: Mapping[str, int],
+        *,
+        now: float | None = None,
+    ) -> None:
+        self.ok_count += 1
+        current = time.monotonic() if now is None else now
+        if (
+            self.last_summary_at is not None
+            and current - self.last_summary_at < self.summary_seconds
+        ):
+            return
+        self._log_summary(logger, stats, current)
+
+    def log_failure(self, logger: logging.Logger, error: str) -> None:
+        self.fail_count += 1
+        self.last_error = error or "-"
+        logger.warning(
+            "%s",
+            format_rest_reconcile_failure(
+                environment=self.environment,
+                interval_seconds=self.interval_seconds,
+                error=self.last_error,
+            ),
+        )
+
+    def _log_summary(
+        self,
+        logger: logging.Logger,
+        stats: Mapping[str, int],
+        now: float,
+    ) -> None:
+        if (
+            not self.header_logged
+            or (self.rows_logged > 0 and self.rows_logged % _REST_RECONCILE_HEADER_EVERY == 0)
+        ):
+            logger.info(format_rest_reconcile_header())
+            self.header_logged = True
+        logger.info(
+            "%s",
+            format_rest_reconcile_status(
+                environment=self.environment,
+                stats=stats,
+                interval_seconds=self.interval_seconds,
+                ok_count=self.ok_count,
+                fail_count=self.fail_count,
+                last_error=self.last_error,
+            ),
+        )
+        self.rows_logged += 1
+        self.last_summary_at = now
 
 
 @dataclass(frozen=True)
@@ -84,6 +194,7 @@ class AccountStreamConfig:
     account_batch_max_wait_seconds: float = 0.35
     queue_maxsize: int = 5000
     rest_reconcile_seconds: float = 10.0
+    snapshot_tombstone_grace_seconds: float = 30.0
     balance_write_min_interval_seconds: float = 300.0
     position_write_min_interval_seconds: float = 60.0
     sqlite_busy_timeout_seconds: float = 30.0
@@ -477,6 +588,7 @@ class AccountStateStore:
                         mapped_orders,
                         raw_payload=payload,
                         source_timestamp=raw_event_source_timestamp(payload),
+                        received_at=now,
                     )
                 for mapped in mapped_orders:
                     row = self._ensure_order_in_session(
@@ -595,6 +707,7 @@ class AccountStateStore:
                             mapped_orders,
                             raw_payload=payload,
                             source_timestamp=raw_event_source_timestamp(payload),
+                            received_at=queued.received_at,
                         )
                     for mapped in mapped_orders:
                         order_rows.append(
@@ -1070,8 +1183,10 @@ class AccountStateStore:
         *,
         raw_payload: JsonMapT,
         source_timestamp: datetime | None,
+        received_at: datetime,
     ) -> list[OrderWrite]:
         """Make an all-open-orders snapshot explicit when orders disappeared."""
+        snapshot_at = _as_utc_aware(source_timestamp or received_at)
         seen_exchange_ids = {
             order.exchange_order_id for order in orders if order.exchange_order_id
         }
@@ -1109,6 +1224,11 @@ class AccountStateStore:
             )
             for row in self._latest_open_orders_in_session(session)
             if not _order_seen_in_snapshot(row, seen_exchange_ids, seen_client_ids)
+            and _snapshot_absence_can_tombstone(
+                row,
+                snapshot_at=snapshot_at,
+                grace_seconds=self.config.snapshot_tombstone_grace_seconds,
+            )
         ]
         return [*orders, *absent_orders]
 
@@ -1125,7 +1245,14 @@ class AccountStateStore:
                     ExchangeOrder.market_type == self.config.market_type,
                     ExchangeOrder.account_scope == self.config.account_scope,
                     ExchangeOrder.status.in_(
-                        ("new", "open", "partial_fill", "partially_filled", "living")
+                        (
+                            "new",
+                            "open",
+                            "untouched",
+                            "partial_fill",
+                            "partially_filled",
+                            "living",
+                        )
                     ),
                 )
                 .order_by(
@@ -1340,6 +1467,7 @@ class AccountStateStore:
                 list(orders),
                 raw_payload=payload,
                 source_timestamp=source_timestamp,
+                received_at=now,
             )
             rows = tuple(
                 self._ensure_order_in_session(session, order, now=now)
@@ -2046,6 +2174,18 @@ def _record_reconciler_error_status(
         )
 
 
+def _rest_reconcile_log_state(
+    rest_reconciler: Any | None,
+    interval_seconds: float,
+) -> _RestReconcileLogState:
+    config = getattr(rest_reconciler, "config", None)
+    environment = str(getattr(config, "environment", "-") or "-")
+    return _RestReconcileLogState(
+        environment=environment,
+        interval_seconds=float(interval_seconds),
+    )
+
+
 async def run_private_stream_group(
     streams: tuple[KrakenFuturesPrivateStream, ...],
     *,
@@ -2066,28 +2206,20 @@ async def run_private_stream_group(
         else setup_logging("INFO")
     )
     interval = max(0.0, float(rest_reconcile_seconds))
+    reconcile_log = _rest_reconcile_log_state(rest_reconciler, interval)
 
     async def _rest_reconcile_loop() -> BaseException | None:
+        reconcile_log.log_start(logger)
         while True:
             try:
                 await asyncio.sleep(interval)
                 stats = cast(dict[str, int], rest_reconciler.reconcile_once())
-                logger.info(
-                    "kraken_account rest_reconcile orders=%s positions=%s balances=%s interval=%ss",
-                    stats.get("orders", 0),
-                    stats.get("positions", 0),
-                    stats.get("balances", 0),
-                    f"{interval:.1f}",
-                )
+                reconcile_log.log_success(logger, stats)
             except asyncio.CancelledError:
                 return None
             except Exception as exc:
                 _record_reconciler_error_status(rest_reconciler, exc, logger)
-                logger.warning(
-                    "kraken_account rest_reconcile failed interval=%ss error=%s",
-                    f"{interval:.1f}",
-                    _compact_exception_text(exc),
-                )
+                reconcile_log.log_failure(logger, _compact_exception_text(exc))
             except BaseException as exc:  # pragma: no cover - defensive shutdown.
                 return exc
 
@@ -2149,27 +2281,19 @@ def run_private_stream_group_threaded(
     ]
 
     interval = max(0.0, float(rest_reconcile_seconds))
+    reconcile_log = _rest_reconcile_log_state(rest_reconciler, interval)
 
     def _run_reconciler() -> None:
         if rest_reconciler is None or interval <= 0.0:
             return
+        reconcile_log.log_start(logger)
         while not stop_event.wait(interval):
             try:
                 stats = cast(dict[str, int], rest_reconciler.reconcile_once())
-                logger.info(
-                    "kraken_account rest_reconcile orders=%s positions=%s balances=%s interval=%ss",
-                    stats.get("orders", 0),
-                    stats.get("positions", 0),
-                    stats.get("balances", 0),
-                    f"{interval:.1f}",
-                )
+                reconcile_log.log_success(logger, stats)
             except Exception as exc:
                 _record_reconciler_error_status(rest_reconciler, exc, logger)
-                logger.warning(
-                    "kraken_account rest_reconcile failed interval=%ss error=%s",
-                    f"{interval:.1f}",
-                    _compact_exception_text(exc),
-                )
+                reconcile_log.log_failure(logger, _compact_exception_text(exc))
 
     reconcile_thread = threading.Thread(
         target=_run_reconciler,
@@ -3047,6 +3171,23 @@ def _order_seen_in_snapshot(
     if row.exchange_order_id and row.exchange_order_id in seen_exchange_ids:
         return True
     return bool(row.client_order_id and row.client_order_id in seen_client_ids)
+
+
+def _snapshot_absence_can_tombstone(
+    row: ExchangeOrder,
+    *,
+    snapshot_at: datetime,
+    grace_seconds: float,
+) -> bool:
+    """Avoid tombstoning orders that are fresher than the snapshot lag guard."""
+
+    if grace_seconds <= 0:
+        return True
+    row_timestamp = row.local_timestamp
+    if row_timestamp is None:
+        return True
+    age = (_as_utc_aware(snapshot_at) - _as_utc_aware(row_timestamp)).total_seconds()
+    return age >= grace_seconds
 
 
 def _merge_raw_payload(

@@ -724,9 +724,10 @@ def test_handle_message_logs_snapshot_summary_only(tmp_path, caplog):
 
 def test_open_orders_snapshot_tombstones_missing_open_order(tmp_path, caplog):
     db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
-    store = AccountStateStore(AccountStreamConfig(db_url=db_url))
+    config = AccountStreamConfig(db_url=db_url, snapshot_tombstone_grace_seconds=0.0)
+    store = AccountStateStore(config)
     stream = KrakenFuturesPrivateStream(
-        AccountStreamConfig(db_url=db_url),
+        config,
         store,
         KrakenFuturesCredentials(api_key="key", api_secret="secret"),
     )
@@ -761,10 +762,88 @@ def test_open_orders_snapshot_tombstones_missing_open_order(tmp_path, caplog):
     assert "private_snapshot feed=open_orders_snapshot rows=0 tombstoned=1" in caplog.text
 
 
+def test_open_orders_snapshot_tombstones_missing_untouched_order(tmp_path, caplog):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    config = AccountStreamConfig(db_url=db_url, snapshot_tombstone_grace_seconds=0.0)
+    store = AccountStateStore(config)
+    store.record_order(
+        OrderWrite(
+            symbol="PI_XBTUSD",
+            side="buy",
+            order_type="stop",
+            status="untouched",
+            quantity=6.0,
+            exchange_order_id="OID-UNTOUCHED",
+            client_order_id="H1stale-260609220000",
+            price=73448.0,
+        )
+    )
+    stream = KrakenFuturesPrivateStream(
+        config,
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+
+    with caplog.at_level(logging.INFO):
+        stream.handle_message({"feed": "open_orders_snapshot", "orders": []})
+
+    with Session(store.engine) as session:
+        row = session.execute(
+            select(ExchangeOrder).where(
+                ExchangeOrder.exchange_order_id == "OID-UNTOUCHED"
+            )
+        ).scalar_one()
+
+    assert row.status == "canceled"
+    assert row.raw_payload["reason"] == "absent_from_open_orders_snapshot"
+    assert row.raw_payload["previous_status"] == "untouched"
+    assert "private_snapshot feed=open_orders_snapshot rows=0 tombstoned=1" in caplog.text
+
+
+def test_open_orders_snapshot_does_not_tombstone_fresh_missing_order(tmp_path):
+    db_url = f"sqlite:///{tmp_path / 'prv-market.sqlite'}"
+    config = AccountStreamConfig(db_url=db_url)
+    store = AccountStateStore(config)
+    stream = KrakenFuturesPrivateStream(
+        config,
+        store,
+        KrakenFuturesCredentials(api_key="key", api_secret="secret"),
+    )
+    stream.handle_message(
+        {
+            "feed": "open_orders",
+            "order": {
+                "instrument": "PI_XBTUSD",
+                "direction": 1,
+                "type": "stop",
+                "qty": 6,
+                "filled": 0,
+                "stop_price": 73448.0,
+                "order_id": "OID-FRESH",
+                "cli_ord_id": "H1fresh-260609220000",
+                "status": "open",
+            },
+        }
+    )
+
+    stream.handle_message({"feed": "open_orders_snapshot", "orders": []})
+
+    with Session(store.engine) as session:
+        row = session.execute(
+            select(ExchangeOrder).where(ExchangeOrder.exchange_order_id == "OID-FRESH")
+        ).scalar_one()
+
+    assert row.status == "open"
+
+
 def test_rest_reconcile_tombstones_missing_open_order_in_critical_db(tmp_path):
     account_db = f"sqlite:///{tmp_path / 'prv.sqlite'}"
     critical_db = f"sqlite:///{tmp_path / 'critical.sqlite'}"
-    config = AccountStreamConfig(db_url=account_db, critical_db_url=critical_db)
+    config = AccountStreamConfig(
+        db_url=account_db,
+        critical_db_url=critical_db,
+        snapshot_tombstone_grace_seconds=0.0,
+    )
     account_store = AccountStateStore(config)
     critical_store = AccountStateStore(critical_private_config(config))
     open_order = OrderWrite(
@@ -810,6 +889,46 @@ def test_rest_reconcile_tombstones_missing_open_order_in_critical_db(tmp_path):
             ).scalar_one()
         assert row.status == "canceled"
         assert row.raw_payload["reason"] == "absent_from_open_orders_snapshot"
+
+
+def test_rest_reconcile_summary_logs_success_at_most_every_five_minutes(caplog):
+    logger = logging.getLogger("kola")
+    state = account_module._RestReconcileLogState(
+        environment="live",
+        interval_seconds=10.0,
+    )
+    stats = {"orders": 3, "positions": 1, "balances": 10}
+
+    with caplog.at_level(logging.INFO, logger="kola"):
+        state.log_start(logger)
+        state.log_success(logger, stats, now=0.0)
+        state.log_success(logger, stats, now=299.0)
+        state.log_success(logger, stats, now=300.0)
+
+    messages = [record.getMessage() for record in caplog.records]
+    rows = [message for message in messages if message.startswith("kraken_reconcile\tlive")]
+    assert rows == [
+        "kraken_reconcile\tlive\t3\t1\t10\t10.0s\t1\t0\t-",
+        "kraken_reconcile\tlive\t3\t1\t10\t10.0s\t3\t0\t-",
+    ]
+    assert messages.count(account_module.format_rest_reconcile_header()) == 1
+
+
+def test_rest_reconcile_failure_logs_immediately_and_counts_next_summary(caplog):
+    logger = logging.getLogger("kola")
+    state = account_module._RestReconcileLogState(
+        environment="live",
+        interval_seconds=10.0,
+    )
+
+    with caplog.at_level(logging.INFO, logger="kola"):
+        state.log_start(logger)
+        state.log_failure(logger, "timeout")
+        state.log_success(logger, {"orders": 2, "positions": 1, "balances": 10}, now=0.0)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert "kraken_reconcile_failed\tlive\t10.0s\ttimeout" in messages
+    assert "kraken_reconcile\tlive\t2\t1\t10\t10.0s\t1\t1\ttimeout" in messages
 
 
 def test_critical_mirror_config_uses_short_sqlite_timeout() -> None:
