@@ -1,13 +1,19 @@
 #+TITLE: kolaBiBot
 #+OPTIONS: toc:2 num:nil
 
+* <2026-06-11 jeu. 06:30> typed TSV grammar
+- Active TSV rows use =exchg= and =qty= at the operator boundary.
+- Empty TSV columns are ignored, so template spacing columns do not become strategy fields.
+- Non-empty typed fields carry their own prefix: =D=, =%=, or =A= where the field supports it.
+- Only empty typed fields receive implicit defaults. A value such as =6= in =oDelta= is rejected; write =D6= instead.
+
 * <2026-06-02 mar. 18:28> multip platefomr
-- v1 should target derivatives/perpetuals only.
+- v1 originally targeted derivatives/perpetuals only; this is superseded by the multi-exchange route model that supports futures, spot, and margin lanes where the exchange adapter supports them.
 - every platform should have the same DB-grounded architecture from day one
-- For now we forget about coinbase and bitmex.  we only create the adapter for Binance
+- Coinbase is still out of scope. Kraken, Binance, and BitMEX are in the shared route matrix.
 - Platform-specific symbols be written directly in TSV files. We should not have canonical symbols a mapping table.  The reason is to be able to have one TSV table calling synbole for different plateform. In fact it is important that symbols for same instrument do not colide.
 - Unsupported grammar should fail at parse/preflight time
-- The process shouls still run exactly one platform per bot invocation for now. In the future we will have cross-platform strategies but not at this phase.
+- Superseded: the runtime now supports rows with different exchange/market/symbol routes in one TSV. Each route still needs its own fresh public/private DB feeder evidence.
  
 
 
@@ -307,7 +313,7 @@ Private DB update
 ** DONE Multi-instrument TSV support on one platform
    CLOSED: [2026-06-05 ven.]
 
-Goal: allow one TSV file to contain several instruments while keeping one platform per bot run.
+Goal: allow one TSV file to contain several instruments while keeping one platform per bot run. This was the first route step and is superseded by multi-exchange TSV support below.
 
 Implementation status:
 - =OrderPairSpec= and =OrderIdentity= carry optional =symbol=.
@@ -318,17 +324,31 @@ Implementation status:
 - Reducer identities preserve symbol once order lifecycle events confirm head or tail identity.
 
 Former state:
-- =kolabi.bot run= receives one global =--exchange=, =--environment=, and =--symbol=.
+- =kolabi.bot run= receives one global =--exchange=, =--environment=, =--market-type=, and optional =--symbol=.
 - Every TSV row becomes an =OrderPairSpec= without its own symbol.
 - =BotService= validates one instrument and =StrategyRuntime= polls public/private state for one symbol.
 - Commands already carry a symbol, but today that symbol is filled from the global runtime symbol.
 
 Target design:
-- Keep one platform per process: one =exchange=, =environment=, =market_type=, and =account_scope=.
+- Superseded by multi-exchange TSV routing: one strategy can now carry several =exchange=, =market_type=, and =symbol= routes. =environment= and =account_scope= remain process-wide runtime defaults.
 - Add optional TSV column =symbol= after =hook=.
-- If =symbol= is empty or absent, use CLI =--symbol= for backward compatibility.
+- If =symbol= is empty or absent, use the effective CLI symbol for backward compatibility. When CLI =--symbol= is omitted, derive the symbol from =--exchange= and =--market-type= using route defaults.
 - Each pair has an effective symbol before runtime starts.
 - Pair name stays the logical identity and must remain unique across the whole TSV.
+
+** DONE Multi-exchange TSV route support
+   CLOSED: [2026-06-10 mer.]
+
+Goal: allow chained order strategies across supported exchanges using one TSV route column and native exchange symbols.
+
+Implementation status:
+- TSV rows may add optional =exchg= and =symbol= columns. The legacy =exchange= spelling is still accepted as an alias.
+- Route codes are explicit: =KRKF= =KRKS= =KRKM=, =BINF= =BINS= =BINM= =BINI=, =BTX= =BTXF= =BTXS=, with =BMXF= =BMXS= kept as aliases.
+- =ExchangeRoute= is the runtime identity for exchange, market type, and symbol.
+- =SymbolRoutingExchangePort= routes place, amend, and cancel commands by full route, not just symbol.
+- =get_adapter()= rejects unsupported exchange/market lanes before REST calls.
+- Public and private DB rows are scoped by =exchange=, =environment=, =market_type=, =account_scope=, and =symbol= so chained orders cannot consume another route's evidence.
+- Operators start one feeder per active route with =scripts/kolabidb --exchange ... --market-type ... public/private start=.
 
 Pure model changes:
 - Add =symbol: str | None = None= to =OrderPairSpec=.
@@ -338,10 +358,10 @@ Pure model changes:
 
 TSV parser changes:
 - Accept both old and new TSV headers.
-- Old header:
+- Legacy compact header:
   =name tps_run essais tOut pause side oType oDelta tType tDelta atype quantity tp prix hook=
-- New header:
-  =name tps_run essais tOut pause side oType oDelta tType tDelta atype quantity tp prix hook symbol=
+- Active typed header:
+  =exchg symbol name tps_run essais tOut pause side oType oDelta qty tType tDelta prix tp hook=
 - Blank =symbol= means use the run default.
 - Parser tests must cover old files, new files, and blank symbol fallback.
 
@@ -702,13 +722,76 @@ create dataclass for pairevent but call it EggMove
 Credentials:
 
 #+begin_example
-KRAKEN_FUTURE_DEMO_API_KEY
-KRAKEN_FUTURE_DEMO_API_SECRET
+# kraken future live
+KRKF_API_KEY
+KRKF_API_SECRET
 
-KRAKEN_FUTURE_API_KEY
-KRAKEN_FUTURE_API_SECRET
+# kraken future demo
+KRKF_DEMO_API_KEY
+KRKF_DEMO_API_SECRET
+
+# Binance spot demo
+BINS_DEMO_API_KEY
+BINS_DEMO_API_SECRET
+
+# Bitmex spot and future live
+BTX_API_KEY
+BTX_API_SECRET
+
+# bitmex spot and futre demo
+BTX_DEMO_API_KEY
+BTX_DEMO_API_SECRET
+
 #+end_example
+** Binance
+https://testnet.binance.vision/
 
+Spot API URLs	Spot Test Network URLs
+https://api.binance.com/api
+https://api-gcp.binance.com/api
+https://api1.binance.com/api
+https://api2.binance.com/api
+https://api3.binance.com/api
+https://api4.binance.com/api
+https://testnet.binance.vision/api
+wss://ws-api.binance.com/ws-api/v3
+wss://ws-api.binance.com:9443/ws-api/v3
+wss://ws-api.testnet.binance.vision/ws-api/v3
+wss://ws-api.testnet.binance.vision:9443/ws-api/v3
+wss://stream.binance.com/ws
+wss://stream.binance.com:9443/ws
+wss://stream.testnet.binance.vision/ws
+wss://stream.testnet.binance.vision:9443/ws
+wss://stream.binance.com/stream
+wss://stream.binance.com:9443/stream
+wss://stream.testnet.binance.vision/stream
+wss://stream.testnet.binance.vision:9443/stream
+*** Example
+#+BEGIN_SRC bash  -i
+#!/usr/bin/env bash
+
+# Set up authentication:
+API_KEY="put your own API Key here"
+PRIVATE_KEY_PATH="test-prv-key.pem"
+
+# Set up the request:
+API_METHOD="POST"
+API_CALL="api/v3/order"
+API_PARAMS="symbol=BTCUSDT&side=SELL&type=LIMIT&timeInForce=GTC&quantity=1&price=0.2"
+
+# Sign the request:
+timestamp=$(date +%s000)
+api_params_with_timestamp="$API_PARAMS&timestamp=$timestamp"
+signature=$(echo -n "$api_params_with_timestamp" \
+            | openssl dgst -sha256 -sign "$PRIVATE_KEY_PATH" \
+            | openssl enc -base64 -A)
+
+# Send the request:
+curl -H "X-MBX-APIKEY: $API_KEY" -X "$API_METHOD" \
+    "https://testnet.binance.vision/$API_CALL?$api_params_with_timestamp" \
+    --data-urlencode "signature=$signature"
+
+#+END_SRC
 * Databases
 
 Demo and live databases are separated. Public and private databases are also separated.
@@ -802,7 +885,7 @@ scripts/kolabidb postgres status
 scripts/kolabidb postgres logs
 scripts/kolabidb public start --pair PI_XBTUSD
 scripts/kolabidb private start
-scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+scripts/kolabidb private start --account-scope advers --api-key-env KRKF_DEMO2_API_KEY --api-secret-env KRKF_DEMO2_API_SECRET
 scripts/kolabidb public logs
 scripts/kolabidb private logs
 #+end_src
@@ -835,8 +918,8 @@ python -m kolabi.tree.account run \
   --account-scope advers \
   --account-db-url "$KOLABI_ADVERS_ACCOUNT_DB_URL" \
   --critical-db-url "$KOLABI_ADVERS_CRITICAL_DB_URL" \
-  --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY \
-  --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  --api-key-env KRKF_DEMO2_API_KEY \
+  --api-secret-env KRKF_DEMO2_API_SECRET
 #+end_src
 
 Run the main strategy with PostgreSQL lanes:
@@ -868,8 +951,8 @@ python -m kolabi.bot run \
   --critical-db-url "$KOLABI_ADVERS_CRITICAL_DB_URL" \
   --audit-db-url "$KOLABI_ADVERS_AUDIT_DB_URL" \
   --telemetry-db-url "$KOLABI_ADVERS_TELEMETRY_DB_URL" \
-  --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY \
-  --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  --api-key-env KRKF_DEMO2_API_KEY \
+  --api-secret-env KRKF_DEMO2_API_SECRET
 #+end_src
 
 Acceptance:
@@ -899,6 +982,47 @@ PGPASSWORD="$KOLABI_POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$KOLABI_POSTGRES_PO
   "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments WHERE symbol = 'PI_XBTUSD';"
 #+END_SRC
 
+* Demo Cross-Exchange Chain MWE
+
+The demo strategy is stored in:
+
+#+begin_example
+orders/demo_cross_exchange_chain.tsv
+#+end_example
+
+Intent:
+- =XBTC_SEL= on BitMEX futures =XBTUSD=: sell limit head =D6= USD above the BTC reference, then protect with a buy stop tail =D20= USD above the fill/reference.
+- =KADA_SEL= on Kraken Futures ADA: released by =XBTC_SEL-head-filled=, sell limit head =%0.20= above the ADA reference, then protect with a buy stop tail =%0.10= above the fill/reference.
+- =NADA_BUY= on Binance spot =ADAUSDT=: released by =KADA_SEL-tail-closed=, buy a fixed ADA quantity from the TSV at market, then emit an =L!= zero-distance limit tail intended to cancel immediately instead of leaving a standing order.
+
+Before running, probe the exact demo symbols:
+
+#+begin_src bash
+python -m kolabi.bargain.cli --exchange bitmex --market-type futures --environment demo --symbol XBTUSD check-symbol
+python -m kolabi.bargain.cli --exchange kraken --market-type futures --environment demo instruments --contains ADA
+python -m kolabi.bargain.cli --exchange kraken --market-type futures --environment demo --symbol PI_ADAUSD check-symbol
+python -m kolabi.bargain.cli --exchange binance --market-type spot --environment demo --symbol ADAUSDT check-symbol
+#+end_src
+
+Start the required DB feeders:
+
+#+begin_src bash
+scripts/kolabidb postgres start
+scripts/kolabidb public start --exchange bitmex --market-type futures --environment demo --pair XBTUSD
+scripts/kolabidb private start --exchange bitmex --market-type futures --environment demo --pair XBTUSD --account-scope default
+scripts/kolabidb public start --exchange kraken --market-type futures --environment demo --pair PI_ADAUSD
+scripts/kolabidb private start --exchange kraken --market-type futures --environment demo --pair PI_ADAUSD --account-scope default
+scripts/kolabidb public start --exchange binance --market-type spot --environment demo --pair ADAUSDT
+scripts/kolabidb private start --exchange binance --market-type spot --environment demo --pair ADAUSDT --account-scope default
+#+end_src
+
+Check readiness before live demo execution:
+
+#+begin_src bash
+python -m kolabi.bot preflight --strategy orders/demo_cross_exchange_chain.tsv --exchange bitmex --market-type futures --symbol XBTUSD --environment demo
+python -m kolabi.bot run --strategy orders/demo_cross_exchange_chain.tsv --exchange bitmex --market-type futures --symbol XBTUSD --environment demo --dry-run
+#+end_src
+
 * Useful Kraken Commands
 
 #+begin_src bash
@@ -909,7 +1033,7 @@ PGPASSWORD="$KOLABI_POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$KOLABI_POSTGRES_PO
   # Or manage background DB feeders through the helper:
   scripts/kolabidb public start --pair PI_XBTUSD
   scripts/kolabidb private start
-  scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  scripts/kolabidb private start --account-scope advers --api-key-env KRKF_DEMO2_API_KEY --api-secret-env KRKF_DEMO2_API_SECRET
   scripts/kolabidb private status
   scripts/kolabidb private logs
   # Check strategy readiness against both DBs:
@@ -920,26 +1044,31 @@ PGPASSWORD="$KOLABI_POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$KOLABI_POSTGRES_PO
   python -m kolabi.tree.account status --environment demo
 
   # read the current position for one product id
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo balance
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo position
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo open-orders
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo trigger-orders
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --symbol PI_XBTUSD --environment demo balance
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --symbol PI_XBTUSD --environment demo position
+  python -m kolabi.bargain.cli --exchange binance --market-type spot --symbol BTCUSDT --environment demo open-orders
+  python -m kolabi.bargain.cli --exchange binance --market-type margin --symbol BTCUSDT --environment live trigger-orders
 
 
   # Check whether a symbol exists:
-  python -m kolabi.bargain.cli --symbol PI_ADAUSD --environment demo check-symbol
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --symbol PI_ADAUSD --environment demo check-symbol
   # List instruments containing ADA:
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo instruments --contains ADA
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --symbol PI_XBTUSD --environment demo instruments --contains ADA
   # see open position ?
 
   # Send a demo limit order:
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo limit --side buy --qty 2 --price 70000
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --symbol PI_XBTUSD --environment demo limit --side buy --qty 2 --price 70000
   # Send a demo market order:
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo market --side buy --qty 1
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --symbol PI_XBTUSD --environment demo market --side buy --qty 1
   # Cancel an order:
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo cancel --order-id YOUR_ORDER_ID
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --symbol PI_XBTUSD --environment demo cancel --order-id YOUR_ORDER_ID
   # Amend an order price and/or quantity:
-  python -m kolabi.bargain.cli --symbol PI_XBTUSD --environment demo amend --order-id YOUR_ORDER_ID --price 80010 --qty 2
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --symbol PI_XBTUSD --environment demo amend --order-id YOUR_ORDER_ID --price 80010 --qty 2
+
+  # Show a smoke plan for a non-futures lane before using demo keys:
+  python -m kolabi.bargain.smoke --exchange binance --market-type spot --symbol BTCUSDT --environment demo --list-orders
+  # Submit exactly one resting smoke order and cancel it after ack:
+  python -m kolabi.bargain.smoke --exchange binance --market-type spot --symbol BTCUSDT --environment demo --only limit_below
 
   #  Run a TSV strategy on demo:
   python -m kolabi.bot run --strategy orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment demo

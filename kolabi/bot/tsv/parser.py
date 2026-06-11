@@ -15,6 +15,7 @@ from kolabi.bot.domain import (
     normalize_side,
     opposite_side,
 )
+from kolabi.bot.exchange_routes import parse_exchange_code
 from kolabi.bot.order_codes import validate_order_code
 
 NumberPair = tuple[float, float]
@@ -32,10 +33,13 @@ def read_strategy_file(path: str | Path) -> StrategySpec:
         comment="#",
         skip_blank_lines=True,
     )
+    df = _drop_empty_columns(df)
+    if "name" not in df.columns:
+        raise ValueError("Strategy TSV is missing required column 'name'.")
     if df["name"].duplicated().any():
         duplicates = tuple(str(name) for name in df.loc[df["name"].duplicated(), "name"])
         raise ValueError(f"Duplicate pair name(s) in strategy TSV: {', '.join(duplicates)}")
-    df = df.set_index([df.index, df.name]).drop(columns="name")
+    df = df.set_index([df.index, df["name"]]).drop(columns="name")
     pairs: list[OrderPairSpec] = []
     for idx in df.index:
         pair_name = str(idx[1])
@@ -62,11 +66,13 @@ def order_pair_from_legacy_values(
     tType: str,
     hook: str,
     symbol: str | None = None,
+    exchange: str | None = None,
 ) -> OrderPairSpec:
     """Normalise une ligne legacy vers une paire canonique."""
     head_quantity_type, tail_price_type, head_price_type = split_amount_type(atype)
     head_delta_type = extract_head_delta_type(atype)
     normalized_side = normalize_side(side)
+    exchange_name, market_type = parse_exchange_code(exchange)
     validate_order_code(oType, role="head")
     validate_order_code(tType, role="tail")
     validate_price_interval(prix)
@@ -98,6 +104,8 @@ def order_pair_from_legacy_values(
         amount_type=atype.strip(),
         hook_name=hook.strip() or None,
         symbol=None if symbol is None or not symbol.strip() else symbol.strip(),
+        exchange=exchange_name,
+        market_type=market_type,
     )
 
 
@@ -125,6 +133,7 @@ def strategy_from_run_once_args(args: object) -> StrategySpec:
         tType=str(getattr(args, "tType")),
         hook=str(getattr(args, "Hook")),
         symbol=None,
+        exchange=None,
     )
     return StrategySpec(name=pair.name, pairs=(pair,))
 
@@ -154,53 +163,109 @@ def strategy_to_pretty_dict(strategy: StrategySpec) -> dict[str, object]:
 
 def normalize_legacy_row(row: pd.Series) -> dict[str, object]:
     """Convertit une ligne TSV legacy en champs intermediaires stables."""
+    atype = _optional_text(_row_value(row, "atype"))
+    if atype:
+        return _normalize_compact_atype_row(row, atype)
+    return _normalize_typed_field_row(row)
 
-    def handle_tuple(raw: str, atype: str | None = None) -> NumberPair:
-        parts = raw.strip().split()
-        if len(parts) != 2:
-            raise ValueError(
-                f"Invalid interval '{raw}'; expected exactly two whitespace-separated bounds."
-            )
-        el1, el2 = parts
-        amount_type = atype or ""
-        if "p%" in amount_type:
-            el1 = str(-PERCENT_OPEN_BOUND) if el1 == "-" else el1
-            el2 = str(PERCENT_OPEN_BOUND) if el2 == "+" else el2
-        if "pD" in amount_type:
-            el1 = str(-DIFFERENTIAL_OPEN_BOUND) if el1 == "-" else el1
-            el2 = str(DIFFERENTIAL_OPEN_BOUND) if el2 == "+" else el2
-        if "pA" in amount_type:
-            el1 = "0" if el1 == "-" else el1
-            el2 = str(ABSOLUTE_PRICE_OPEN_MAX) if el2 == "+" else el2
-        return float(el1), float(el2)
 
-    def coerce_to(kind: str, value: object) -> int | float | None:
-        if pd.isna(value):
-            return None
-        if kind == "int":
-            return int(value)
-        if kind == "float":
-            return float(value)
-        raise ValueError(f"Unsupported coercion kind '{kind}'")
-
-    atype = str(row.atype).strip()
+def _normalize_compact_atype_row(row: pd.Series, atype: str) -> dict[str, object]:
+    """Normalise the old compact-atype row grammar."""
     return {
-        "tps_run": handle_tuple(str(row.tps_run)),
-        "essais": coerce_to("int", row.essais),
-        "dr_pause": coerce_to("float", row.pause),
-        "timeout": coerce_to("float", row.tOut),
+        "tps_run": _parse_legacy_interval(str(row.tps_run)),
+        "essais": _coerce_to("int", _row_value(row, "essais")),
+        "dr_pause": _coerce_to("float", _row_value(row, "pause")),
+        "timeout": _coerce_to("float", _row_value(row, "tOut")),
         "side": str(row.side).strip(),
-        "prix": handle_tuple(str(row.prix), atype),
-        "q": coerce_to("int", row["quantity"] if "quantity" in row else row.q),
-        "tp": coerce_to("float", row.tp),
+        "prix": _parse_legacy_interval(str(row.prix), atype),
+        "q": _coerce_to("int", _row_value(row, "qty", "quantity", "q")),
+        "tp": _coerce_to("float", _row_value(row, "tp")),
         "atype": atype,
         "oType": str(row.oType).strip(),
-        "oDelta": coerce_to("float", row.oDelta),
-        "tDelta": coerce_to("float", row.tDelta),
+        "oDelta": _coerce_to("float", _row_value(row, "oDelta")),
+        "tDelta": _coerce_to("float", _row_value(row, "tDelta")),
         "tType": str(row.tType).strip(),
-        "hook": "" if pd.isna(row.hook) else str(row.hook).strip(),
-        "symbol": _optional_text(row.symbol) if "symbol" in row else None,
+        "hook": _optional_text(_row_value(row, "hook")) or "",
+        "symbol": _optional_text(_row_value(row, "symbol")),
+        "exchange": _optional_text(_row_value(row, "exchg", "exchange")),
     }
+
+
+def _normalize_typed_field_row(row: pd.Series) -> dict[str, object]:
+    """Normalise the explicit typed-field TSV grammar."""
+    q, quantity_type = _parse_required_typed_number(
+        _row_value(row, "qty", "quantity", "q"),
+        field="qty",
+        token_prefix="q",
+        allowed_suffixes={"A", "%"},
+        as_int=True,
+    )
+    tp, tail_price_type = _parse_optional_typed_number(
+        _row_value(row, "tp"),
+        field="tp",
+        token_prefix="t",
+        allowed_suffixes={"A", "D", "%"},
+        default_type="tD",
+    )
+    prix, head_price_type = _parse_optional_typed_interval(
+        _row_value(row, "prix"),
+        field="prix",
+        token_prefix="p",
+        allowed_suffixes={"A", "D", "%"},
+        default_type="pD",
+    )
+    o_delta, head_delta_type = _parse_optional_typed_number(
+        _row_value(row, "oDelta"),
+        field="oDelta",
+        token_prefix="o",
+        allowed_suffixes={"D", "%"},
+        default_type="oD",
+    )
+    t_delta = _parse_optional_tail_delta(_row_value(row, "tDelta"))
+    atype = f"{quantity_type}{tail_price_type}{head_price_type}{head_delta_type}"
+
+    return {
+        "tps_run": _parse_legacy_interval(str(row.tps_run)),
+        "essais": _coerce_to("int", _row_value(row, "essais")),
+        "dr_pause": _coerce_to("float", _row_value(row, "pause")),
+        "timeout": _coerce_to("float", _row_value(row, "tOut")),
+        "side": str(row.side).strip(),
+        "prix": prix,
+        "q": q,
+        "tp": tp,
+        "atype": atype,
+        "oType": str(row.oType).strip(),
+        "oDelta": o_delta,
+        "tDelta": t_delta,
+        "tType": str(row.tType).strip(),
+        "hook": _optional_text(_row_value(row, "hook")) or "",
+        "symbol": _optional_text(_row_value(row, "symbol")),
+        "exchange": _optional_text(_row_value(row, "exchg", "exchange")),
+    }
+
+
+def _drop_empty_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop blank TSV columns and normalise header whitespace."""
+    rename: dict[object, str] = {}
+    drop: list[object] = []
+    for column in df.columns:
+        name = str(column).strip()
+        if not name or name.startswith("Unnamed:"):
+            drop.append(column)
+            continue
+        rename[column] = name
+    if drop:
+        df = df.drop(columns=drop)
+    if rename:
+        df = df.rename(columns=rename)
+    return df
+
+
+def _row_value(row: pd.Series, *names: str) -> object:
+    for name in names:
+        if name in row:
+            return row[name]
+    return None
 
 
 def _optional_text(value: object) -> str | None:
@@ -208,6 +273,163 @@ def _optional_text(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _coerce_to(kind: str, value: object) -> int | float | None:
+    if pd.isna(value):
+        return None
+    if kind == "int":
+        return int(value)
+    if kind == "float":
+        return float(value)
+    raise ValueError(f"Unsupported coercion kind '{kind}'")
+
+
+def _parse_legacy_interval(raw: str, atype: str | None = None) -> NumberPair:
+    parts = raw.strip().split()
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid interval '{raw}'; expected exactly two whitespace-separated bounds."
+        )
+    low, high = parts
+    amount_type = atype or ""
+    if "p%" in amount_type:
+        low = str(-PERCENT_OPEN_BOUND) if low == "-" else low
+        high = str(PERCENT_OPEN_BOUND) if high == "+" else high
+    if "pD" in amount_type:
+        low = str(-DIFFERENTIAL_OPEN_BOUND) if low == "-" else low
+        high = str(DIFFERENTIAL_OPEN_BOUND) if high == "+" else high
+    if "pA" in amount_type:
+        low = "0" if low == "-" else low
+        high = str(ABSOLUTE_PRICE_OPEN_MAX) if high == "+" else high
+    return float(low), float(high)
+
+
+def _parse_required_typed_number(
+    value: object,
+    *,
+    field: str,
+    token_prefix: str,
+    allowed_suffixes: set[str],
+    as_int: bool = False,
+) -> tuple[int | float, str]:
+    parsed, amount_type = _parse_optional_typed_number(
+        value,
+        field=field,
+        token_prefix=token_prefix,
+        allowed_suffixes=allowed_suffixes,
+        default_type=None,
+        as_int=as_int,
+    )
+    if parsed is None:
+        raise ValueError(f"Missing required TSV field '{field}'.")
+    return parsed, amount_type
+
+
+def _parse_optional_typed_number(
+    value: object,
+    *,
+    field: str,
+    token_prefix: str,
+    allowed_suffixes: set[str],
+    default_type: str | None,
+    as_int: bool = False,
+) -> tuple[int | float | None, str]:
+    text = _optional_text(value)
+    if text is None:
+        if default_type is None:
+            raise ValueError(f"Missing required TSV field '{field}'.")
+        return None, default_type
+    suffix, payload = _split_typed_payload(
+        text,
+        field=field,
+        allowed_suffixes=allowed_suffixes,
+    )
+    if not payload:
+        raise ValueError(f"Invalid {field} value '{text}'; missing numeric payload.")
+    number = float(payload)
+    if as_int and not number.is_integer():
+        raise ValueError(f"Invalid {field} value '{text}'; expected an integer payload.")
+    return (int(number) if as_int else number), f"{token_prefix}{suffix}"
+
+
+def _parse_optional_typed_interval(
+    value: object,
+    *,
+    field: str,
+    token_prefix: str,
+    allowed_suffixes: set[str],
+    default_type: str,
+) -> tuple[NumberPair, str]:
+    text = _optional_text(value)
+    if text is None:
+        return _open_interval_for_suffix(default_type[-1]), default_type
+    suffix, payload = _split_typed_payload(
+        text,
+        field=field,
+        allowed_suffixes=allowed_suffixes,
+    )
+    parts = payload.split()
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid {field} interval '{text}'; expected typed bounds like 'D- +'."
+        )
+    low, high = parts
+    low_value, high_value = _bounds_for_suffix(suffix, low, high)
+    return (float(low_value), float(high_value)), f"{token_prefix}{suffix}"
+
+
+def _parse_optional_tail_delta(value: object) -> float | None:
+    text = _optional_text(value)
+    if text is None:
+        return None
+    suffix, payload = _split_typed_payload(
+        text,
+        field="tDelta",
+        allowed_suffixes={"D"},
+    )
+    if suffix != "D":
+        raise ValueError("Invalid tDelta type; only differential 'D' is supported.")
+    if not payload:
+        raise ValueError(f"Invalid tDelta value '{text}'; missing numeric payload.")
+    return float(payload)
+
+
+def _split_typed_payload(
+    text: str,
+    *,
+    field: str,
+    allowed_suffixes: set[str],
+) -> tuple[str, str]:
+    suffix = text[0]
+    if suffix not in allowed_suffixes:
+        allowed = " or ".join(sorted(allowed_suffixes))
+        raise ValueError(f"{field} value '{text}' must start with {allowed}.")
+    return suffix, text[1:].strip()
+
+
+def _open_interval_for_suffix(suffix: str) -> NumberPair:
+    low, high = _bounds_for_suffix(suffix, "-", "+")
+    return float(low), float(high)
+
+
+def _bounds_for_suffix(suffix: str, low: str, high: str) -> tuple[str, str]:
+    if suffix == "%":
+        return (
+            str(-PERCENT_OPEN_BOUND) if low == "-" else low,
+            str(PERCENT_OPEN_BOUND) if high == "+" else high,
+        )
+    if suffix == "D":
+        return (
+            str(-DIFFERENTIAL_OPEN_BOUND) if low == "-" else low,
+            str(DIFFERENTIAL_OPEN_BOUND) if high == "+" else high,
+        )
+    if suffix == "A":
+        return (
+            "0" if low == "-" else low,
+            str(ABSOLUTE_PRICE_OPEN_MAX) if high == "+" else high,
+        )
+    raise ValueError(f"Unsupported interval type '{suffix}'.")
 
 
 def split_amount_type(atype: str) -> tuple[str, str, str]:

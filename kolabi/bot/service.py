@@ -9,7 +9,18 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Callable, Iterable, Optional, Protocol, TypeVar, cast
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from kolabi.bot.domain import OrderIdentity, OrderPairSpec, StrategySpec
+from kolabi.bot.exchange_routes import (
+    DEFAULT_MARKET_TYPE,
+    ExchangeRoute,
+    SUPPORTED_MARKET_TYPES,
+    exchange_supports_market_type,
+    normalise_exchange_name,
+    pair_route as resolve_pair_route,
+    unsupported_market_message,
+)
 from kolabi.bot.indicators import (
     DummyIndicatorClient,
     IndicatorClient,
@@ -39,7 +50,20 @@ from kolabi.shared.binance_futures import (
     binance_futures_public_db_url,
     binance_futures_telemetry_db_url,
 )
-from kolabi.shared.config import ExchangeConfig, load_exchange_config
+from kolabi.shared.bitmex_futures import (
+    bitmex_futures_audit_db_url,
+    bitmex_futures_critical_db_url,
+    bitmex_futures_private_db_url,
+    bitmex_futures_public_db_url,
+    bitmex_futures_telemetry_db_url,
+)
+from kolabi.shared.config import (
+    ExchangeConfig,
+    exchange_base_url_env_names,
+    exchange_credential_env_names,
+    exchange_requires_explicit_base_url,
+    load_exchange_config,
+)
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
@@ -47,6 +71,7 @@ from kolabi.shared.core.runtime_types import (
     AmendTailCommand,
     CancelCommand,
     CancelOrderCommandRequest,
+    DragonSong,
     ExchangePort,
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
@@ -92,13 +117,222 @@ def _pair_symbol(pair: OrderPairSpec, default_symbol: str) -> str:
     return symbol or default_symbol
 
 
+def _pair_route(
+    pair: OrderPairSpec,
+    *,
+    default_exchange: str,
+    default_symbol: str,
+    default_market_type: str = DEFAULT_MARKET_TYPE,
+) -> ExchangeRoute:
+    return resolve_pair_route(
+        pair,
+        default_exchange=default_exchange,
+        default_symbol=default_symbol,
+        default_market_type=default_market_type,
+    )
+
+
 def _strategy_symbols(strategy: StrategySpec) -> tuple[str, ...]:
     symbols = tuple(sorted({str(pair.symbol) for pair in strategy.pairs if pair.symbol}))
     return symbols
 
 
+def _strategy_routes(
+    strategy: StrategySpec,
+    *,
+    default_exchange: str,
+    default_symbol: str,
+    default_market_type: str = DEFAULT_MARKET_TYPE,
+) -> tuple[ExchangeRoute, ...]:
+    routes = {
+        _pair_route(
+            pair,
+            default_exchange=default_exchange,
+            default_symbol=default_symbol,
+            default_market_type=default_market_type,
+        )
+        for pair in strategy.pairs
+    }
+    return tuple(sorted(routes))
+
+
+def _first_present_env_name(names: Iterable[str]) -> str | None:
+    for name in names:
+        if os.environ.get(name):
+            return name
+    return None
+
+
+def _route_credential_status(
+    route: ExchangeRoute,
+    *,
+    environment: str,
+    api_key_env: str | None = None,
+    api_secret_env: str | None = None,
+    base_url: str | None = None,
+) -> dict[str, object]:
+    """Return route credential readiness without exposing secret values."""
+
+    api_key_names = (
+        [api_key_env]
+        if api_key_env
+        else list(
+            exchange_credential_env_names(
+                route.exchange,
+                route.market_type,
+                environment,
+            )
+        )
+    )
+    api_secret_names = (
+        [api_secret_env]
+        if api_secret_env
+        else list(
+            exchange_credential_env_names(
+                route.exchange,
+                route.market_type,
+                environment,
+                secret=True,
+            )
+        )
+    )
+    api_key_source = _first_present_env_name(api_key_names)
+    api_secret_source = _first_present_env_name(api_secret_names)
+    base_url_env = list(
+        exchange_base_url_env_names(
+            route.exchange,
+            route.market_type,
+            environment,
+        )
+    )
+    base_url_source = "override" if base_url else _first_present_env_name(base_url_env)
+    base_url_required = exchange_requires_explicit_base_url(
+        route.exchange,
+        route.market_type,
+        environment,
+    )
+    base_url_ready = bool(base_url_source) or not base_url_required
+    return {
+        "route": route.label,
+        "exchange": route.exchange,
+        "market_type": route.market_type,
+        "symbol": route.symbol,
+        "api_key_env": api_key_names,
+        "api_secret_env": api_secret_names,
+        "api_key_present": api_key_source is not None,
+        "api_secret_present": api_secret_source is not None,
+        "credentials_present": (
+            api_key_source is not None and api_secret_source is not None
+        ),
+        "api_key_source": api_key_source,
+        "api_secret_source": api_secret_source,
+        "base_url_env": base_url_env,
+        "base_url_required": base_url_required,
+        "base_url_present": bool(base_url_source),
+        "base_url_ready": base_url_ready,
+        "base_url_source": base_url_source,
+    }
+
+
+def _default_route_value(
+    route: ExchangeRoute,
+    *,
+    default_exchange: str,
+    default_market_type: str,
+    value: _T | None,
+) -> _T | None:
+    """Return a config override only for the process default route."""
+
+    if route.exchange == default_exchange and route.market_type == default_market_type:
+        return value
+    return None
+
+
+def _missing_credential_fields(item: dict[str, object]) -> tuple[str, ...]:
+    return tuple(
+        label
+        for label, key in (
+            ("api_key", "api_key_present"),
+            ("api_secret", "api_secret_present"),
+        )
+        if not bool(item.get(key))
+    )
+
+
+def _route_config_reasons(item: dict[str, object]) -> tuple[str, ...]:
+    route = item.get("route") or "-"
+    missing_credentials = _missing_credential_fields(item)
+    credential_reasons = (
+        (f"{route}:missing credentials " + ",".join(missing_credentials),)
+        if missing_credentials
+        else ()
+    )
+    base_url_reasons = (
+        (f"{route}:missing required base_url override",)
+        if not bool(item.get("base_url_ready", True))
+        else ()
+    )
+    return credential_reasons + base_url_reasons
+
+
+def _credential_reasons(
+    credential_routes: Iterable[dict[str, object]],
+) -> tuple[str, ...]:
+    return tuple(
+        reason
+        for item in credential_routes
+        for reason in _route_config_reasons(item)
+    )
+
+
+def _runtime_state_error_payload(
+    route: ExchangeRoute,
+    exc: BaseException,
+) -> dict[str, object]:
+    reason = f"{route.label}:runtime state unavailable {_compact_admin_error(exc)}"
+    return {
+        "exchange": route.exchange,
+        "market_type": route.market_type,
+        "symbol": route.symbol,
+        "ready": False,
+        "status": "error",
+        "reasons": (reason,),
+        "error": _compact_admin_error(exc),
+    }
+
+
 class InstrumentRulesExchange(Protocol):
     def instrument_rules(self, symbol: str | None = None) -> dict[str, object]: ...
+
+
+class SymbolValidationExchange(InstrumentRulesExchange, Protocol):
+    def validate_symbol(self, symbol: str | None = None) -> dict[str, object]: ...
+
+
+def _adapter_class(exchange: str, market_type: str):
+    """Load adapters while preserving older one-argument test doubles."""
+
+    try:
+        return get_adapter(exchange, market_type)
+    except TypeError:
+        return get_adapter(exchange)
+
+
+def _validate_route_symbol(
+    adapter: InstrumentRulesExchange,
+    route: ExchangeRoute,
+) -> dict[str, object]:
+    """Validate one route symbol and return instrument rules."""
+
+    validator = getattr(adapter, "validate_symbol", None)
+    if callable(validator):
+        rules = cast(SymbolValidationExchange, adapter).validate_symbol(route.symbol)
+    else:
+        rules = adapter.instrument_rules(route.symbol)
+    tradeable = rules.get("tradeable")
+    if tradeable is False:
+        raise ValueError(f"Route {route.label} symbol is not tradeable")
+    return rules
 
 
 class ExchangeAdapterLike(Protocol):
@@ -134,6 +368,7 @@ class BotConfig:
 
     exchange: str = "kraken"
     symbol: str = "PI_XBTUSD"
+    market_type: str = DEFAULT_MARKET_TYPE
     environment: str = "demo"
     updatepause: int = 10
     logpause: int = 60
@@ -148,6 +383,7 @@ class BotConfig:
     account_scope: str = "default"
     api_key_env: Optional[str] = None
     api_secret_env: Optional[str] = None
+    base_url: Optional[str] = None
     require_ready: bool = True
     ready_timeout_seconds: float = 45.0
     ready_poll_seconds: float = 1.0
@@ -179,6 +415,23 @@ class BotService:
         self.config = config
         self.logger = setup_logging(config.log_level)
         self.exchange_config: ExchangeConfig | None = None
+        self._exchange_config_cache: dict[tuple[str, str, str], ExchangeConfig] = {}
+        self.default_exchange = normalise_exchange_name(config.exchange)
+        self.default_market_type = (
+            config.market_type or DEFAULT_MARKET_TYPE
+        ).strip().lower()
+        if not exchange_supports_market_type(
+            self.default_exchange,
+            self.default_market_type,
+        ):
+            reason = unsupported_market_message(
+                self.default_exchange,
+                self.default_market_type,
+            )
+            raise ValueError(
+                f"Market type '{self.default_market_type}' {reason} for default "
+                f"exchange '{self.default_exchange}'"
+            )
         market_db_url = config.market_db_url or os.environ.get("KOLABI_MARKET_DB_URL")
         account_db_url = config.account_db_url or _kolabi_scoped_db_url(
             "ACCOUNT",
@@ -196,7 +449,7 @@ class BotService:
             "TELEMETRY",
             config.account_scope,
         )
-        if config.exchange.lower() == "kraken":
+        if self.default_exchange == "kraken":
             env_cfg = kraken_futures_environment(config.environment)
             market_db_url = market_db_url or kraken_futures_public_db_url(
                 config.environment,
@@ -214,7 +467,7 @@ class BotService:
                 config.environment,
                 config.account_scope,
             )
-        elif config.exchange.lower() == "binance":
+        elif self.default_exchange == "binance":
             market_db_url = market_db_url or binance_futures_public_db_url(
                 config.environment,
                 config.symbol,
@@ -238,15 +491,39 @@ class BotService:
                 config.environment,
                 config.account_scope,
             )
+        elif self.default_exchange == "bitmex":
+            market_db_url = market_db_url or bitmex_futures_public_db_url(
+                config.environment,
+                config.symbol,
+            )
+            account_db_url = account_db_url or bitmex_futures_private_db_url(
+                config.environment,
+                config.account_scope,
+            )
+            critical_account_db_url = (
+                critical_account_db_url
+                or bitmex_futures_critical_db_url(
+                    config.environment,
+                    config.account_scope,
+                )
+            )
+            audit_db_url = audit_db_url or bitmex_futures_audit_db_url(
+                config.environment,
+                config.account_scope,
+            )
+            telemetry_db_url = telemetry_db_url or bitmex_futures_telemetry_db_url(
+                config.environment,
+                config.account_scope,
+            )
         self.indicators: IndicatorClient = indicators or (
             KrakenDbIndicatorClient(
                 db_url=market_db_url
                 or kraken_futures_public_db_url(config.environment, config.symbol),
-                exchange=config.exchange.lower(),
+                exchange=self.default_exchange,
                 environment=config.environment,
-                market_type="futures",
+                market_type=self.default_market_type,
             )
-            if config.exchange.lower() in {"kraken", "binance"}
+            if self.default_exchange in {"kraken", "binance", "bitmex"}
             else DummyIndicatorClient()
         )
         self.recorder: OrderRecorder | None = (
@@ -261,9 +538,16 @@ class BotService:
         self._audit_db_url = audit_db_url
         self._telemetry_db_url = telemetry_db_url
         self._required_symbols: tuple[str, ...] = (config.symbol,)
+        self._required_routes: tuple[ExchangeRoute, ...] = (
+            ExchangeRoute(
+                self.default_exchange,
+                self.default_market_type,
+                config.symbol,
+            ),
+        )
         self.runtime_state: KrakenRuntimeStateClient | None = None
         if (
-            config.exchange.lower() in {"kraken", "binance"}
+            self.default_exchange in {"kraken", "binance", "bitmex"}
             and market_db_url is not None
             and account_db_url is not None
         ):
@@ -272,9 +556,9 @@ class BotService:
                 account_db_url=account_db_url,
                 critical_account_db_url=critical_account_db_url,
                 symbol=config.symbol,
-                exchange=config.exchange.lower(),
+                exchange=self.default_exchange,
                 environment=config.environment,
-                market_type="futures",
+                market_type=self.default_market_type,
                 account_scope=config.account_scope,
                 max_public_age_seconds=config.max_public_age_seconds,
                 max_private_age_seconds=config.max_private_age_seconds,
@@ -286,20 +570,153 @@ class BotService:
             self._wait_until_ready()
             self._server_started = True
 
-    def preflight(self) -> dict[str, object]:
+    def preflight(self, strategy: StrategySpec | None = None) -> dict[str, object]:
         """Return the current runtime readiness payload."""
+        if strategy is not None:
+            strategy = self._materialize_strategy_symbols(strategy)
+            self._required_symbols = _strategy_symbols(strategy) or (self.config.symbol,)
+            self._required_routes = _strategy_routes(
+                strategy,
+                default_exchange=self.default_exchange,
+                default_symbol=self.config.symbol,
+                default_market_type=self.default_market_type,
+            ) or (
+                ExchangeRoute(
+                    self.default_exchange,
+                    self.default_market_type,
+                    self.config.symbol,
+                )
+            )
+        credential_routes = tuple(
+            _route_credential_status(
+                route,
+                environment=self.config.environment,
+                api_key_env=_default_route_value(
+                    route,
+                    default_exchange=self.default_exchange,
+                    default_market_type=self.default_market_type,
+                    value=self.config.api_key_env,
+                ),
+                api_secret_env=_default_route_value(
+                    route,
+                    default_exchange=self.default_exchange,
+                    default_market_type=self.default_market_type,
+                    value=self.config.api_secret_env,
+                ),
+                base_url=_default_route_value(
+                    route,
+                    default_exchange=self.default_exchange,
+                    default_market_type=self.default_market_type,
+                    value=self.config.base_url,
+                ),
+            )
+            for route in self._required_routes
+        )
+        credentials_ready = all(
+            bool(item.get("credentials_present")) for item in credential_routes
+        )
+        base_urls_ready = all(
+            bool(item.get("base_url_ready", True)) for item in credential_routes
+        )
+        route_config_ready = credentials_ready and base_urls_ready
+        credential_reasons = _credential_reasons(credential_routes)
+        strategy_validation_ready = True
+        strategy_validation_reasons: tuple[str, ...] = ()
+        if strategy is not None and route_config_ready and self.runtime_state is not None:
+            try:
+                self._validate_pairs(strategy.pairs)
+            except ValueError as exc:
+                strategy_validation_ready = False
+                strategy_validation_reasons = (_compact_admin_error(exc),)
         if self.runtime_state is None:
             return {
-                "exchange": self.config.exchange,
+                "exchange": self.default_exchange,
                 "symbol": self.config.symbol,
-                "ready": True,
-                "reasons": (),
-                "status": "not_applicable",
+                "ready": route_config_ready and strategy_validation_ready,
+                "reasons": credential_reasons + strategy_validation_reasons,
+                "status": (
+                    "not_applicable"
+                    if route_config_ready and strategy_validation_ready
+                    else "waiting"
+                ),
+                "credentials_ready": credentials_ready,
+                "base_urls_ready": base_urls_ready,
+                "route_config_ready": route_config_ready,
+                "strategy_validation_ready": strategy_validation_ready,
+                "credential_routes": credential_routes,
             }
-        state = self.runtime_state.fetch_runtime_state()
-        payload = state.as_dict()
-        payload["status"] = "ok" if state.ready else "waiting"
-        return payload
+        states: list[StrategyRuntimeState] = []
+        state_errors: list[dict[str, object]] = []
+        for route in self._required_routes:
+            try:
+                states.append(
+                    self.runtime_state.fetch_runtime_state(
+                        symbol=route.symbol,
+                        exchange=route.exchange,
+                        market_type=route.market_type,
+                    )
+                )
+            except SQLAlchemyError as exc:
+                state_errors.append(_runtime_state_error_payload(route, exc))
+        runtime_error_reasons = tuple(
+            reason
+            for error in state_errors
+            for reason in tuple(error.get("reasons") or ())
+        )
+        if len(self._required_routes) == 1 and states:
+            payload = states[0].as_dict()
+            payload["ready"] = (
+                states[0].ready and route_config_ready and strategy_validation_ready
+            )
+            payload["status"] = "ok" if payload["ready"] else "waiting"
+            payload["credentials_ready"] = credentials_ready
+            payload["base_urls_ready"] = base_urls_ready
+            payload["route_config_ready"] = route_config_ready
+            payload["strategy_validation_ready"] = strategy_validation_ready
+            payload["credential_routes"] = credential_routes
+            payload["reasons"] = (
+                tuple(payload.get("reasons") or ())
+                + credential_reasons
+                + strategy_validation_reasons
+            )
+            return payload
+        if len(self._required_routes) == 1 and state_errors:
+            payload = dict(state_errors[0])
+            payload["credentials_ready"] = credentials_ready
+            payload["base_urls_ready"] = base_urls_ready
+            payload["route_config_ready"] = route_config_ready
+            payload["strategy_validation_ready"] = strategy_validation_ready
+            payload["credential_routes"] = credential_routes
+            payload["reasons"] = (
+                runtime_error_reasons
+                + credential_reasons
+                + strategy_validation_reasons
+            )
+            return payload
+        ready = (
+            len(states) == len(self._required_routes)
+            and all(state.ready for state in states)
+            and route_config_ready
+            and strategy_validation_ready
+        )
+        reasons = tuple(
+            f"{state.exchange or self.default_exchange}:{state.symbol}:{reason}"
+            for state in states
+            for reason in state.reasons
+        ) + runtime_error_reasons + credential_reasons + strategy_validation_reasons
+        route_payloads = tuple(state.as_dict() for state in states) + tuple(state_errors)
+        return {
+            "exchange": self.default_exchange,
+            "ready": ready,
+            "status": "ok" if ready else "waiting",
+            "reasons": reasons,
+            "routes": route_payloads,
+            "credentials_ready": credentials_ready,
+            "base_urls_ready": base_urls_ready,
+            "route_config_ready": route_config_ready,
+            "strategy_validation_ready": strategy_validation_ready,
+            "credential_routes": credential_routes,
+        }
 
     def _wait_until_ready(self) -> None:
         """Wait for fresh DB-grounded public/private state before starting runtime."""
@@ -309,9 +726,9 @@ class BotService:
         ):
             return
         self.logger.info(
-            "%s runtime preflight symbols=%s env=%s market_db=%s account_db=%s critical_account_db=%s",
-            self.config.exchange.lower(),
-            ",".join(self._required_symbols),
+            "%s runtime preflight routes=%s env=%s market_db=%s account_db=%s critical_account_db=%s",
+            self.default_exchange,
+            ",".join(route.label for route in self._required_routes),
             self.config.environment,
             self._market_db_url,
             self._account_db_url,
@@ -319,25 +736,27 @@ class BotService:
         )
         states = tuple(
             self.runtime_state.wait_until_ready(
-                symbol=symbol,
+                symbol=route.symbol,
+                exchange=route.exchange,
+                market_type=route.market_type,
                 timeout_seconds=self.config.ready_timeout_seconds,
                 poll_seconds=self.config.ready_poll_seconds,
             )
-            for symbol in self._required_symbols
+            for route in self._required_routes
         )
         stale_states = tuple(state for state in states if not state.ready)
         if stale_states:
             raise TimeoutError(self._format_wait_timeouts(stale_states))
-        self._cleanup_startup_orphans(tuple(item.symbol for item in states))
+        self._cleanup_startup_orphans(self._required_routes)
         state = states[0]
         public_ages = ",".join(
-            f"{item.symbol}:{item.public.age_seconds or 0.0:.2f}s"
+            f"{item.exchange or self.default_exchange}:{item.symbol}:{item.public.age_seconds or 0.0:.2f}s"
             for item in states
         )
         self.logger.info(
-            "%s runtime ready symbols=%s public_ages=%s private_age=%.2fs",
-            self.config.exchange.lower(),
-            ",".join(item.symbol for item in states),
+            "%s runtime ready routes=%s public_ages=%s private_age=%.2fs",
+            self.default_exchange,
+            ",".join(route.label for route in self._required_routes),
             public_ages,
             state.private_ws.age_seconds or 0.0,
         )
@@ -359,35 +778,38 @@ class BotService:
             else "unknown"
         )
         private_last_heartbeat = state.private_ws.last_heartbeat_at or "-"
+        route = ExchangeRoute(
+            exchange=state.exchange or self.default_exchange,
+            market_type=state.market_type or self.default_market_type,
+            symbol=state.symbol,
+        )
         hint = ""
         if state.private_ws.status in {"missing", "missing_schema"}:
-            hint = (
-                " start_private='scripts/kolabidb private start"
-                f" --account-scope {self.config.account_scope}'"
-            )
+            hint = f" start_private='{_private_feeder_hint(route, self.config.account_scope)}'"
         public_hint = (
-            f" start_public='scripts/kolabidb public start --pair {state.symbol}'"
+            f" start_public='{_public_feeder_hint(route)}'"
             if state.public.reason
             else ""
         )
         return (
-            f"{self.config.exchange.capitalize()} runtime did not become ready within "
+            f"{(state.exchange or self.default_exchange).capitalize()} runtime did not become ready within "
             f"{self.config.ready_timeout_seconds:.0f}s for symbol={state.symbol}: {reasons} "
             f"(public_age={public_age} private_status={state.private_ws.status} "
             f"private_age={private_age} private_last_heartbeat={private_last_heartbeat} "
             f"account_scope={self.config.account_scope}{public_hint}{hint})"
         )
 
-    def _cleanup_startup_orphans(self, symbols: tuple[str, ...]) -> None:
+    def _cleanup_startup_orphans(self, routes: Iterable[ExchangeRoute | str]) -> None:
         if self.runtime_state is None:
             return
-        orphans = self._open_kolabi_orders(symbols)
+        routes = self._coerce_routes(routes)
+        orphans = self._open_kolabi_orders(routes)
         if not orphans:
             return
         for record in orphans:
             self.logger.warning(
                 "ORPHAN_FOUND (%s): %s",
-                record.symbol,
+                _record_route_label(record),
                 _runtime_admin_fields(
                     record.client_order_id or "-",
                     record.exchange_order_id or "-",
@@ -396,7 +818,16 @@ class BotService:
                     record.stop_price if record.stop_price is not None else record.price or "-",
                 ),
             )
-        port = self._build_admin_port()
+        port: ExchangePort
+        default_route = ExchangeRoute(
+            self.default_exchange,
+            self.default_market_type,
+            self.config.symbol,
+        )
+        if set(routes) == {default_route}:
+            port = self._build_admin_port()
+        else:
+            port = self._build_routing_port(verify_tail_on_place=True)
         executor = OgunExecutor(port)
         for record in orphans:
             cancel_id = record.exchange_order_id or record.client_order_id
@@ -411,6 +842,8 @@ class BotService:
                     clOrdID=cancel_id,
                 ),
                 reason="startup_orphan",
+                exchange=record.exchange or self.default_exchange,
+                market_type=record.market_type or self.default_market_type,
             )
             try:
                 asyncio.run(executor.execute(command))
@@ -422,7 +855,7 @@ class BotService:
                 ) from exc
             self.logger.warning(
                 "ORPHAN_CANCEL_SENT (%s): %s",
-                record.symbol,
+                _record_route_label(record),
                 _runtime_admin_fields(
                     record.client_order_id or "-",
                     record.exchange_order_id or "-",
@@ -430,7 +863,7 @@ class BotService:
                 ),
             )
         survivors = self._wait_for_private_orders_closed(
-            symbols,
+            routes,
             orphans,
             timeout_seconds=self.config.ready_timeout_seconds,
             poll_seconds=self.config.ready_poll_seconds,
@@ -439,27 +872,41 @@ class BotService:
             details = ", ".join(_private_order_summary(record) for record in survivors)
             raise RuntimeError(f"startup orphan orders still open after cancel: {details}")
 
-    def _open_kolabi_orders(self, symbols: tuple[str, ...]) -> tuple[PrivateOrderRecord, ...]:
+    def _open_kolabi_orders(self, routes: Iterable[ExchangeRoute | str]) -> tuple[PrivateOrderRecord, ...]:
         if self.runtime_state is None:
             return ()
+        routes = self._coerce_routes(routes)
         rows: list[PrivateOrderRecord] = []
-        for symbol in symbols:
+        for route in routes:
             fetch_latest = getattr(self.runtime_state, "fetch_latest_private_orders", None)
             if not callable(fetch_latest):
                 continue
-            for record in fetch_latest(symbol=symbol, open_only=True):
+            try:
+                records = fetch_latest(
+                    symbol=route.symbol,
+                    exchange=route.exchange,
+                    market_type=route.market_type,
+                    open_only=True,
+                )
+            except TypeError as exc:
+                message = str(exc)
+                if "exchange" not in message and "market_type" not in message:
+                    raise
+                records = fetch_latest(symbol=route.symbol, open_only=True)
+            for record in records:
                 if _is_kolabi_order_record(record):
                     rows.append(record)
         return tuple(rows)
 
     def _wait_for_private_orders_closed(
         self,
-        symbols: tuple[str, ...],
+        routes: Iterable[ExchangeRoute | str],
         targets: Iterable[PrivateOrderRecord],
         *,
         timeout_seconds: float,
         poll_seconds: float,
     ) -> tuple[PrivateOrderRecord, ...]:
+        routes = self._coerce_routes(routes)
         target_keys = {_private_order_key(record) for record in targets}
         target_keys.discard(None)
         if not target_keys:
@@ -469,7 +916,7 @@ class BotService:
         while True:
             survivors = tuple(
                 record
-                for record in self._open_kolabi_orders(symbols)
+                for record in self._open_kolabi_orders(routes)
                 if _private_order_key(record) in target_keys
             )
             if not survivors:
@@ -479,6 +926,21 @@ class BotService:
             if time.monotonic() >= deadline:
                 return survivors
             time.sleep(sleep_seconds)
+
+    def _coerce_routes(self, routes: Iterable[ExchangeRoute | str]) -> tuple[ExchangeRoute, ...]:
+        coerced: list[ExchangeRoute] = []
+        for route in routes:
+            if isinstance(route, ExchangeRoute):
+                coerced.append(route)
+                continue
+            coerced.append(
+                ExchangeRoute(
+                    exchange=self.default_exchange,
+                    market_type=self.default_market_type,
+                    symbol=str(route),
+                )
+            )
+        return tuple(coerced)
 
     def run_strategy(
         self,
@@ -490,8 +952,20 @@ class BotService:
         """Execute the active typed runtime path in the foreground."""
         strategy = self._materialize_strategy_symbols(strategy)
         self._required_symbols = _strategy_symbols(strategy) or (self.config.symbol,)
+        self._required_routes = _strategy_routes(
+            strategy,
+            default_exchange=self.default_exchange,
+            default_symbol=self.config.symbol,
+            default_market_type=self.default_market_type,
+        ) or (
+            ExchangeRoute(
+                self.default_exchange,
+                self.default_market_type,
+                self.config.symbol,
+            )
+        )
         if not dry_run and not simulate:
-            self._validate_multi_symbol_market_db(strategy)
+            self._validate_multi_route_market_db(strategy)
         pair_list = list(strategy.pairs)
         if not dry_run or self.exchange_config is not None:
             self._validate_pairs(pair_list)
@@ -536,9 +1010,9 @@ class BotService:
                     )
                 )
             ),
-            exchange=self.config.exchange.lower(),
+            exchange=self.default_exchange,
             environment=self.config.environment,
-            market_type="futures",
+            market_type=self.default_market_type,
             account_scope=self.config.account_scope,
             tail_visibility_timeout_seconds=self.config.tail_visibility_timeout_seconds,
             max_active_pairs=self.config.max_active_pairs,
@@ -611,37 +1085,54 @@ class BotService:
 
     def _validate_pairs(self, pairs: Iterable[OrderPairSpec]) -> None:
         """Validate exchange-specific instrument and grammar constraints."""
-        exchange = self.config.exchange.lower()
-        if exchange not in {"kraken", "binance"}:
-            return
-        if self.exchange_config is None:
-            self._ensure_exchange_config()
-        assert self.exchange_config is not None
-        adapter_cls = get_adapter(exchange)
-        adapter = cast(
-            InstrumentRulesExchange,
-            adapter_cls(
-                api_key=self.exchange_config.api_key,
-                api_secret=self.exchange_config.api_secret,
-                base_url=self.exchange_config.base_url,
-                symbol=self.exchange_config.symbol,
-                **self.exchange_config.adapter_kwargs,
-            ),
-        )
-        min_qty_by_symbol: dict[str, float] = {}
+        adapters: dict[tuple[str, str], InstrumentRulesExchange] = {}
+        min_qty_by_route: dict[ExchangeRoute, float] = {}
         for pair in pairs:
-            if exchange == "binance":
-                _validate_binance_pair_grammar(pair)
-            symbol = _pair_symbol(pair, self.config.symbol)
-            if symbol not in min_qty_by_symbol:
-                rules = adapter.instrument_rules(symbol)
+            route = _pair_route(
+                pair,
+                default_exchange=self.default_exchange,
+                default_symbol=self.config.symbol,
+                default_market_type=self.default_market_type,
+            )
+            if route.exchange not in {"kraken", "binance", "bitmex"}:
+                continue
+            if route.exchange == "binance":
+                _validate_binance_pair_grammar(pair, route.market_type)
+            elif route.exchange == "kraken":
+                _validate_kraken_pair_grammar(pair, route.market_type)
+            elif route.exchange == "bitmex":
+                _validate_bitmex_pair_grammar(pair, route.market_type)
+            adapter_key = (route.exchange, route.market_type, route.symbol)
+            adapter = adapters.get(adapter_key)
+            if adapter is None:
+                try:
+                    exchange_config = self._exchange_config_for_route(route)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Strategy pair '{pair.name}' cannot load exchange config "
+                        f"for route {route.label}: {exc}"
+                    ) from exc
+                adapter_cls = _adapter_class(route.exchange, route.market_type)
+                adapter = cast(
+                    InstrumentRulesExchange,
+                    adapter_cls(
+                        api_key=exchange_config.api_key,
+                        api_secret=exchange_config.api_secret,
+                        base_url=exchange_config.base_url,
+                        symbol=exchange_config.symbol,
+                        **exchange_config.adapter_kwargs,
+                    ),
+                )
+                adapters[adapter_key] = adapter
+            if route not in min_qty_by_route:
+                rules = _validate_route_symbol(adapter, route)
                 raw_min_qty = rules.get("minQuantity")
-                min_qty_by_symbol[symbol] = (
+                min_qty_by_route[route] = (
                     float(raw_min_qty)
                     if isinstance(raw_min_qty, (int, float, str)) and raw_min_qty
                     else 1.0
                 )
-            min_qty = min_qty_by_symbol[symbol]
+            min_qty = min_qty_by_route[route]
             if (
                 pair.head_quantity_type == "qA"
                 and pair.head_quantity is not None
@@ -649,7 +1140,7 @@ class BotService:
             ):
                 raise ValueError(
                     f"Strategy '{pair.name}' quantity {pair.head_quantity} is below "
-                    f"the minimum quantity {min_qty:g} for {symbol}."
+                    f"the minimum quantity {min_qty:g} for {route.exchange}:{route.symbol}."
                 )
 
     def _materialize_strategy_symbols(self, strategy: StrategySpec) -> StrategySpec:
@@ -661,10 +1152,18 @@ class BotService:
             if pair.name in names:
                 duplicates.append(pair.name)
             names.add(pair.name)
+            route = _pair_route(
+                pair,
+                default_exchange=self.default_exchange,
+                default_symbol=self.config.symbol,
+                default_market_type=self.default_market_type,
+            )
             pairs.append(
                 replace(
                     pair,
-                    symbol=_pair_symbol(pair, self.config.symbol),
+                    symbol=route.symbol,
+                    exchange=route.exchange,
+                    market_type=route.market_type,
                 )
             )
         if duplicates:
@@ -673,38 +1172,48 @@ class BotService:
             )
         return replace(strategy, pairs=tuple(pairs))
 
-    def _validate_multi_symbol_market_db(self, strategy: StrategySpec) -> None:
-        symbols = _strategy_symbols(strategy)
-        if len(symbols) <= 1:
+    def _validate_multi_route_market_db(self, strategy: StrategySpec) -> None:
+        routes = _strategy_routes(
+            strategy,
+            default_exchange=self.default_exchange,
+            default_symbol=self.config.symbol,
+            default_market_type=self.default_market_type,
+        )
+        if len(routes) <= 1:
             return
         if self.config.market_db_url or os.environ.get("KOLABI_MARKET_DB_URL"):
             return
         raise ValueError(
-            "Multi-instrument strategies require a shared market DB URL. "
+            "Multi-instrument or multi-exchange strategies require a shared market DB URL. "
             "Start public feeders for every symbol and pass --market-db-url, "
-            "or export KOLABI_MARKET_DB_URL. symbols=" + ",".join(symbols)
+            "or export KOLABI_MARKET_DB_URL. routes="
+            + ",".join(route.label for route in routes)
         )
+
+    def _validate_multi_symbol_market_db(self, strategy: StrategySpec) -> None:
+        self._validate_multi_route_market_db(strategy)
 
     def _build_executor(self, *, simulate: bool):
         if simulate:
             return SimulatedExecutor()
-        self._ensure_exchange_config()
-        if self.exchange_config is None:
-            raise RuntimeError("Exchange configuration is required for active execution")
-        port = SymbolRoutingExchangePort(
-            exchange=self.config.exchange.lower(),
-            exchange_config=self.exchange_config,
-            verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
-            verify_poll_seconds=self.config.tail_verify_poll_seconds,
-            run_blocking_calls_in_thread=True,
-            verify_tail_on_place=True,
-        )
+        port = self._build_routing_port(verify_tail_on_place=True)
         return OgunExecutor(
             port,
             flight_policy=RestFlightPolicy(
                 min_interval_seconds=self.config.rest_min_interval_seconds,
                 max_inflight=self.config.rest_max_inflight,
             ),
+        )
+
+    def _build_routing_port(self, *, verify_tail_on_place: bool) -> SymbolRoutingExchangePort:
+        return SymbolRoutingExchangePort(
+            exchange=self.default_exchange,
+            market_type=self.default_market_type,
+            exchange_config_loader=self._exchange_config_for_route,
+            verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
+            verify_poll_seconds=self.config.tail_verify_poll_seconds,
+            run_blocking_calls_in_thread=True,
+            verify_tail_on_place=verify_tail_on_place,
         )
 
     def _build_public_source(self, *, simulate: bool):
@@ -725,39 +1234,95 @@ class BotService:
         if self.exchange_config is not None:
             return
         self.exchange_config = load_exchange_config(
-            self.config.exchange,
+            self.default_exchange,
             symbol=self.config.symbol,
+            market_type=self.default_market_type,
             environment=self.config.environment,
             api_key_env=self.config.api_key_env,
             api_secret_env=self.config.api_secret_env,
+            base_url=self.config.base_url,
         )
-        if self.config.exchange.lower() in {"kraken", "binance"}:
-            if self._market_db_url is not None:
-                self.exchange_config.adapter_kwargs["public_db_url"] = (
-                    self._market_db_url
-                )
-            if self._account_db_url is not None:
-                self.exchange_config.adapter_kwargs["account_db_url"] = (
-                    self._account_db_url
-                )
-            if self._audit_db_url is not None:
-                self.exchange_config.adapter_kwargs["audit_db_url"] = self._audit_db_url
-            self.exchange_config.adapter_kwargs["rest_audit_retention_minutes"] = (
-                self.config.rest_audit_retention_minutes
+        self._decorate_exchange_config(
+            self.exchange_config,
+            self.default_exchange,
+            self.default_market_type,
+        )
+        self._exchange_config_cache[
+            (self.default_exchange, self.default_market_type, self.config.symbol)
+        ] = (
+            self.exchange_config
+        )
+
+    def _exchange_config_for_route(self, route: ExchangeRoute) -> ExchangeConfig:
+        key = (route.exchange, route.market_type, route.symbol)
+        cached = self._exchange_config_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            cfg = load_exchange_config(
+                route.exchange,
+                symbol=route.symbol,
+                market_type=route.market_type,
+                environment=self.config.environment,
+                api_key_env=(
+                    self.config.api_key_env
+                    if route.exchange == self.default_exchange
+                    and route.market_type == self.default_market_type
+                    else None
+                ),
+                api_secret_env=(
+                    self.config.api_secret_env
+                    if route.exchange == self.default_exchange
+                    and route.market_type == self.default_market_type
+                    else None
+                ),
+                base_url=(
+                    self.config.base_url
+                    if route.exchange == self.default_exchange
+                    and route.market_type == self.default_market_type
+                    else None
+                ),
             )
-            self.exchange_config.adapter_kwargs["rest_audit_retention_limit"] = (
-                self.config.rest_audit_retention_limit
-            )
-            self.exchange_config.adapter_kwargs["account_scope"] = (
-                self.config.account_scope
-            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Exchange route {route.label} configuration failed: {exc}"
+            ) from exc
+        self._decorate_exchange_config(cfg, route.exchange, route.market_type)
+        self._exchange_config_cache[key] = cfg
+        if route.exchange == self.default_exchange and route.symbol == self.config.symbol:
+            self.exchange_config = cfg
+        return cfg
+
+    def _decorate_exchange_config(
+        self,
+        cfg: ExchangeConfig,
+        exchange: str,
+        market_type: str = DEFAULT_MARKET_TYPE,
+    ) -> None:
+        if exchange not in {"kraken", "binance", "bitmex"}:
+            return
+        if self._market_db_url is not None:
+            cfg.adapter_kwargs["public_db_url"] = self._market_db_url
+        if self._account_db_url is not None:
+            cfg.adapter_kwargs["account_db_url"] = self._account_db_url
+        if self._audit_db_url is not None:
+            cfg.adapter_kwargs["audit_db_url"] = self._audit_db_url
+        cfg.adapter_kwargs["rest_audit_retention_minutes"] = (
+            self.config.rest_audit_retention_minutes
+        )
+        cfg.adapter_kwargs["rest_audit_retention_limit"] = (
+            self.config.rest_audit_retention_limit
+        )
+        cfg.adapter_kwargs["account_scope"] = self.config.account_scope
+        cfg.adapter_kwargs["market_type"] = market_type
 
     def _build_admin_port(self) -> AdapterExchangePort:
         self._ensure_exchange_config()
         if self.exchange_config is None:
             raise RuntimeError("Exchange configuration is required for admin execution")
         return AdapterExchangePort(
-            exchange=self.config.exchange.lower(),
+            exchange=self.default_exchange,
+            market_type=self.default_market_type,
             exchange_config=self.exchange_config,
             verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
             verify_poll_seconds=self.config.tail_verify_poll_seconds,
@@ -813,13 +1378,14 @@ class BotService:
         close_skipped_reason: str | None = "no_position"
         if qty_before != 0.0:
             close_side = "sell" if qty_before > 0 else "buy"
-            close_action = "submitted_reduce_only_market"
+            close_params = _market_close_order_params(self.default_market_type)
+            close_action = close_params["action"]
             close_skipped_reason = None
             close_ack = port.adapter.place_order(
                 side=close_side,
                 orderQty=abs(qty_before),
                 type_="MARKET",
-                reduceOnly=True,
+                **close_params["params"],
             )
         position_after = port.adapter.get_position()
         audit_errors = list(getattr(port.adapter, "rest_audit_errors", ()))
@@ -838,77 +1404,101 @@ class BotService:
 
     def cancel_living_tails(self, runtime: StrategyRuntime) -> list[OrderAck]:
         """Best-effort cancellation of living/submitted tails on operator interrupt."""
-        port = self._build_admin_port()
         cancelled: list[OrderAck] = []
+        adapters: dict[ExchangeRoute, ExchangeAdapterLike] = {}
         for target in _interrupt_cleanup_targets(runtime):
+            adapter = self._adapter_for_route(target.route, adapters)
             cancel_id = _resolve_tail_cancel_id(
-                cast(OpenOrderReader, port.adapter),
+                cast(OpenOrderReader, adapter),
                 target.tail_exchange_order_id,
                 target.tail_client_order_id,
             )
             if cancel_id is None:
                 continue
             try:
-                cancelled.append(port.adapter.cancel_order(cancel_id))
+                cancelled.append(adapter.cancel_order(cancel_id))
             except Exception:
                 continue
         return cancelled
 
     def cleanup_interrupted_pairs(self, runtime: StrategyRuntime) -> dict[str, object]:
         """Cancel active live orders and close associated head-opened exposure."""
-        port = self._build_admin_port()
-        adapter = port.adapter
         targets = _interrupt_cleanup_targets(runtime)
         cancelled: list[OrderAck] = []
         close_acks: list[OrderAck] = []
         errors = 0
-        seen_cancel_ids: set[str] = set()
+        seen_cancel_ids: set[tuple[str, str]] = set()
+        adapters: dict[ExchangeRoute, ExchangeAdapterLike] = {}
         active_identities = runtime.active_order_identities()
         for identity in active_identities:
+            route = self._route_from_identity(identity)
+            adapter = self._adapter_for_route(route, adapters)
             cancel_id = identity.exchange_order_id or identity.client_order_id
-            if not cancel_id or cancel_id in seen_cancel_ids:
+            cancel_key = (route.label, cancel_id or "")
+            if not cancel_id or cancel_key in seen_cancel_ids:
                 continue
-            seen_cancel_ids.add(cancel_id)
+            seen_cancel_ids.add(cancel_key)
             try:
                 cancelled.append(adapter.cancel_order(cancel_id))
             except Exception:
                 errors += 1
-        position_before = adapter.get_position()
-        remaining_long = max(0.0, float(position_before.qty))
-        remaining_short = max(0.0, -float(position_before.qty))
+        position_before_by_route: dict[ExchangeRoute, float] = {}
+        position_after_by_route: dict[ExchangeRoute, float] = {}
+        for route in sorted({target.route for target in targets}):
+            adapter = self._adapter_for_route(route, adapters)
+            position = adapter.get_position()
+            position_before_by_route[route] = float(position.qty)
+        targets_by_route: dict[ExchangeRoute, list[_InterruptCleanupTarget]] = {}
         for target in targets:
-            cancel_id = _resolve_tail_cancel_id(
-                cast(OpenOrderReader, adapter),
-                target.tail_exchange_order_id,
-                target.tail_client_order_id,
-            )
-            if cancel_id is not None and cancel_id not in seen_cancel_ids:
-                seen_cancel_ids.add(cancel_id)
+            targets_by_route.setdefault(target.route, []).append(target)
+        for route, route_targets in targets_by_route.items():
+            adapter = self._adapter_for_route(route, adapters)
+            position_before_qty = position_before_by_route.get(route)
+            if position_before_qty is None:
+                position_before_qty = float(adapter.get_position().qty)
+                position_before_by_route[route] = position_before_qty
+            remaining_long = max(0.0, position_before_qty)
+            remaining_short = max(0.0, -position_before_qty)
+            for target in route_targets:
+                cancel_id = _resolve_tail_cancel_id(
+                    cast(OpenOrderReader, adapter),
+                    target.tail_exchange_order_id,
+                    target.tail_client_order_id,
+                )
+                cancel_key = (route.label, cancel_id or "")
+                if cancel_id is not None and cancel_key not in seen_cancel_ids:
+                    seen_cancel_ids.add(cancel_key)
+                    try:
+                        cancelled.append(adapter.cancel_order(cancel_id))
+                    except Exception:
+                        errors += 1
+                close_qty = target.played_quantity
+                if target.close_side == "sell":
+                    close_qty = min(close_qty, remaining_long)
+                    remaining_long = max(0.0, remaining_long - close_qty)
+                else:
+                    close_qty = min(close_qty, remaining_short)
+                    remaining_short = max(0.0, remaining_short - close_qty)
+                if close_qty <= 0.0:
+                    continue
                 try:
-                    cancelled.append(adapter.cancel_order(cancel_id))
+                    close_params = _market_close_order_params(route.market_type)
+                    close_acks.append(
+                        adapter.place_order(
+                            side=target.close_side,
+                            orderQty=close_qty,
+                            type_="MARKET",
+                            **close_params["params"],
+                        )
+                    )
                 except Exception:
                     errors += 1
-            close_qty = target.played_quantity
-            if target.close_side == "sell":
-                close_qty = min(close_qty, remaining_long)
-                remaining_long = max(0.0, remaining_long - close_qty)
-            else:
-                close_qty = min(close_qty, remaining_short)
-                remaining_short = max(0.0, remaining_short - close_qty)
-            if close_qty <= 0.0:
-                continue
-            try:
-                close_acks.append(
-                    adapter.place_order(
-                        side=target.close_side,
-                        orderQty=close_qty,
-                        type_="MARKET",
-                        reduceOnly=True,
-                    )
-                )
-            except Exception:
-                errors += 1
-        position_after = adapter.get_position()
+            position_after_by_route[route] = float(adapter.get_position().qty)
+        for route, adapter in adapters.items():
+            if route not in position_after_by_route and route in position_before_by_route:
+                position_after_by_route[route] = float(adapter.get_position().qty)
+        position_before_qty = sum(position_before_by_route.values())
+        position_after_qty = sum(position_after_by_route.values())
         survivors: tuple[PrivateOrderRecord, ...] = ()
         if active_identities and self.runtime_state is not None:
             survivor_targets = tuple(
@@ -917,11 +1507,24 @@ class BotService:
                     status="open",
                     exchange_order_id=identity.exchange_order_id,
                     client_order_id=identity.client_order_id,
+                    exchange=identity.exchange or self.default_exchange,
+                    market_type=identity.market_type or self.default_market_type,
                 )
                 for identity in active_identities
             )
             survivors = self._wait_for_private_orders_closed(
-                tuple(sorted({record.symbol for record in survivor_targets})),
+                tuple(
+                    sorted(
+                        {
+                            ExchangeRoute(
+                                record.exchange or self.default_exchange,
+                                record.market_type or self.default_market_type,
+                                record.symbol,
+                            )
+                            for record in survivor_targets
+                        }
+                    )
+                ),
                 survivor_targets,
                 timeout_seconds=self.config.tail_verify_timeout_seconds,
                 poll_seconds=self.config.tail_verify_poll_seconds,
@@ -929,7 +1532,7 @@ class BotService:
             for survivor in survivors:
                 self.logger.warning(
                     "ORDER_SAFETY_BLOCKED (%s): %s",
-                    survivor.symbol,
+                    _record_route_label(survivor),
                     _runtime_admin_fields(
                         survivor.client_order_id or "-",
                         survivor.exchange_order_id or "-",
@@ -941,11 +1544,44 @@ class BotService:
             "tail_cancelled": len(cancelled),
             "order_cancelled": len(cancelled),
             "close_orders": len(close_acks),
-            "position_before_qty": float(position_before.qty),
-            "position_after_qty": float(position_after.qty),
+            "position_before_qty": position_before_qty,
+            "position_after_qty": position_after_qty,
             "errors": errors,
             "survivors": tuple(_private_order_summary(record) for record in survivors),
         }
+
+    def _route_from_identity(self, identity: OrderIdentity) -> ExchangeRoute:
+        return ExchangeRoute(
+            exchange=identity.exchange or self.default_exchange,
+            market_type=identity.market_type or self.default_market_type,
+            symbol=identity.symbol or self.config.symbol,
+        )
+
+    def _adapter_for_route(
+        self,
+        route: ExchangeRoute,
+        adapters: dict[ExchangeRoute, ExchangeAdapterLike],
+    ) -> ExchangeAdapterLike:
+        existing = adapters.get(route)
+        if existing is not None:
+            return existing
+        if (
+            route.exchange == self.default_exchange
+            and route.symbol == self.config.symbol
+            and route.market_type == self.default_market_type
+        ):
+            adapter = self._build_admin_port().adapter
+        else:
+            adapter = AdapterExchangePort(
+                exchange=route.exchange,
+                market_type=route.market_type,
+                exchange_config=self._exchange_config_for_route(route),
+                verify_timeout_seconds=self.config.tail_verify_timeout_seconds,
+                verify_poll_seconds=self.config.tail_verify_poll_seconds,
+                run_blocking_calls_in_thread=False,
+            ).adapter
+        adapters[route] = adapter
+        return adapter
 
 
 async def _run_private_stack(
@@ -961,13 +1597,16 @@ class AdapterExchangePort(ExchangePort):
         self,
         *,
         exchange: str,
+        market_type: str = DEFAULT_MARKET_TYPE,
         exchange_config: ExchangeConfig,
         verify_timeout_seconds: float = 11.0,
         verify_poll_seconds: float = 0.5,
         run_blocking_calls_in_thread: bool = False,
         verify_tail_on_place: bool = True,
     ) -> None:
-        adapter_cls = get_adapter(exchange)
+        adapter_cls = _adapter_class(exchange, market_type)
+        adapter_kwargs = dict(exchange_config.adapter_kwargs)
+        adapter_kwargs["market_type"] = market_type
         self.adapter = cast(
             ExchangeAdapterLike,
             adapter_cls(
@@ -975,7 +1614,7 @@ class AdapterExchangePort(ExchangePort):
                 api_secret=exchange_config.api_secret,
                 base_url=exchange_config.base_url,
                 symbol=exchange_config.symbol,
-                **exchange_config.adapter_kwargs,
+                **adapter_kwargs,
             ),
         )
         self.verify_timeout_seconds = verify_timeout_seconds
@@ -1130,56 +1769,100 @@ class AdapterExchangePort(ExchangePort):
 
 
 class SymbolRoutingExchangePort(ExchangePort):
-    """One-platform ExchangePort that dispatches commands by command.symbol."""
+    """ExchangePort that dispatches commands by exchange, market type, and symbol."""
 
     def __init__(
         self,
         *,
         exchange: str,
-        exchange_config: ExchangeConfig,
+        market_type: str = DEFAULT_MARKET_TYPE,
+        exchange_config: ExchangeConfig | None = None,
+        exchange_config_loader: Callable[[ExchangeRoute], ExchangeConfig] | None = None,
         verify_timeout_seconds: float = 11.0,
         verify_poll_seconds: float = 0.5,
         run_blocking_calls_in_thread: bool = False,
         verify_tail_on_place: bool = True,
     ) -> None:
-        self.exchange = exchange
+        self.exchange = normalise_exchange_name(exchange)
+        self.market_type = (market_type or DEFAULT_MARKET_TYPE).strip().lower()
+        if not exchange_supports_market_type(self.exchange, self.market_type):
+            reason = unsupported_market_message(self.exchange, self.market_type)
+            raise ValueError(
+                f"Market type '{self.market_type}' {reason} for exchange '{self.exchange}'"
+            )
         self.exchange_config = exchange_config
+        self.exchange_config_loader = exchange_config_loader
         self.verify_timeout_seconds = verify_timeout_seconds
         self.verify_poll_seconds = verify_poll_seconds
         self.run_blocking_calls_in_thread = run_blocking_calls_in_thread
         self.verify_tail_on_place = verify_tail_on_place
-        self._ports: dict[str, AdapterExchangePort] = {}
+        self._ports: dict[ExchangeRoute, AdapterExchangePort] = {}
 
-    def _port(self, symbol: Symbol) -> AdapterExchangePort:
-        key = str(symbol)
-        existing = self._ports.get(key)
+    def _route(self, command: DragonSong) -> ExchangeRoute:
+        exchange = normalise_exchange_name(command.exchange or self.exchange)
+        market_type = (command.market_type or self.market_type).strip().lower()
+        if market_type not in SUPPORTED_MARKET_TYPES:
+            raise ValueError(
+                f"Unsupported market type '{market_type}' for command {command.pair_name}"
+            )
+        if not exchange_supports_market_type(exchange, market_type):
+            reason = unsupported_market_message(exchange, market_type)
+            raise ValueError(
+                f"Market type '{market_type}' {reason} for command {command.pair_name}"
+            )
+        return ExchangeRoute(exchange=exchange, market_type=market_type, symbol=str(command.symbol))
+
+    def _config_for_route(self, route: ExchangeRoute) -> ExchangeConfig:
+        if self.exchange_config_loader is not None:
+            return self.exchange_config_loader(route)
+        if route.exchange != self.exchange or route.market_type != self.market_type:
+            raise RuntimeError(
+                f"No exchange config loader for route {route.label}; "
+                f"default route is {self.exchange}:{self.market_type}"
+            )
+        if self.exchange_config is None:
+            raise RuntimeError("Exchange configuration is required for active execution")
+        return replace(
+            self.exchange_config,
+            symbol=route.symbol,
+            adapter_kwargs={
+                **self.exchange_config.adapter_kwargs,
+                "market_type": route.market_type,
+            },
+        )
+
+    def _port(self, command: DragonSong) -> AdapterExchangePort:
+        route = self._route(command)
+        existing = self._ports.get(route)
         if existing is not None:
             return existing
+        exchange_config = self._config_for_route(route)
         port = AdapterExchangePort(
-            exchange=self.exchange,
-            exchange_config=replace(self.exchange_config, symbol=key),
+            exchange=route.exchange,
+            market_type=route.market_type,
+            exchange_config=exchange_config,
             verify_timeout_seconds=self.verify_timeout_seconds,
             verify_poll_seconds=self.verify_poll_seconds,
             run_blocking_calls_in_thread=self.run_blocking_calls_in_thread,
             verify_tail_on_place=self.verify_tail_on_place,
         )
-        self._ports[key] = port
+        self._ports[route] = port
         return port
 
     async def place_head(self, command: PlaceHeadCommand) -> OrderAck:
-        return await self._port(command.symbol).place_head(command)
+        return await self._port(command).place_head(command)
 
     async def place_tail(self, command: PlaceTailCommand) -> OrderAck:
-        return await self._port(command.symbol).place_tail(command)
+        return await self._port(command).place_tail(command)
 
     async def amend_head(self, command: AmendHeadCommand) -> OrderAck:
-        return await self._port(command.symbol).amend_head(command)
+        return await self._port(command).amend_head(command)
 
     async def amend_tail(self, command: AmendTailCommand) -> OrderAck:
-        return await self._port(command.symbol).amend_tail(command)
+        return await self._port(command).amend_tail(command)
 
     async def cancel(self, command: CancelCommand) -> OrderAck:
-        return await self._port(command.symbol).cancel(command)
+        return await self._port(command).cancel(command)
 
 
 def _matching_tail_trigger_order(
@@ -1305,22 +1988,62 @@ def _extract_cancelable_order_id(order: dict[str, object]) -> str | None:
     return None
 
 
+def _market_close_order_params(market_type: str) -> dict[str, Any]:
+    if market_type == DEFAULT_MARKET_TYPE:
+        return {
+            "action": "submitted_reduce_only_market",
+            "params": {"reduceOnly": True},
+        }
+    return {
+        "action": "submitted_market_close",
+        "params": {},
+    }
+
+
+def _public_feeder_hint(route: ExchangeRoute) -> str:
+    return (
+        "scripts/kolabidb public start"
+        f" --exchange {route.exchange}"
+        f" --market-type {route.market_type}"
+        f" --pair {route.symbol}"
+    )
+
+
+def _private_feeder_hint(route: ExchangeRoute, account_scope: str) -> str:
+    return (
+        "scripts/kolabidb private start"
+        f" --exchange {route.exchange}"
+        f" --market-type {route.market_type}"
+        f" --pair {route.symbol}"
+        f" --account-scope {account_scope}"
+    )
+
+
 def _is_kolabi_order_record(record: PrivateOrderRecord) -> bool:
     client_id = record.client_order_id or ""
     return bool(_KOLABI_ORDER_CLIENT_ID_RE.match(client_id))
 
 
 def _private_order_key(record: PrivateOrderRecord) -> str | None:
+    route = _record_route_label(record)
     if record.exchange_order_id:
-        return f"exchange:{record.exchange_order_id}"
+        return f"{route}:exchange:{record.exchange_order_id}"
     if record.client_order_id:
-        return f"client:{record.client_order_id}"
+        return f"{route}:client:{record.client_order_id}"
     return None
+
+
+def _record_route_label(record: PrivateOrderRecord) -> str:
+    return (
+        f"{record.exchange or '-'}:"
+        f"{record.market_type or '-'}:"
+        f"{record.symbol}"
+    )
 
 
 def _private_order_summary(record: PrivateOrderRecord) -> str:
     return (
-        f"symbol={record.symbol} client_id={record.client_order_id or '-'} "
+        f"route={_record_route_label(record)} client_id={record.client_order_id or '-'} "
         f"order_id={record.exchange_order_id or '-'} side={record.side or '-'} "
         f"qty={record.quantity if record.quantity is not None else '-'} "
         f"price={record.stop_price if record.stop_price is not None else record.price or '-'} "
@@ -1369,30 +2092,101 @@ def _validate_order_prices(
         raise ValueError(f"Order pair '{pair_name}' trigger-limit order needs a limit price")
 
 
-def _validate_binance_pair_grammar(pair: OrderPairSpec) -> None:
+def _validate_binance_pair_grammar(
+    pair: OrderPairSpec,
+    market_type: str,
+) -> None:
     """Fail unsupported Binance grammar at preflight, before REST submission."""
 
     for role, raw in (("head", pair.head.order_type), ("tail", pair.tail.order_type)):
         code = parse_order_code(raw)
-        if code.base_key not in {"M", "L", "S"}:
+        supported = {"M", "L", "S"} if market_type == DEFAULT_MARKET_TYPE else {"M", "L", "S", "SL"}
+        if code.base_key not in supported:
             raise ValueError(
-                f"Binance Futures does not support {code.base} {role} orders in v1; "
-                "use M, L, or S."
+                f"Binance {market_type} does not support {code.base} {role} orders in v1; "
+                f"use {', '.join(sorted(supported))}."
             )
-        if code.price_suffix == "i":
+        if market_type == DEFAULT_MARKET_TYPE and code.price_suffix == "i":
             raise ValueError(
                 f"Binance Futures does not support index-price triggers for {role} "
                 f"order type '{raw}'. Use last/contract or mark price."
             )
+        if market_type != DEFAULT_MARKET_TYPE and code.price_suffix in {"i", "m"}:
+            raise ValueError(
+                f"Binance {market_type} does not support mark/index-price triggers "
+                f"for {role} order type '{raw}'. Use last price."
+            )
+        if market_type != DEFAULT_MARKET_TYPE and code.reduce_only:
+            raise ValueError(
+                f"Binance {market_type} does not support reduce-only {role} order "
+                f"type '{raw}'."
+            )
         if code.post_only and code.base_key != "L":
             raise ValueError(
-                f"Binance Futures post-only is only supported on limit orders; got {raw}."
+                f"Binance {market_type} post-only is only supported on limit orders; got {raw}."
+            )
+
+
+def _validate_kraken_pair_grammar(
+    pair: OrderPairSpec,
+    market_type: str,
+) -> None:
+    """Fail unsupported Kraken spot/margin grammar before REST submission."""
+
+    if market_type == DEFAULT_MARKET_TYPE:
+        return
+    supported = {"M", "L", "S", "SL"}
+    for role, raw in (("head", pair.head.order_type), ("tail", pair.tail.order_type)):
+        code = parse_order_code(raw)
+        if code.base_key not in supported:
+            raise ValueError(
+                f"Kraken {market_type} does not support {code.base} {role} orders in v1; "
+                f"use {', '.join(sorted(supported))}."
+            )
+        if code.price_suffix in {"i", "m"}:
+            raise ValueError(
+                f"Kraken {market_type} does not support mark/index-price triggers "
+                f"for {role} order type '{raw}'. Use last price."
+            )
+        if code.reduce_only:
+            raise ValueError(
+                f"Kraken {market_type} does not support reduce-only {role} order "
+                f"type '{raw}'."
+            )
+
+
+def _validate_bitmex_pair_grammar(
+    pair: OrderPairSpec,
+    market_type: str,
+) -> None:
+    """Fail unsupported BitMEX spot grammar before REST submission."""
+
+    if market_type != "spot":
+        return
+    supported = {"M", "L"}
+    for role, raw in (("head", pair.head.order_type), ("tail", pair.tail.order_type)):
+        code = parse_order_code(raw)
+        if code.price_suffix in {"i", "m"}:
+            raise ValueError(
+                f"BitMEX spot does not support mark/index-price triggers "
+                f"for {role} order type '{raw}'. Use last price."
+            )
+        if code.reduce_only:
+            raise ValueError(
+                f"BitMEX spot does not support reduce-only {role} order "
+                f"type '{raw}'."
+            )
+        if code.base_key not in supported:
+            raise ValueError(
+                f"BitMEX spot does not support {code.base} {role} orders in v1; "
+                f"use {', '.join(sorted(supported))}."
             )
 
 
 @dataclass(frozen=True)
 class _InterruptCleanupTarget:
     pair_name: str
+    route: ExchangeRoute
     close_side: str
     played_quantity: float
     tail_client_order_id: str | None
@@ -1416,6 +2210,12 @@ def _interrupt_cleanup_targets(runtime: StrategyRuntime) -> tuple[_InterruptClea
         targets.append(
             _InterruptCleanupTarget(
                 pair_name=pair_name,
+                route=resolve_pair_route(
+                    pair_state.pair,
+                    default_exchange=runtime.exchange,
+                    default_symbol=runtime.symbol,
+                    default_market_type=runtime.market_type,
+                ),
                 close_side=close_side,
                 played_quantity=played_quantity,
                 tail_client_order_id=None if identity is None else identity.client_order_id,

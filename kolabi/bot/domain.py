@@ -190,6 +190,8 @@ class OrderPairSpec:
     amount_type: str
     hook_name: str | None = None
     symbol: str | None = None
+    exchange: str | None = None
+    market_type: str | None = None
 
     @property
     def attempts(self) -> int:
@@ -225,6 +227,8 @@ class OrderIdentity:
     client_order_id: str | None = None
     exchange_order_id: str | None = None
     symbol: str | None = None
+    exchange: str | None = None
+    market_type: str | None = None
 
 
 @dataclass(frozen=True)

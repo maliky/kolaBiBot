@@ -2455,6 +2455,127 @@ def test_public_polling_waits_for_bare_hook_dependency_before_baseline() -> None
     assert any(event.pair_name == "repS-lk" for event in runtime.events)
 
 
+def test_public_polling_hooks_cross_exchange_chained_child_on_child_route() -> None:
+    origin = replace(
+        sample_strategy()[0],
+        name="kraken-origin",
+        symbol="PI_XBTUSD",
+        exchange="kraken",
+        market_type="futures",
+    )
+    child = replace(
+        sample_strategy()[0],
+        name="binance-child",
+        hook_name="kraken-origin-tail-closed",
+        symbol="BTCUSDT",
+        exchange="binance",
+        market_type="spot",
+    )
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="cross-exchange-chain", pairs=(origin, child)),
+        symbol="PI_XBTUSD",
+        exchange="kraken",
+        market_type="futures",
+        simulate=False,
+    )
+    closed_at = runtime.state.launched_at + timedelta(minutes=1)
+    released_state = replace(
+        runtime.state,
+        pairs={
+            "kraken-origin": PairCycleState(
+                pair=origin,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.CLOSED,
+                played_quantity=Decimal("1"),
+            ),
+            "binance-child": runtime.state.pairs["binance-child"],
+        },
+    )
+    runtime.chronos.state = released_state
+    runtime.chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=closed_at,
+            symbol="PI_XBTUSD",
+            pair_name="kraken-origin",
+            role=OrderRole.TAIL,
+            reply={"orderID": "OID-ORIGIN-TAIL", "ordStatus": "Filled", "cumQty": "1"},
+            event_id="origin-tail-closed",
+            is_private=True,
+        )
+    )
+    assert runtime.chronos.state.pairs["binance-child"].dependency_token is not None
+
+    class Market:
+        best_bid = 100.0
+        best_ask = 100.5
+        mid_price = 100.25
+        last_price = 100.4
+        mark_price = None
+        index_price = None
+        tick_size = 0.01
+
+        def __init__(self, recorded_at: str) -> None:
+            self.recorded_at = recorded_at
+
+    class Client:
+        def __init__(self, runtime_obj) -> None:
+            self.runtime = runtime_obj
+            self.calls: list[tuple[str | None, str | None, str | None]] = []
+
+        def fetch_market_state(
+            self,
+            symbol=None,
+            exchange=None,
+            market_type=None,
+        ):
+            self.calls.append((exchange, market_type, symbol))
+            self.runtime.running = False
+            return Market(f"{exchange}:{market_type}:{symbol}")
+
+    class PublicRuntime:
+        symbol = "PI_XBTUSD"
+        exchange = "kraken"
+        market_type = "futures"
+        running = True
+        all_pairs_terminal = False
+        should_keep_sources_alive = False
+
+        def __init__(self, state) -> None:
+            self.strategy = StrategySpec(
+                name="cross-exchange-chain",
+                pairs=(origin, child),
+            )
+            self.state = state
+            self.events: list[EggMove] = []
+
+        async def enqueue(self, event: EggMove) -> None:
+            self.events.append(event)
+
+        def pair_state_for_record(
+            self,
+            _record: object,
+        ) -> tuple[PairCycleState, OrderRole] | None:
+            return None
+
+    public_runtime = PublicRuntime(runtime.chronos.state)
+    client = Client(public_runtime)
+    source = KrakenPublicTriggerSource(client, poll_seconds=0.0)
+
+    asyncio.run(source.pump(public_runtime))
+
+    assert ("binance", "spot", "BTCUSDT") in client.calls
+    assert [event.pair_name for event in public_runtime.events] == ["binance-child"]
+    child_commands = runtime.chronos.process_event(public_runtime.events[0])
+    assert len(child_commands) == 1
+    command = child_commands[0]
+    assert isinstance(command, PlaceHeadCommand)
+    assert command.pair_name == "binance-child"
+    assert command.exchange == "binance"
+    assert command.market_type == "spot"
+    assert str(command.symbol) == "BTCUSDT"
+
+
 def test_market_tick_reaches_horus_as_tail_amend_command() -> None:
     pair = sample_strategy()[0]
     confirmed_at = datetime.now(timezone.utc)

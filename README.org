@@ -1,7 +1,7 @@
 Kolabi Bot
 
 * Presentation
-Kolabi is a typed, DB-grounded, async order-pair bot for derivatives/perpetual markets. The active production path is the TSV strategy runtime in =kolabi.bot=, backed by public market-data feeders and private account/order feeders in =kolabi.tree=. Kraken Futures is the primary live path. Binance USD-M Futures support is present in the shared adapter/feed layer and is being brought up behind the same DB-grounded architecture.
+Kolabi is a typed, DB-grounded, async order-pair bot for exchange-routed spot, margin, and futures strategies. The active production path is the TSV strategy runtime in =kolabi.bot=, backed by public market-data feeders and private account/order feeders in =kolabi.tree=. Kraken, Binance, and BitMEX now share the same DB-grounded route model: every order row resolves to an exchange, market type, and native exchange symbol.
 
 The core strategy unit is an order pair:
 - a =head= order enters or opens the position;
@@ -10,17 +10,17 @@ The core strategy unit is an order pair:
 
 * Supported Platforms
 
-- =kraken= is the current primary platform for demo and live Kraken Futures.
-- =binance= has adapter and feed support for USD-M Futures, but should be treated as a bring-up path until its full operational runbook is validated.
-- =bitmex= remains only as legacy compatibility and historical test context.
+- =kraken=: futures, spot, and spot-margin via =KRKF=, =KRKS=, and =KRKM= route codes.
+- =binance=: futures, spot, cross-margin, and isolated-margin via =BINF=, =BINS=, =BINM=, and =BINI= route codes.
+- =bitmex=: futures and spot via =BTX= / =BTXF= and =BTXS= route codes, with =BMXF= / =BMXS= kept as aliases.
 
-The bot invocation runs one platform at a time. TSV rows may carry platform-specific symbols directly; no canonical symbol mapping table is used.
+The bot can run a strategy file whose rows target different exchange routes. TSV rows may carry platform-specific symbols directly; no canonical symbol mapping table is used. Each active route needs matching public and private DB feeder evidence before live execution.
 
 * Strategy Conditions
 
 Each pair can be gated by:
 - an entry window, =tps_run=, in minutes from launch;
-- a price interval, =prix=, interpreted by =atype=;
+- a typed price interval, =prix=;
 - a head timeout, =tOut=, for unfilled head orders;
 - a repeat count, =essais= / =-n=;
 - a pause between repetitions, =pause= / =-p=;
@@ -34,18 +34,16 @@ Important runtime semantics:
 
 * Price, Quantity, And Tail Units
 
-The compatibility vocabulary is encoded in =atype=:
-- =pD= means the head price interval is differential from the reference price.
-- =p%= means the head price interval is percent from the reference price.
-- =pA= means the head price interval is absolute.
-- =qA= means absolute quantity.
-- =q%= means quantity as a percentage where supported by the strategy path.
-- =tD= means tail distance is differential.
-- =t%= means tail distance is percent.
-- =tA= means tail price is absolute.
-- =oD= / =o%= control optional head offsets where the order type supports them.
+The active TSV grammar puts the type prefix on each non-empty value:
+- =prix= uses =D=, =%=, or =A= before its two bounds, for example =D- +=, =D- -5=, or =%0.20 0.30=.
+- =qty= uses =A= or =%=, for example =A3=.
+- =tp= uses =D=, =%=, or =A=, for example =D20= or =%0.10=.
+- =oDelta= uses =D= or =%=, for example =D6= or =%0.20=.
+- =tDelta= uses =D= when present.
 
-The =prix= field is a two-bound interval, not a single price. Use semi-open operator style in TSV files when appropriate, for example =- -5= or =5 +=, so the parser can translate the condition into a bounded internal interval.
+Only empty typed fields receive implicit defaults. A non-empty typed value without its prefix is rejected. The old compact =atype= grammar is still accepted for compatibility files, but new files should not use it.
+
+The =prix= field is a two-bound interval, not a single price. Use semi-open operator style in TSV files when appropriate, for example =D- -5= or =D5 +=, so the parser can translate the condition into a bounded internal interval.
 
 * TSV Strategy Files
 
@@ -54,13 +52,14 @@ Strategy files live under =orders/=.
 The active TSV grammar is:
 
 #+begin_example
-name  tps_run  essais  tOut  pause  side  oType  oDelta  tType  tDelta  atype  quantity  tp  prix  hook  symbol
+exchg  symbol  name  tps_run  essais  tOut  pause  side  oType  oDelta  qty  tType  tDelta  prix  tp  hook
 #+end_example
 
-The final =symbol= column is optional. When omitted, the CLI =--symbol= is used. When present, the row uses the platform-specific instrument directly, for example =PI_XBTUSD= or =PF_ADAUSD=. A multi-instrument TSV run requires one shared market DB URL and public feeders for every active symbol.
+The =exchg= and =symbol= columns are optional. When =exchg= is omitted, the CLI =--exchange= and =--market-type= are used. When =symbol= is omitted, the effective CLI symbol is used. If CLI =--symbol= is also omitted, the route default is selected: =PI_XBTUSD= for Kraken futures, =XBT/USD= for Kraken spot/margin, =BTCUSDT= for Binance futures/spot/margin/isolated margin, =XBTUSD= for BitMEX futures, and =XBT_USDT= for BitMEX spot. When present, rows use platform-specific symbols directly, for example =PI_XBTUSD=, =BTCUSDT=, or =XBTUSD=. Empty TSV columns are ignored. A multi-route TSV run requires one shared market DB URL and public/private feeders for every active exchange, market type, account scope, and symbol.
 
 Useful examples:
 - =orders/demo_ada.tsv= documents compact grammar examples.
+- =orders/demo_cross_exchange_chain.tsv= demonstrates the typed multi-exchange grammar.
 - =orders/demo_kraken_xbt.tsv= covers Kraken XBT combinations.
 - =orders/chained_xbt.tsv= exercises chained order flow.
 - =orders/rep_xbt.tsv= exercises repetition.
@@ -69,19 +68,30 @@ Useful examples:
 * DB And Feed Services
 
 The runtime expects fresh DB-backed evidence before active execution:
-- public market snapshots from =kolabi.tree.kraken= or =kolabi.tree.binance=;
-- private order/fill/account state from =kolabi.tree.account= or =kolabi.tree.binance_account=;
+- public market snapshots from =kolabi.tree.kraken=, =kolabi.tree.binance=, or =kolabi.tree.bitmex=;
+- private order/fill/account state from =kolabi.tree.account=, =kolabi.tree.binance_account=, or =kolabi.tree.bitmex_account=;
 - a critical private lane for open orders and fills;
 - optional REST audit and tail telemetry lanes.
 
 PostgreSQL is the supported local runtime backend. Use =scripts/kolabidb postgres start= and the lane URLs from =.env.postgres= for public, private, critical, audit, and telemetry storage.
 
-Start the default Kraken demo lanes:
+Start the default Kraken Futures demo lanes:
 
 #+begin_src bash
 scripts/kolabidb postgres start
-scripts/kolabidb public start --environment demo --pair PI_XBTUSD
-scripts/kolabidb private start --environment demo --account-scope default
+scripts/kolabidb public start --exchange kraken --market-type futures --environment demo --pair PI_XBTUSD
+scripts/kolabidb private start --exchange kraken --market-type futures --environment demo --account-scope default
+#+end_src
+
+Start other route lanes by selecting the same exchange and market type that appears in the TSV:
+
+#+begin_src bash
+scripts/kolabidb public start --exchange binance --market-type spot --environment demo --pair BTCUSDT
+scripts/kolabidb private start --exchange binance --market-type spot --environment demo --account-scope default
+scripts/kolabidb public start --exchange kraken --market-type margin --environment live --pair XBT/USD
+scripts/kolabidb private start --exchange kraken --market-type margin --environment live --account-scope default
+scripts/kolabidb public start --exchange bitmex --market-type futures --environment demo --pair XBTUSD
+scripts/kolabidb private start --exchange bitmex --market-type futures --environment demo --account-scope default
 #+end_src
 
 Check service status and logs:
@@ -95,23 +105,36 @@ scripts/kolabidb private logs --environment demo --account-scope default
 
 * Operator Commands
 
+When =--symbol= is omitted in =kolabi.bargain.cli=, =kolabi.bargain.smoke=, or =kolabi.bot=, the route default follows =--exchange= and =--market-type=: Kraken futures =PI_XBTUSD=, Kraken spot/margin =XBT/USD=, Binance lanes =BTCUSDT=, BitMEX futures =XBTUSD=, and BitMEX spot =XBT_USDT=.
+
+The =routes= command also reports =permission_probe=, =order_write_probe=, and =demo_requires_base_url_override=. Binance spot/futures can prove order-write with a no-order =test_order= endpoint. BitMEX can read =apiKey= metadata but that does not prove order-write unless the returned permissions include it. Kraken spot/margin and Binance margin demo lanes require an explicit market-capable demo base URL before adapter construction.
+
+The bot =preflight= command reports =credentials_ready=, =base_urls_ready=, and =route_config_ready= for the effective route set. It reports base URL source names such as =override= or an env var name, not the URL value.
+
 
 
 #+begin_src bash
+  # Show route codes, default symbols, expected credential env names, and key/secret presence without connecting:
+  python -m kolabi.bargain.cli --environment demo routes
+
   # List instruments and find exact symbols:  
-  python -m kolabi.bargain.cli --exchange kraken --environment live instruments --contains ADA
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --environment live instruments --contains ADA
 
   # Validate a selected symbol:
-  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_ADAUSD check-symbol
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --environment demo --symbol PI_ADAUSD check-symbol
 
   # Read account state:
-  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD balance
-  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD position
-  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD open-orders
-  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD trigger-orders
+  python -m kolabi.bargain.cli --exchange bitmex --market-type futures --environment demo permissions
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --environment demo --symbol PI_XBTUSD balance
+  python -m kolabi.bargain.cli --exchange binance --market-type spot --environment demo --symbol BTCUSDT open-orders
+  python -m kolabi.bargain.cli --exchange binance --market-type margin --environment live --symbol BTCUSDT trigger-orders
 
   # Emergency cleanup:
-  python -m kolabi.bargain.cli --exchange kraken --environment demo --symbol PI_XBTUSD close-all
+  python -m kolabi.bargain.cli --exchange kraken --market-type futures --environment demo --symbol PI_XBTUSD close-all
+
+  # Show and run the lane-aware smoke order plan:
+  python -m kolabi.bargain.smoke --exchange binance --market-type spot --symbol BTCUSDT --environment demo --list-orders
+  python -m kolabi.bargain.smoke --exchange kraken --market-type futures --symbol PI_XBTUSD --environment demo --only limit_below --sleep-seconds 2
 #+end_src
 
 * Running The Bot
@@ -121,12 +144,15 @@ scripts/kolabidb private logs --environment demo --account-scope default
 
   # Run a TSV strategy through the async runtime:
   python -m kolabi.bot run --strategy orders/rep_xbt.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
+  python -m kolabi.bot run --strategy orders/demo_margin.tsv --exchange binance --market-type margin --environment demo --base-url https://margin-demo.example.test
 
   # Run one compatibility-vocabulary order pair:
   python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run
 
-  # Preflight runtime readiness:
+  # Preflight route credential and DB readiness:
   python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo
+  python -m kolabi.bot preflight --exchange binance --market-type spot --environment demo --api-key-env BINS_DEMO_API_KEY --api-secret-env BINS_DEMO_API_SECRET
+  python -m kolabi.bot preflight --exchange binance --market-type margin --environment demo --base-url https://margin-demo.example.test --api-key-env BINM_DEMO_API_KEY --api-secret-env BINM_DEMO_API_SECRET
 #+end_src
 
 Live/preprod should be launched only after a clean demo run, fresh public/private DB state, no unexpected open orders or positions, and an explicit dry-run of the exact strategy. Start live with small size, =--max-active-pairs 1=, =--rest-max-inflight 1=, and a non-zero =--rest-min-interval=.
@@ -144,10 +170,10 @@ python -m pip install -e .
 Credential values should come from environment variables or a local env file that is not committed. Kraken defaults are:
 
 #+begin_example
-KRAKEN_FUTURE_DEMO_API_KEY
-KRAKEN_FUTURE_DEMO_API_SECRET
-KRAKEN_FUTURE_API_KEY
-KRAKEN_FUTURE_API_SECRET
+KRKF_DEMO_API_KEY
+KRKF_DEMO_API_SECRET
+KRKF_API_KEY
+KRKF_API_SECRET
 #+end_example
 
 Use =--api-key-env= and =--api-secret-env= when selecting a non-default account.
@@ -186,7 +212,7 @@ as operator-facing aliases.
 kolabi/
 |- bargain/                     # direct exchange-facing operator tools
 |  |- cli.py                      # direct Kraken Futures CLI: balance, position, limit, market, amend, cancel
-|  `- smoke.py                    # paced smoke-test runner for standard Kraken order kinds
+|  `- smoke.py                    # paced smoke-test runner with exchange/market aware order plans
 |- bot/                         # active strategy entrypoint layer
 |  |- __main__.py                 # bot CLI: run, preflight, run-once
 |  |- chronos.py                  # async repetition/dependency supervisor helpers
@@ -215,7 +241,8 @@ kolabi/
 |- shared/                      # common exchange and persistence layer
 |  |- config.py                   # exchange config resolution and credentials
 |  |- kraken_futures.py           # demo/live Kraken Futures endpoint mapping
-|  |- binance_futures.py          # demo/live Binance Futures endpoint mapping
+|  |- binance_futures.py          # demo/live Binance Futures endpoint and DB mapping
+|  |- bitmex_futures.py           # demo/live BitMEX endpoint and DB mapping
 |  |- logging.py                  # common logger setup
 |  |- pruning.py                  # central retention defaults for DB lanes
 |  |- runtime_state.py            # combined public/private DB readiness view
@@ -225,18 +252,20 @@ kolabi/
 |  |  |- runtime_types.py           # shared enum-like runtime constants
 |  |  `- types.py                   # abstract exchange interfaces
 |  |- exchanges/
-|  |  |- kraken_adapter.py          # active Kraken Futures adapter
-|  |  |- binance_adapter.py         # Binance USD-M Futures adapter
-|  |  `- bitmex_adapter.py          # retained adapter for legacy compatibility and tests
+|  |  |- kraken_adapter.py          # Kraken futures, spot, and margin adapter
+|  |  |- binance_adapter.py         # Binance futures, spot, cross-margin, and isolated-margin adapter
+|  |  `- bitmex_adapter.py          # BitMEX futures and spot adapter
 |  `- persistence/
 |     |- db.py                      # SQLAlchemy session helpers
 |     |- models.py                  # shared persistence models
 |     `- retention.py               # lane-scoped pruning helpers
 `- tree/                        # market and account state services
-   |- kraken.py                   # public Kraken Futures book service
-   |- account.py                  # private Kraken Futures account and order service
-   |- binance.py                  # public Binance Futures book service
-   |- binance_account.py          # private Binance Futures account/order service
+   |- kraken.py                   # public Kraken futures/spot/margin book service
+   |- account.py                  # private Kraken futures/spot/margin account and order service
+   |- binance.py                  # public Binance futures/spot/margin book service
+   |- binance_account.py          # private Binance futures/spot/margin account/order service
+   |- bitmex.py                   # public BitMEX futures/spot book service
+   |- bitmex_account.py           # private BitMEX REST account/order reconciler
    `- service.py                  # shared service helpers for tree modules
 
 orders/                       # example strategy definitions

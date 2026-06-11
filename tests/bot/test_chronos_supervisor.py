@@ -17,6 +17,7 @@ from kolabi.bot.domain import (
     HeadSpec,
     HeadState,
     OrderIdentity,
+    OrderRole,
     OrderPairSpec,
     PairCycleState,
     Side,
@@ -306,6 +307,87 @@ def test_tail_closed_hook_does_not_activate_on_head_close_only() -> None:
     assert chronos.state.pairs["pair-x"].head_state == HeadState.CLOSED
     assert chronos.state.pairs["pair-x"].tail_state == TailState.HOOKED
     assert chronos.state.pairs["pair-y"].head_state == HeadState.LATENT
+    assert pair_dependency_satisfied(chronos.state, chronos.state.pairs["pair-y"]) is False
+
+
+def test_head_filled_hook_activates_dependent_pair_on_head_fill() -> None:
+    pair_x = sample_pair("pair-x")
+    pair_y = replace(sample_pair("pair-y"), hook_name="pair-x-head-filled")
+    state = StrategyState(
+        launched_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
+        strategy_id="strategy-head-chain",
+        pairs={
+            "pair-x": PairCycleState(
+                pair=pair_x,
+                head_state=HeadState.SUBMITTED,
+                head_identity=OrderIdentity(
+                    pair_name="pair-x",
+                    role="head",
+                    client_order_id="CID-X-H",
+                    exchange_order_id="OID-X-H",
+                ),
+            ),
+            "pair-y": PairCycleState(pair=pair_y),
+        },
+    )
+    chronos = Chronos(state=state)
+
+    commands = chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc),
+            symbol="PI_XBTUSD",
+            pair_name="pair-x",
+            role=OrderRole.HEAD,
+            event_id="evt-head-filled",
+            reply={
+                "orderID": "OID-X-H",
+                "clOrdID": "CID-X-H",
+                "cumQty": 1.0,
+                "orderQty": 1.0,
+            },
+            is_private=True,
+        )
+    )
+
+    assert commands
+    assert {command.pair_name for command in commands} == {"pair-x"}
+    assert chronos.state.pairs["pair-y"].head_state == HeadState.LATENT
+    assert pair_dependency_satisfied(chronos.state, chronos.state.pairs["pair-y"]) is True
+
+
+def test_head_filled_hook_ignores_tail_close_event() -> None:
+    pair_x = sample_pair("pair-x")
+    pair_y = replace(sample_pair("pair-y"), hook_name="pair-x-head-filled")
+    state = StrategyState(
+        launched_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
+        strategy_id="strategy-head-chain",
+        pairs={
+            "pair-x": PairCycleState(
+                pair=pair_x,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.CLOSED,
+                played_quantity=Decimal("1"),
+            ),
+            "pair-y": PairCycleState(pair=pair_y),
+        },
+    )
+    chronos = Chronos(state=state)
+
+    commands = chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=datetime(2026, 5, 21, 12, 7, tzinfo=timezone.utc),
+            symbol="PI_XBTUSD",
+            pair_name="pair-x",
+            role=OrderRole.TAIL,
+            event_id="evt-tail-closed",
+            reply={"orderID": "OID-X-T", "cumQty": 1.0, "orderQty": 1.0},
+            is_private=True,
+        )
+    )
+
+    assert commands == ()
     assert pair_dependency_satisfied(chronos.state, chronos.state.pairs["pair-y"]) is False
 
 

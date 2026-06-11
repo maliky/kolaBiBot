@@ -304,6 +304,8 @@ def head_identity_from_move(
         client_order_id=str(client_order_id) if client_order_id is not None else None,
         exchange_order_id=str(order_id) if order_id is not None else None,
         symbol=move.symbol or state.pair.symbol,
+        exchange=state.pair.exchange,
+        market_type=state.pair.market_type,
     )
 
 
@@ -323,6 +325,8 @@ def tail_identity_from_move(
         client_order_id=str(client_order_id) if client_order_id is not None else None,
         exchange_order_id=str(order_id) if order_id is not None else None,
         symbol=move.symbol or state.pair.symbol,
+        exchange=state.pair.exchange,
+        market_type=state.pair.market_type,
     )
 
 

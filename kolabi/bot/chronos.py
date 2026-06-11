@@ -21,6 +21,7 @@ from kolabi.bot.domain import (
     EggMove,
     EggMoveKind,
     HeadState,
+    OrderRole,
     PairCycleState,
     StrategyState,
     TailState,
@@ -57,6 +58,17 @@ class PendingRepeat:
     pair_name: str
     ready_at: datetime
     next_attempt: int
+
+
+class HookTargetKind(StrEnum):
+    HEAD_FILLED = "head_filled"
+    PAIR_CLOSED = "pair_closed"
+
+
+@dataclass(frozen=True)
+class HookTarget:
+    origin_pair_name: str
+    kind: HookTargetKind
 
 
 @dataclass
@@ -268,14 +280,14 @@ class Chronos:
         return tuple(per_pair.values())
 
     def _activate_dependent_pairs(self, event: EggMove) -> tuple[DragonSong, ...]:
-        """Release dependent pairs after a fresh successful origin close."""
+        """Release dependent pairs after a fresh matching origin event."""
         origin_pair = resolve_pair_name(self.state, event) or event.pair_name
         if origin_pair is None:
             return ()
-        if not _is_private_terminal(event):
+        if not event.is_private:
             return ()
         origin_state = self.state.pairs.get(origin_pair)
-        if origin_state is None or not _pair_closed_successfully(origin_state):
+        if origin_state is None:
             return ()
         replacements: dict[str, PairCycleState] = {}
         for pair_name, pair_state in self.state.pairs.items():
@@ -285,7 +297,10 @@ class Chronos:
                 continue
             if pair_state.dependency_token is not None:
                 continue
-            if _hook_origin_pair_name(pair_state.pair.hook_name or "") != origin_pair:
+            target = parse_hook_target(pair_state.pair.hook_name)
+            if target is None or target.origin_pair_name != origin_pair:
+                continue
+            if not hook_target_satisfied(target, event, origin_state):
                 continue
             if not pair_window_is_open(
                 pair_state.pair,
@@ -522,12 +537,34 @@ def pair_dependency_satisfied(state: StrategyState, pair_state: PairCycleState) 
     return pair_state.dependency_token is not None
 
 
-def _hook_origin_pair_name(hook_name: str) -> str | None:
+def parse_hook_target(raw: str | None) -> HookTarget | None:
+    """Parse one strategy hook dependency into a typed activation target."""
+
+    hook_name = (raw or "").strip()
+    if not hook_name:
+        return None
+    if hook_name.endswith("-head-filled"):
+        origin_name = hook_name[: -len("-head-filled")]
+        return None if not origin_name else HookTarget(origin_name, HookTargetKind.HEAD_FILLED)
     for suffix in ("-tail-closed", "-closed"):
         if hook_name.endswith(suffix):
             origin_name = hook_name[: -len(suffix)]
-            return origin_name or None
-    return hook_name or None
+            return None if not origin_name else HookTarget(origin_name, HookTargetKind.PAIR_CLOSED)
+    return HookTarget(hook_name, HookTargetKind.PAIR_CLOSED)
+
+
+def hook_target_satisfied(
+    target: HookTarget,
+    event: EggMove,
+    origin_state: PairCycleState,
+) -> bool:
+    """Return true when a private origin event satisfies a hook target."""
+
+    if target.kind == HookTargetKind.HEAD_FILLED:
+        return _is_private_head_filled(event, origin_state)
+    if target.kind == HookTargetKind.PAIR_CLOSED:
+        return _is_private_terminal(event) and _pair_closed_successfully(origin_state)
+    return False
 
 
 def _pair_closed_successfully(pair_state: PairCycleState) -> bool:
@@ -537,3 +574,16 @@ def _pair_closed_successfully(pair_state: PairCycleState) -> bool:
     if not played:
         return True
     return pair_state.tail_state == TailState.CLOSED
+
+
+def _is_private_head_filled(event: EggMove, pair_state: PairCycleState) -> bool:
+    if not event.is_private:
+        return False
+    if event.role not in {None, OrderRole.HEAD}:
+        return False
+    if event.kind not in {
+        EggMoveKind.PLAYED_NOT_CANCELED,
+        EggMoveKind.PLAYED_AND_CANCELED,
+    }:
+        return False
+    return pair_state.played_quantity is not None and pair_state.played_quantity > 0

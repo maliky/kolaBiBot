@@ -16,7 +16,7 @@ from decimal import Decimal
 from typing import cast
 
 from kolabi.bot.domain import OrderPairSpec, PairCycleState, opposite_side
-from kolabi.bot.order_codes import base_order_type, order_exec_inst
+from kolabi.bot.order_codes import base_order_type, order_exec_inst, parse_order_code
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
     AmendOrderCommandRequest,
@@ -145,9 +145,12 @@ def tail_order_dict(state: PairCycleState) -> OrderDict:
     quantity = resolve_tail_quantity(state)
     if quantity is not None:
         order["orderQty"] = cast(OrderQty, to_decimal(quantity))
-    stop_price = tail_stop_price(state)
+    stop_price = tail_trigger_price(state)
     if stop_price is not None:
         order["stopPx"] = cast(StopPrice, to_decimal(stop_price))
+    limit_price = tail_limit_price(state)
+    if limit_price is not None:
+        order["price"] = cast(LimitPrice, to_decimal(limit_price))
     tail_offset = _tail_exchange_offset(state)
     if tail_offset is not None:
         order["oDelta"] = tail_offset
@@ -156,12 +159,17 @@ def tail_order_dict(state: PairCycleState) -> OrderDict:
 
 def tail_place_request(state: PairCycleState) -> PlaceOrderCommandRequest:
     quantity = resolve_tail_quantity(state)
-    stop_price = tail_stop_price(state)
+    stop_price = tail_trigger_price(state)
     return PlaceOrderCommandRequest(
         pair_name=state.pair.name,
         side=opposite_side(state.pair.head.side).value,
         ordType=_tail_order_type(state.pair.tail.order_type),
         orderQty=None if quantity is None else cast(OrderQty, to_decimal(quantity)),
+        price=(
+            None
+            if (limit_price := tail_limit_price(state)) is None
+            else cast(LimitPrice, to_decimal(limit_price))
+        ),
         stopPx=None if stop_price is None else cast(StopPrice, to_decimal(stop_price)),
         execInst=_tail_exec_inst(state.pair.tail.order_type),
         oDelta=_tail_exchange_offset(state),
@@ -252,6 +260,8 @@ def head_command(
             request=request,
             pair_name=state.pair.name,
             legacy_order=head_amend_order_dict(state),
+            exchange=state.pair.exchange or "",
+            market_type=state.pair.market_type or "futures",
         )
     return PlaceHeadCommand(
         kind=kind,
@@ -259,6 +269,8 @@ def head_command(
         request=head_place_request(state),
         pair_name=state.pair.name,
         legacy_order=head_order_dict(state.pair),
+        exchange=state.pair.exchange or "",
+        market_type=state.pair.market_type or "futures",
     )
 
 
@@ -283,6 +295,8 @@ def tail_command(
             request=cast(AmendOrderCommandRequest, request),
             pair_name=state.pair.name,
             legacy_order=order,
+            exchange=state.pair.exchange or "",
+            market_type=state.pair.market_type or "futures",
         )
     return PlaceTailCommand(
         kind=kind,
@@ -290,6 +304,8 @@ def tail_command(
         request=cast(PlaceOrderCommandRequest, request),
         pair_name=state.pair.name,
         legacy_order=order,
+        exchange=state.pair.exchange or "",
+        market_type=state.pair.market_type or "futures",
     )
 
 
@@ -310,3 +326,53 @@ def tail_stop_price(state: PairCycleState) -> Decimal | float | None:
             "before placing or amending a relative tail"
         )
     return state.pair.tail_price_spec
+
+
+def tail_trigger_price(state: PairCycleState) -> Decimal | float | None:
+    """Resolve stopPx only for trigger-family tails."""
+
+    if parse_order_code(state.pair.tail.order_type).base_key not in {
+        "S",
+        "SL",
+        "MT",
+        "LT",
+    }:
+        return None
+    return tail_stop_price(state)
+
+
+def tail_limit_price(state: PairCycleState) -> Decimal | float | None:
+    """Resolve the concrete price for plain limit tails.
+
+    A post-only zero-distance limit tail is an explicit terminal-cancel
+    convention: materialise it one tick beyond the head fill/reference so the
+    exchange should reject/cancel it as taker, while preserving post-only.
+    """
+
+    code = parse_order_code(state.pair.tail.order_type)
+    if code.base_key != "L":
+        return None
+    price = tail_stop_price(state)
+    if price is None:
+        raise ValueError(f"Order pair '{state.pair.name}' limit tail needs a price")
+    resolved = to_decimal(price)
+    if not (code.post_only and _is_zero_relative_tail(state.pair)):
+        return resolved
+    tick = state.instrument_tick_size
+    if tick is None or tick <= 0:
+        raise ValueError(
+            f"Order pair '{state.pair.name}' needs an instrument tick size to materialise "
+            "post-only zero-distance tail"
+        )
+    if opposite_side(state.pair.head.side).value == "buy":
+        return resolved + tick
+    return resolved - tick
+
+
+def _is_zero_relative_tail(pair: OrderPairSpec) -> bool:
+    spec = pair.tail_price_spec
+    if spec is None or to_decimal(spec) != Decimal("0"):
+        return False
+    tail_type = (pair.tail_price_spec_type or "").lower()
+    amount_type = pair.amount_type.lower()
+    return "t%" in tail_type or "t%" in amount_type or "td" in tail_type or "td" in amount_type

@@ -201,13 +201,16 @@ options:
 - Role: direct exchange-adapter CLI for instruments, balance, position, order submission, amend, and cancel
 - Global options:
   - =--exchange {kraken,binance,bitmex}= : exchange adapter target, default =kraken=
-  - =--symbol= : selected Kraken Futures product id, example: =PI_XBTUSD=
+  - =--market-type {futures,spot,margin,isolated_margin}= : exchange market lane, default =futures=
+  - =--symbol= : native exchange symbol. If omitted, the route default follows =--exchange= and =--market-type=: Kraken futures =PI_XBTUSD=, Kraken spot/margin =XBT/USD=, Binance lanes =BTCUSDT=, BitMEX futures =XBTUSD=, BitMEX spot =XBT_USDT=
   - =--environment {demo,live}= : selected endpoint family
 
 | Command          | Purpose                                | Main options                                          |
 |------------------+----------------------------------------+-------------------------------------------------------|
+| =routes=         | list route codes, defaults, credential env names, and key/secret presence without connecting | none                                                  |
 | =balance=        | read available margin                  | none                                                  |
 | =position=       | read current position                  | none                                                  |
+| =permissions=    | check no-order API key order-write permission when the adapter supports it | none                                                  |
 | =instruments=    | list Futures instruments               | =--contains=                                          |
 | =check-symbol=   | verify the selected product id         | none                                                  |
 | =limit=          | send one limit order                   | =--side=, =--qty=, =--price=                          |
@@ -222,9 +225,13 @@ Help behavior:
 - =python -m kolabi.bargain.cli <subcommand> --help= shows that subcommand description and options.
 - Example: =python -m kolabi.bargain.cli balance --help= describes the balance read command.
 
+The =routes= command reports =permission_probe=, =order_write_probe=, and =demo_requires_base_url_override= for each lane. Binance spot/futures can prove order-write with a no-order =test_order= endpoint. BitMEX can read =apiKey= metadata, but order-write still depends on the returned permission list. Kraken spot/margin and Binance margin demo lanes require an explicit market-capable demo base URL before adapter construction.
+
 Examples:
 
 #+begin_src bash
+  python -m kolabi.bargain.cli --environment demo routes
+  python -m kolabi.bargain.cli --exchange bitmex --market-type futures --environment demo permissions
   python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo balance
   python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo position
   python -m kolabi.bargain.cli --exchange kraken --symbol PI_XBTUSD --environment demo instruments --contains ADA
@@ -247,9 +254,11 @@ Examples:
 - Use: demo validation of the contract layer and order serializers
 - Main options:
   - =--exchange {kraken,binance,bitmex}= : exchange target, default =kraken=
-  - =--symbol= : default: =PI_XBTUSD=
+  - =--market-type {futures,spot,margin,isolated_margin}= : exchange market lane, default =futures=
+  - =--symbol= : native exchange symbol. If omitted, the route default follows =--exchange= and =--market-type=
   - =--environment {demo,live}=
   - =--list-orders= : print tested/supported smoke order plan for the exchange and exit
+  - =--only ORDER_NAME= : submit only one named smoke order; repeat or comma-separate names. Use =--only limit_below= for the first safe submit-and-cancel demo probe
   - =--sleep-seconds=: use =2= or more to stay conservative
   - =--log-level=
 
@@ -281,7 +290,7 @@ scripts/kolabidb public start --pair PI_XBTUSD
 
 scripts/kolabidb private start --account-scope default
 
-scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+scripts/kolabidb private start --account-scope advers --api-key-env KRKF_DEMO2_API_KEY --api-secret-env KRKF_DEMO2_API_SECRET
 
 scripts/kolabidb private status --account-scope advers
 scripts/kolabidb private logs --account-scope advers
@@ -341,7 +350,7 @@ scripts/kolabidb postgres status
 scripts/kolabidb postgres logs
 scripts/kolabidb public start --pair PI_XBTUSD
 scripts/kolabidb private start
-scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+scripts/kolabidb private start --account-scope advers --api-key-env KRKF_DEMO2_API_KEY --api-secret-env KRKF_DEMO2_API_SECRET
 scripts/kolabidb public logs
 scripts/kolabidb private logs
 #+end_src
@@ -374,8 +383,8 @@ python -m kolabi.tree.account run \
   --account-scope advers \
   --account-db-url "$KOLABI_ADVERS_ACCOUNT_DB_URL" \
   --critical-db-url "$KOLABI_ADVERS_CRITICAL_DB_URL" \
-  --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY \
-  --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  --api-key-env KRKF_DEMO2_API_KEY \
+  --api-secret-env KRKF_DEMO2_API_SECRET
 #+end_src
 
 Run the main bot against PostgreSQL:
@@ -407,8 +416,8 @@ python -m kolabi.bot run \
   --critical-db-url "$KOLABI_ADVERS_CRITICAL_DB_URL" \
   --audit-db-url "$KOLABI_ADVERS_AUDIT_DB_URL" \
   --telemetry-db-url "$KOLABI_ADVERS_TELEMETRY_DB_URL" \
-  --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY \
-  --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  --api-key-env KRKF_DEMO2_API_KEY \
+  --api-secret-env KRKF_DEMO2_API_SECRET
 #+end_src
 
 Check readiness with PostgreSQL:
@@ -448,7 +457,8 @@ Actions:
   logs        Tail the selected feeder log from ./logs.
 
 Public options:
-  --pair SYMBOL                 Futures product id. Default: PI_XBTUSD.
+  --pair SYMBOL                 Native exchange symbol. Kraken default: PI_XBTUSD. Binance default: BTCUSDT.
+                                BitMEX default: XBTUSD for futures, XBT_USDT for spot.
   --environment demo|live       Kraken endpoint family. Default: demo.
   --db-url URL                  Public DB URL override. Default comes from the selected backend.
   --private-db-url URL          Private DB URL used by the public feeder for correlation.
@@ -480,7 +490,7 @@ Examples:
   scripts/kolabidb public start --pair PI_XBTUSD
   scripts/kolabidb private start
   scripts/kolabidb postgres logs
-  scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  scripts/kolabidb private start --account-scope advers --api-key-env KRKF_DEMO2_API_KEY --api-secret-env KRKF_DEMO2_API_SECRET
   scripts/kolabidb private start --public spawn --pair PI_XBTUSD
 
 Systemctl-shaped equivalents:
@@ -597,7 +607,7 @@ Examples:
 scripts/kolabidb public start --pair PI_XBTUSD
 scripts/kolabidb private start
 scripts/kolabidb private start --public spawn --pair PI_XBTUSD
-scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+scripts/kolabidb private start --account-scope advers --api-key-env KRKF_DEMO2_API_KEY --api-secret-env KRKF_DEMO2_API_SECRET
 scripts/kolabidb private status
 scripts/kolabidb private logs
 scripts/kolabidb private stop
@@ -777,9 +787,16 @@ python -m kolabi.bot preflight --help
 #+RESULTS:
 #+begin_example
 usage: kolabi.bot preflight [-h] [--exchange EXCHANGE] [--symbol SYMBOL]
+                            [--market-type {futures,spot,margin,isolated_margin}]
+                            [--strategy STRATEGY]
                             [--environment {demo,live}]
+                            [--base-url BASE_URL]
                             [--market-db-url MARKET_DB_URL]
                             [--account-db-url ACCOUNT_DB_URL]
+                            [--critical-db-url CRITICAL_ACCOUNT_DB_URL]
+                            [--account-scope ACCOUNT_SCOPE]
+                            [--api-key-env API_KEY_ENV]
+                            [--api-secret-env API_SECRET_ENV]
                             [--ready-timeout-seconds READY_TIMEOUT_SECONDS]
                             [--ready-poll-seconds READY_POLL_SECONDS]
                             [--max-public-age-seconds MAX_PUBLIC_AGE_SECONDS]
@@ -788,36 +805,75 @@ usage: kolabi.bot preflight [-h] [--exchange EXCHANGE] [--symbol SYMBOL]
 
 options:
   -h, --help            show this help message and exit
-  --exchange EXCHANGE
-  --symbol SYMBOL
+  --exchange EXCHANGE   Exchange name. (default: kraken)
+  --symbol SYMBOL       Exchange product id. Default follows --exchange and
+                        --market-type.
+  --market-type {futures,spot,margin,isolated_margin}
+                        Default market lane for TSV rows without an exchange
+                        route code. (default: futures)
+  --strategy STRATEGY   Optional TSV strategy file; checks every
+                        exchange/symbol route in the file. (default: None)
   --environment {demo,live}
+                        Endpoint family. (default: demo)
+  --base-url BASE_URL, --rest-url BASE_URL
+                        REST base URL override for the default exchange/market
+                        route. (default: None)
   --market-db-url MARKET_DB_URL
                         Optional public market data DB URL. Defaults from
-                        Kraken Futures environment.
+                        selected exchange environment. (default: None)
   --account-db-url ACCOUNT_DB_URL
-                        Optional private account DB URL. Defaults from Kraken
-                        Futures environment.
+                        Optional private account DB URL. Defaults from
+                        selected exchange environment. (default: None)
+  --critical-db-url CRITICAL_ACCOUNT_DB_URL
+                        Optional critical private DB URL for order/fill
+                        lifecycle. Defaults from selected exchange
+                        environment. (default: None)
+  --account-scope ACCOUNT_SCOPE
+                        Logical account/persona label for scoped private DB
+                        env lanes. (default: default)
+  --api-key-env API_KEY_ENV
+                        Environment variable name containing the exchange API
+                        key. Use this to preflight the same account selected
+                        by run/run-once. (default: None)
+  --api-secret-env API_SECRET_ENV
+                        Environment variable name containing the exchange API
+                        secret. Use this to preflight the same account
+                        selected by run/run-once. (default: None)
   --ready-timeout-seconds READY_TIMEOUT_SECONDS
+                        Maximum wait for readiness checks. (default: 45.0)
   --ready-poll-seconds READY_POLL_SECONDS
+                        Polling cadence while waiting for readiness. (default:
+                        1.0)
   --max-public-age-seconds MAX_PUBLIC_AGE_SECONDS
+                        Maximum acceptable age of public market snapshot.
+                        (default: 15.0)
   --max-private-age-seconds MAX_PRIVATE_AGE_SECONDS
+                        Maximum acceptable age of private websocket heartbeat.
+                        (default: 30.0)
   --max-reconcile-age-seconds MAX_RECONCILE_AGE_SECONDS
+                        Maximum acceptable age of REST reconcile snapshot.
+                        (default: 300.0)
 #+end_example
 
 # Need to centralize this in the doc direclty
 
 - Command: =python -m kolabi.bot preflight=
-- Role: check whether the public and private Kraken DBs are fresh enough to start a TSV strategy
+- Role: check whether exchange route credentials and public/private DB state are ready enough to start a TSV strategy
+- Output: reports =credentials_ready=, =base_urls_ready=, and =route_config_ready=; base URL fields report only source names such as =override= or an env var name, not the URL value
 
 Options:
 
 | Option                        | Meaning                                |
 |-------------------------------+----------------------------------------|
 | =--exchange=                  | exchange name                          |
-| =--symbol=                    | Futures product id                     |
+| =--symbol=                    | native exchange symbol; default follows exchange and market type |
+| =--strategy=                  | optional TSV strategy; checks every route in the file |
 | =--environment {demo,live}=   | endpoint family                        |
+| =--base-url=                  | REST base URL override for the default exchange/market route |
 | =--market-db-url=             | public market DB override              |
 | =--account-db-url=            | private account DB override            |
+| =--api-key-env=               | API key environment variable used for the default route |
+| =--api-secret-env=            | API secret environment variable used for the default route |
 | =--ready-timeout-seconds=     | displayed timeout budget for operators |
 | =--ready-poll-seconds=        | polling cadence                        |
 | =--max-public-age-seconds=    | public market freshness threshold      |
@@ -849,6 +905,8 @@ python -m kolabi.tree.account status --environment demo
   python -m kolabi.tree.account run --environment demo
   # Shell 3: check readiness against both DBs:
   python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo  
+  python -m kolabi.bot preflight --exchange binance --market-type spot --environment demo --api-key-env BINS_DEMO_API_KEY --api-secret-env BINS_DEMO_API_SECRET
+  python -m kolabi.bot preflight --exchange binance --market-type margin --environment demo --base-url https://margin-demo.example.test --api-key-env BINM_DEMO_API_KEY --api-secret-env BINM_DEMO_API_SECRET
 #+END_SRC   
 ** Send And Cancel One Demo Order
 

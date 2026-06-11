@@ -4,8 +4,10 @@ import argparse
 
 import pytest
 from kolabi.bot.__main__ import (
+    build_service,
     build_parser,
     build_single_strategy,
+    preflight_command,
     run_command,
     run_once_command,
 )
@@ -136,6 +138,7 @@ def test_bot_parser_uses_critical_db_url_only() -> None:
     assert args.tail_telemetry_retention_minutes == 30
     assert args.tail_telemetry_retention_limit == 5
     assert args.account_scope == "advers"
+    assert args.market_type == "futures"
     with pytest.raises(SystemExit):
         parser.parse_args(
             [
@@ -148,21 +151,154 @@ def test_bot_parser_uses_critical_db_url_only() -> None:
         )
 
 
+def test_run_parser_accepts_default_market_type() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "run",
+            "--strategy",
+            "orders/advers.tsv",
+            "--exchange",
+            "binance",
+            "--market-type",
+            "spot",
+            "--symbol",
+            "BTCUSDT",
+            "--base-url",
+            "https://spot-demo.example.test",
+            "--dry-run",
+        ]
+    )
+
+    assert args.exchange == "binance"
+    assert args.market_type == "spot"
+    assert args.symbol == "BTCUSDT"
+    assert args.base_url == "https://spot-demo.example.test"
+
+
+def test_run_service_defaults_symbol_from_exchange_market_route() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "run",
+            "--strategy",
+            "orders/advers.tsv",
+            "--exchange",
+            "binance",
+            "--market-type",
+            "spot",
+            "--dry-run",
+        ]
+    )
+    service = build_service(args)
+
+    assert not hasattr(args, "symbol")
+    assert service.config.exchange == "binance"
+    assert service.config.market_type == "spot"
+    assert service.config.symbol == "BTCUSDT"
+
+
+def test_run_service_forwards_base_url_override() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "run",
+            "--strategy",
+            "orders/advers.tsv",
+            "--exchange",
+            "binance",
+            "--market-type",
+            "spot",
+            "--base-url",
+            "https://spot-demo.example.test",
+            "--dry-run",
+        ]
+    )
+    service = build_service(args)
+
+    assert service.config.base_url == "https://spot-demo.example.test"
+
+
 def test_preflight_parser_accepts_account_scope() -> None:
     parser = build_parser()
 
     args = parser.parse_args(
         [
             "preflight",
+            "--market-type",
+            "spot",
             "--account-scope",
             "advers",
             "--critical-db-url",
             "postgresql+psycopg://x/critical",
+            "--base-url",
+            "https://spot-demo.example.test",
+            "--api-key-env",
+            "CUSTOM_BINS_KEY",
+            "--api-secret-env",
+            "CUSTOM_BINS_SECRET",
         ]
     )
 
     assert args.account_scope == "advers"
     assert args.critical_account_db_url == "postgresql+psycopg://x/critical"
+    assert args.market_type == "spot"
+    assert args.base_url == "https://spot-demo.example.test"
+    assert args.api_key_env == "CUSTOM_BINS_KEY"
+    assert args.api_secret_env == "CUSTOM_BINS_SECRET"
+
+
+def test_preflight_command_defaults_symbol_from_exchange_market_route(
+    monkeypatch,
+    capsys,
+) -> None:
+    parser = build_parser()
+    observed: dict[str, object] = {}
+
+    class FakeService:
+        def __init__(self, config) -> None:
+            observed["exchange"] = config.exchange
+            observed["market_type"] = config.market_type
+            observed["symbol"] = config.symbol
+            observed["api_key_env"] = config.api_key_env
+            observed["api_secret_env"] = config.api_secret_env
+            observed["base_url"] = config.base_url
+
+        def preflight(self, strategy):
+            observed["strategy"] = strategy
+            return {"ready": True, "status": "ok"}
+
+    monkeypatch.setattr("kolabi.bot.__main__.BotService", FakeService)
+    args = parser.parse_args(
+        [
+            "preflight",
+            "--exchange",
+            "bitmex",
+            "--market-type",
+            "spot",
+            "--api-key-env",
+            "CUSTOM_BINS_KEY",
+            "--api-secret-env",
+            "CUSTOM_BINS_SECRET",
+            "--base-url",
+            "https://spot-demo.example.test",
+        ]
+    )
+
+    assert preflight_command(args) == 0
+    assert observed == {
+        "exchange": "bitmex",
+        "market_type": "spot",
+        "symbol": "XBT_USDT",
+        "api_key_env": "CUSTOM_BINS_KEY",
+        "api_secret_env": "CUSTOM_BINS_SECRET",
+        "base_url": "https://spot-demo.example.test",
+        "strategy": None,
+    }
+    assert '"ready": true' in capsys.readouterr().out
 
 
 def test_run_once_command_dry_run_prints_canonical_structure(capsys) -> None:

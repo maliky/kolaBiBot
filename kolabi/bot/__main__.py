@@ -7,6 +7,7 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from kolabi.bot.exchange_routes import default_symbol_for_route
 from kolabi.bot.domain import StrategySpec
 from kolabi.bot.service import BotConfig, BotService
 from kolabi.bot.tsv import (
@@ -26,23 +27,44 @@ class RawTextDefaultsFormatter(
 def add_runtime_options(parser: argparse.ArgumentParser) -> None:
     """Attach common runtime options shared by run and run-once."""
     parser.add_argument("--exchange", default="kraken", help="Exchange name.")
-    parser.add_argument("--symbol", default="PI_XBTUSD", help="Futures product id.")
-    parser.add_argument("--environment", choices=("demo", "live"), default="demo", help="Endpoint family.")
+    parser.add_argument(
+        "--symbol",
+        default=argparse.SUPPRESS,
+        help="Exchange product id. Default follows --exchange and --market-type.",
+    )
+    parser.add_argument(
+        "--market-type",
+        choices=("futures", "spot", "margin", "isolated_margin"),
+        default="futures",
+        help="Default market lane for TSV rows without an exchange route code.",
+    )
+    parser.add_argument(
+        "--environment",
+        choices=("demo", "live"),
+        default="demo",
+        help="Endpoint family.",
+    )
+    parser.add_argument(
+        "--base-url",
+        "--rest-url",
+        dest="base_url",
+        help="REST base URL override for the default exchange/market route.",
+    )
     parser.add_argument("--db-url", help="Optional database URL for run persistence")
     parser.add_argument(
         "--market-db-url",
-        help="Optional public market data DB URL. Defaults from Kraken Futures environment.",
+        help="Optional public market data DB URL. Defaults from selected exchange environment.",
     )
     parser.add_argument(
         "--account-db-url",
-        help="Optional private account DB URL. Defaults from Kraken Futures environment.",
+        help="Optional private account DB URL. Defaults from selected exchange environment.",
     )
     parser.add_argument(
         "--critical-db-url",
         dest="critical_account_db_url",
         help=(
             "Optional critical private DB URL for order/fill lifecycle. "
-            "Defaults from Kraken Futures environment."
+            "Defaults from selected exchange environment."
         ),
     )
     parser.add_argument(
@@ -106,7 +128,7 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
         "--ready-timeout-seconds",
         type=float,
         default=45.0,
-        help="Maximum wait for fresh Kraken public/private state before the TSV loop starts.",
+        help="Maximum wait for fresh exchange public/private state before the TSV loop starts.",
     )
     parser.add_argument(
         "--ready-poll-seconds",
@@ -135,7 +157,7 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--skip-ready-check",
         action="store_true",
-        help="Skip Kraken runtime freshness checks before starting the strategy.",
+        help="Skip runtime freshness checks before starting the strategy.",
     )
     parser.add_argument("--log-level", default="INFO", help="Logging verbosity.")
     parser.add_argument("--update-pause", type=int, default=10, help="Update loop pause in seconds.")
@@ -318,7 +340,8 @@ def build_service(args: argparse.Namespace) -> BotService:
     return BotService(
         BotConfig(
             exchange=args.exchange,
-            symbol=args.symbol,
+            symbol=_resolved_symbol(args),
+            market_type=getattr(args, "market_type", "futures"),
             environment=args.environment,
             updatepause=args.update_pause,
             logpause=args.log_pause,
@@ -332,6 +355,7 @@ def build_service(args: argparse.Namespace) -> BotService:
             account_scope=getattr(args, "account_scope", "default"),
             api_key_env=getattr(args, "api_key_env", None),
             api_secret_env=getattr(args, "api_secret_env", None),
+            base_url=getattr(args, "base_url", None),
             require_ready=not args.skip_ready_check,
             ready_timeout_seconds=args.ready_timeout_seconds,
             ready_poll_seconds=args.ready_poll_seconds,
@@ -418,34 +442,71 @@ def build_parser() -> argparse.ArgumentParser:
 
     preflight_parser = subparsers.add_parser(
         "preflight",
-        help="Check whether Kraken public/private DB state is fresh enough to start a strategy",
+        help=(
+            "Check exchange public/private DB state and route credentials before "
+            "starting a strategy"
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     preflight_parser.add_argument("--exchange", default="kraken", help="Exchange name.")
-    preflight_parser.add_argument("--symbol", default="PI_XBTUSD", help="Futures product id.")
+    preflight_parser.add_argument(
+        "--symbol",
+        default=argparse.SUPPRESS,
+        help="Exchange product id. Default follows --exchange and --market-type.",
+    )
+    preflight_parser.add_argument(
+        "--market-type",
+        choices=("futures", "spot", "margin", "isolated_margin"),
+        default="futures",
+        help="Default market lane for TSV rows without an exchange route code.",
+    )
+    preflight_parser.add_argument(
+        "--strategy",
+        help="Optional TSV strategy file; checks every exchange/symbol route in the file.",
+    )
     preflight_parser.add_argument(
         "--environment", choices=("demo", "live"), default="demo", help="Endpoint family."
     )
     preflight_parser.add_argument(
+        "--base-url",
+        "--rest-url",
+        dest="base_url",
+        help="REST base URL override for the default exchange/market route.",
+    )
+    preflight_parser.add_argument(
         "--market-db-url",
-        help="Optional public market data DB URL. Defaults from Kraken Futures environment.",
+        help="Optional public market data DB URL. Defaults from selected exchange environment.",
     )
     preflight_parser.add_argument(
         "--account-db-url",
-        help="Optional private account DB URL. Defaults from Kraken Futures environment.",
+        help="Optional private account DB URL. Defaults from selected exchange environment.",
     )
     preflight_parser.add_argument(
         "--critical-db-url",
         dest="critical_account_db_url",
         help=(
             "Optional critical private DB URL for order/fill lifecycle. "
-            "Defaults from Kraken Futures environment."
+            "Defaults from selected exchange environment."
         ),
     )
     preflight_parser.add_argument(
         "--account-scope",
         default="default",
         help="Logical account/persona label for scoped private DB env lanes.",
+    )
+    preflight_parser.add_argument(
+        "--api-key-env",
+        help=(
+            "Environment variable name containing the exchange API key. "
+            "Use this to preflight the same account selected by run/run-once."
+        ),
+    )
+    preflight_parser.add_argument(
+        "--api-secret-env",
+        help=(
+            "Environment variable name containing the exchange API secret. "
+            "Use this to preflight the same account selected by run/run-once."
+        ),
     )
     preflight_parser.add_argument(
         "--ready-timeout-seconds",
@@ -537,6 +598,8 @@ def run_once_command(args: argparse.Namespace) -> int:
 def _command_to_pretty_dict(command) -> dict[str, object]:
     payload = {
         "kind": command.kind.value,
+        "exchange": command.exchange,
+        "market_type": command.market_type,
         "symbol": str(command.symbol),
         "pair_name": command.pair_name,
         "role": command.role.value,
@@ -556,12 +619,16 @@ def preflight_command(args: argparse.Namespace) -> int:
     service = BotService(
         BotConfig(
             exchange=args.exchange,
-            symbol=args.symbol,
+            symbol=_resolved_symbol(args),
+            market_type=args.market_type,
             environment=args.environment,
             market_db_url=args.market_db_url,
             account_db_url=args.account_db_url,
             critical_account_db_url=getattr(args, "critical_account_db_url", None),
             account_scope=getattr(args, "account_scope", "default"),
+            api_key_env=getattr(args, "api_key_env", None),
+            api_secret_env=getattr(args, "api_secret_env", None),
+            base_url=getattr(args, "base_url", None),
             require_ready=True,
             ready_timeout_seconds=args.ready_timeout_seconds,
             ready_poll_seconds=args.ready_poll_seconds,
@@ -570,9 +637,22 @@ def preflight_command(args: argparse.Namespace) -> int:
             max_reconcile_age_seconds=args.max_reconcile_age_seconds,
         )
     )
-    payload = service.preflight()
+    strategy = None
+    if getattr(args, "strategy", None):
+        strategy_path = Path(args.strategy)
+        if not strategy_path.exists():
+            raise FileNotFoundError(f"Strategy file not found: {strategy_path}")
+        strategy = read_strategy_file(strategy_path)
+    payload = service.preflight(strategy)
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0 if bool(payload.get("ready")) else 1
+
+
+def _resolved_symbol(args: argparse.Namespace) -> str:
+    return getattr(args, "symbol", None) or default_symbol_for_route(
+        args.exchange,
+        getattr(args, "market_type", "futures"),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

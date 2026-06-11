@@ -49,6 +49,7 @@ from kolabi.bot.dragon import (
     simulated_private_fill_from_submission,
     tail_submitted_from_ack,
 )
+from kolabi.bot.exchange_routes import ExchangeRoute, pair_route
 from kolabi.bot.ids import head_client_order_id, tail_client_order_id
 from kolabi.bot.pricing import (
     executable_head_reference_price,
@@ -89,6 +90,14 @@ def _runtime_fields(*values: object) -> str:
     return " ".join(str(value) for value in values)
 
 
+def _drop_closed_logger_handlers(logger: logging.Logger) -> None:
+    for handler in tuple(logger.handlers):
+        stream = getattr(handler, "stream", None)
+        if stream is None or not getattr(stream, "closed", False):
+            continue
+        logger.removeHandler(handler)
+
+
 class CommandExecutor(Protocol):
     async def execute(self, command: DragonSong) -> OrderAck: ...
 
@@ -99,6 +108,8 @@ class RuntimeEventSource(Protocol):
 
 class RuntimeQueueLike(Protocol):
     symbol: str
+    exchange: str
+    market_type: str
     state: StrategyState
     running: bool
 
@@ -130,7 +141,10 @@ class PublicRuntimeStateReader(Protocol):
     """Reads strategy-facing public market state from any backing store."""
 
     def fetch_market_state(
-        self, symbol: str | None = None
+        self,
+        symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
     ) -> PublicMarketStateReader: ...
 
 
@@ -143,6 +157,8 @@ class PrivateOrderStateReader(Protocol):
         after_local_timestamp: datetime | None = None,
         after_local_id: int | None = None,
         symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
         limit: int = 200,
     ) -> tuple[PrivateOrderRecord, ...]: ...
 
@@ -152,6 +168,8 @@ class PrivateOrderStateReader(Protocol):
         after_local_timestamp: datetime | None = None,
         after_local_id: int | None = None,
         symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
         limit: int = 200,
     ) -> tuple[PrivateOrderRecord, ...]: ...
 
@@ -264,6 +282,8 @@ class _OrderLease:
     created_at: datetime
     last_seen_at: datetime | None = None
     cancel_sent_at: datetime | None = None
+    exchange: str | None = None
+    market_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -329,10 +349,10 @@ class KrakenPublicTriggerSource:
 
     async def pump(self, runtime: RuntimeQueueLike) -> None:
         while runtime.running:
-            for symbol in _active_runtime_symbols(runtime):
-                market = self.client.fetch_market_state(symbol)
+            for route in _active_runtime_routes(runtime):
+                market = _fetch_market_state_for_route(self.client, route)
                 snapshot = MarketSnapshotFact(
-                    symbol=symbol,
+                    symbol=route.symbol,
                     best_bid=market.best_bid,
                     best_ask=market.best_ask,
                     mid_price=market.mid_price,
@@ -344,7 +364,7 @@ class KrakenPublicTriggerSource:
                     spread=getattr(market, "spread", None),
                 )
                 for pair_name, pair_state in runtime.state.pairs.items():
-                    if _pair_symbol(pair_state, runtime.symbol) != symbol:
+                    if _pair_route(pair_state, runtime) != route:
                         continue
                     if pair_state.head_state == HeadState.LATENT:
                         if not pair_dependency_satisfied(runtime.state, pair_state):
@@ -373,7 +393,7 @@ class KrakenPublicTriggerSource:
                     if move.reply is not None:
                         reference_key = f":{move.reply.get('reference_source', '')}:{move.reply.get('reference_price', '')}"
                     event_id = (
-                        f"{event_prefix}:{symbol}:{pair_name}:{pair_state.attempt_index}:"
+                        f"{event_prefix}:{route.label}:{pair_name}:{pair_state.attempt_index}:"
                         f"{market.recorded_at or snapshot.occurred_at.isoformat()}{reference_key}"
                     )
                     if event_id in self._seen_event_ids:
@@ -400,27 +420,32 @@ class KrakenPrivateOrderPollingSource:
         )
         self._cursors: dict[str, _PrivateCursor] = {}
         self._pending_records: list[_PendingPrivateRecord] = []
+        self._suppressed_event_ids: set[str] = set()
 
     async def pump(self, runtime: RuntimeQueueLike) -> None:
         while runtime.running:
             now = datetime.now(timezone.utc)
             candidates = tuple(self._pending_records)
             self._pending_records = []
-            for symbol in _active_runtime_symbols(runtime):
-                cursor = self._cursor_for(symbol, runtime.state.launched_at)
+            for route in _active_runtime_routes(runtime):
+                cursor = self._cursor_for(route.label, runtime.state.launched_at)
                 records = self.client.fetch_private_orders_since(
                     after_local_timestamp=cursor.after_local_timestamp,
                     after_local_id=cursor.after_local_id,
-                    symbol=symbol,
+                    symbol=route.symbol,
+                    exchange=route.exchange,
+                    market_type=route.market_type,
                 )
                 fill_records = self.client.fetch_private_fills_since(
                     after_local_timestamp=cursor.after_fill_timestamp,
                     after_local_id=cursor.after_fill_id,
-                    symbol=symbol,
+                    symbol=route.symbol,
+                    exchange=route.exchange,
+                    market_type=route.market_type,
                 )
                 active_client_ids, active_exchange_ids = self._active_identity_sets(
                     runtime,
-                    symbol,
+                    route,
                 )
                 if active_client_ids or active_exchange_ids:
                     fetch_orders_by_identity = getattr(
@@ -430,7 +455,9 @@ class KrakenPrivateOrderPollingSource:
                         identity_orders = fetch_orders_by_identity(
                             client_order_ids=active_client_ids,
                             exchange_order_ids=active_exchange_ids,
-                            symbol=symbol,
+                            symbol=route.symbol,
+                            exchange=route.exchange,
+                            market_type=route.market_type,
                         )
                         records = self._merge_unique_private_records(records, identity_orders)
                     fetch_fills_by_identity = getattr(
@@ -440,7 +467,9 @@ class KrakenPrivateOrderPollingSource:
                         identity_fills = fetch_fills_by_identity(
                             client_order_ids=active_client_ids,
                             exchange_order_ids=active_exchange_ids,
-                            symbol=symbol,
+                            symbol=route.symbol,
+                            exchange=route.exchange,
+                            market_type=route.market_type,
                         )
                         fill_records = self._merge_unique_private_records(
                             fill_records,
@@ -471,6 +500,27 @@ class KrakenPrivateOrderPollingSource:
                 )
                 move = head_move_from_private_fact(fact)
                 move = replace(move, role=role)
+                event_id = (
+                    self._private_record_event_id(
+                        record,
+                        is_fill=pending_record.is_fill,
+                    )
+                )
+                if _is_mechanical_tail_amend_cancel(runtime, pair_state, role, move):
+                    if event_id is not None and event_id in self._suppressed_event_ids:
+                        continue
+                    if event_id is not None:
+                        self._suppressed_event_ids.add(event_id)
+                    _LOGGER.info(
+                        "AMEND_REPLACE_CANCEL_SUPPRESSED (%s#%s): %s",
+                        pair_state.pair.name,
+                        pair_state.attempt_index,
+                        _runtime_fields(
+                            (move.reply or {}).get("clOrdID", "-"),
+                            (move.reply or {}).get("orderID", "-"),
+                        ),
+                    )
+                    continue
                 move = self._with_reference_price(
                     move,
                     pair_state,
@@ -492,12 +542,6 @@ class KrakenPrivateOrderPollingSource:
                             f"pair={pair_state.pair.name} clOrdID={client_id} "
                             f"orderID={order_id} grace_seconds={self.head_fill_reference_grace_seconds:g}"
                         )
-                event_id = (
-                    self._private_record_event_id(
-                        record,
-                        is_fill=pending_record.is_fill,
-                    )
-                )
                 await runtime.enqueue(replace(move, event_id=event_id))
             if _runtime_sources_should_stop(runtime):
                 return
@@ -533,12 +577,12 @@ class KrakenPrivateOrderPollingSource:
     @staticmethod
     def _active_identity_sets(
         runtime: RuntimeQueueLike,
-        symbol: str,
+        route: ExchangeRoute,
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         client_ids: set[str] = set()
         exchange_ids: set[str] = set()
         for pair_state in runtime.state.pairs.values():
-            if _pair_symbol(pair_state, runtime.symbol) != symbol:
+            if _pair_route(pair_state, runtime) != route:
                 continue
             for identity in (pair_state.head_identity, pair_state.tail_identity):
                 if identity is None:
@@ -549,7 +593,7 @@ class KrakenPrivateOrderPollingSource:
                     exchange_ids.add(identity.exchange_order_id)
         if isinstance(runtime, StrategyRuntime):
             for identity in runtime._command_identities().values():
-                if identity.symbol is not None and identity.symbol != symbol:
+                if not _identity_route_matches(identity, route):
                     continue
                 if identity.client_order_id:
                     client_ids.add(identity.client_order_id)
@@ -565,6 +609,9 @@ class KrakenPrivateOrderPollingSource:
         merged: dict[tuple[object, ...], PrivateOrderRecord] = {}
         for record in primary + extra:
             key = (
+                record.exchange,
+                record.market_type,
+                record.symbol,
                 record.local_id,
                 record.exchange_order_id,
                 record.client_order_id,
@@ -603,7 +650,14 @@ class KrakenPrivateOrderPollingSource:
                 _event_atom(record.quantity),
             )
         )
-        return f"{prefix}:{identity}:{fingerprint}"
+        route = ":".join(
+            (
+                _event_atom(record.exchange),
+                _event_atom(record.market_type),
+                _event_atom(record.symbol),
+            )
+        )
+        return f"{prefix}:{route}:{identity}:{fingerprint}"
 
     def _with_reference_price(
         self,
@@ -772,6 +826,8 @@ class StrategyRuntime:
                     client_order_id=lease.client_order_id,
                     exchange_order_id=lease.exchange_order_id,
                     symbol=lease.symbol,
+                    exchange=lease.exchange,
+                    market_type=lease.market_type,
                 )
             )
         return tuple(identities)
@@ -783,6 +839,7 @@ class StrategyRuntime:
         if self.running:
             return
         self.running = True
+        _drop_closed_logger_handlers(_LOGGER)
         self._log_runtime_legend_once()
         sources = [
             self.public_source or (StaticHookSource() if self.simulate else None),
@@ -1114,13 +1171,17 @@ class StrategyRuntime:
                     )
             for row in rows:
                 source = "unknown"
+                pair_state = self.state.pairs[row.pair_name]
                 market = (
                     None
                     if self.public_state_reader is None
-                    else self.public_state_reader.fetch_market_state(row.symbol)
+                    else _fetch_market_state_for_route(
+                        self.public_state_reader,
+                        _pair_route(pair_state, self),
+                    )
                 )
                 if market is not None:
-                    source, _ = tail_reference_price(self.state.pairs[row.pair_name].pair, market)
+                    source, _ = tail_reference_price(pair_state.pair, market)
                 signature = (
                     str(self.state.pairs[row.pair_name].attempt_index),
                     row.head_state,
@@ -1178,8 +1239,9 @@ class StrategyRuntime:
                 or pair_state.tail_state not in {TailState.HOOKED, TailState.SUBMITTED, TailState.LIVING}
             ):
                 continue
-            symbol = _pair_symbol(pair_state, self.symbol)
-            market = reader.fetch_market_state(symbol)
+            route = _pair_route(pair_state, self)
+            symbol = route.symbol
+            market = _fetch_market_state_for_route(reader, route)
             _, ref = tail_reference_price(pair_state.pair, market)
             if ref <= 0:
                 continue
@@ -1193,9 +1255,9 @@ class StrategyRuntime:
             )
             rows.append(
                 TailTelemetryRow(
-                    exchange=self.exchange,
+                    exchange=route.exchange,
                     environment=self.environment,
-                    market_type=self.market_type,
+                    market_type=route.market_type,
                     account_scope=self.account_scope,
                     strategy_id=self.state.strategy_id,
                     pair_name=pair_name,
@@ -1537,9 +1599,10 @@ class StrategyRuntime:
                     ),
                 )
                 continue
-            symbol = _pair_symbol(pair_state, self.symbol)
+            route = _pair_route(pair_state, self)
+            symbol = route.symbol
             try:
-                market = self.public_state_reader.fetch_market_state(symbol)
+                market = _fetch_market_state_for_route(self.public_state_reader, route)
                 source, reference = executable_head_reference_price(pair, market)
             except Exception as exc:
                 _LOGGER.warning(
@@ -1719,6 +1782,8 @@ class StrategyRuntime:
             stop_price=_decimal_payload(reply.get("stopPx")),
             status=_LEASE_PENDING_PLACE,
             created_at=_as_utc_aware(move.occurred_at),
+            exchange=self.state.pairs[slot.pair_name].pair.exchange,
+            market_type=self.state.pairs[slot.pair_name].pair.market_type,
         )
 
     def _lease_with_private_event(
@@ -1766,6 +1831,8 @@ class StrategyRuntime:
             stop_price=_decimal_payload(request.stopPx),
             status=_LEASE_PENDING_PLACE,
             created_at=now,
+            exchange=command.exchange or self.exchange,
+            market_type=command.market_type or self.market_type,
         )
         self._order_leases[_CommandSlot(command.pair_name, slot.attempt_index, role)] = lease
         _LOGGER.info(
@@ -1792,6 +1859,7 @@ class StrategyRuntime:
             return
         self._order_leases[slot] = replace(
             lease,
+            client_order_id=ack.client_order_id or lease.client_order_id,
             exchange_order_id=str(ack.order_id) if ack.order_id else lease.exchange_order_id,
         )
 
@@ -1803,7 +1871,12 @@ class StrategyRuntime:
                 continue
             if lease.pair_name != command.pair_name:
                 continue
-            if str(command.symbol) != lease.symbol:
+            if not _command_route_matches_lease(
+                command,
+                lease,
+                self.exchange,
+                self.market_type,
+            ):
                 continue
             if not _lease_matches_identity(
                 lease,
@@ -1883,6 +1956,8 @@ class StrategyRuntime:
                 clOrdID=cancel_id,
             ),
             reason=reason,
+            exchange=lease.exchange or self.exchange,
+            market_type=lease.market_type or self.market_type,
         )
         _LOGGER.warning(
             "CANCEL_RETRY (%s#%s): %s",
@@ -1954,7 +2029,6 @@ class StrategyRuntime:
             self._live_command_identities.pop(key, None)
 
     def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
-        record_symbol = _record_symbol(record)
         for slot, lease in self._order_leases.items():
             if lease.status == _LEASE_CLOSED:
                 continue
@@ -1963,7 +2037,7 @@ class StrategyRuntime:
             pair_state = self.state.pairs.get(lease.pair_name)
             if pair_state is None or pair_state.attempt_index != lease.attempt_index:
                 continue
-            if record_symbol is not None and _pair_symbol(pair_state, self.symbol) != record_symbol:
+            if not _record_route_matches_pair(record, pair_state, self):
                 continue
             if _record_matches_lease(record, lease):
                 role = OrderRole.HEAD if lease.role == "head" else OrderRole.TAIL
@@ -1974,13 +2048,13 @@ class StrategyRuntime:
             pair_state = self.state.pairs.get(identity.pair_name)
             if pair_state is None:
                 continue
-            if record_symbol is not None and _pair_symbol(pair_state, self.symbol) != record_symbol:
+            if not _record_route_matches_pair(record, pair_state, self):
                 continue
             if _record_matches_identity(record, identity):
                 role = OrderRole.HEAD if identity.role == "head" else OrderRole.TAIL
                 return pair_state, role
         for pair_state in self.state.pairs.values():
-            if record_symbol is not None and _pair_symbol(pair_state, self.symbol) != record_symbol:
+            if not _record_route_matches_pair(record, pair_state, self):
                 continue
             tail_identity = pair_state.tail_identity
             if tail_identity is not None and _record_matches_identity(
@@ -2011,6 +2085,8 @@ class StrategyRuntime:
                 client_order_id=lease.client_order_id,
                 exchange_order_id=lease.exchange_order_id,
                 symbol=lease.symbol,
+                exchange=lease.exchange,
+                market_type=lease.market_type,
             )
             identities[_identity_key(identity)] = identity
         identities.update(self._live_command_identities)
@@ -2037,6 +2113,8 @@ class StrategyRuntime:
                 role="cancel",
                 client_order_id=cancel_id,
                 symbol=str(command.symbol),
+                exchange=command.exchange or None,
+                market_type=command.market_type or None,
             )
         client_order_id = getattr(command.request, "clOrdID", None)
         if not client_order_id:
@@ -2054,9 +2132,12 @@ class StrategyRuntime:
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
             symbol=str(command.symbol),
+            exchange=command.exchange or None,
+            market_type=command.market_type or None,
         )
 
     def _prepare_command(self, command: DragonSong) -> DragonSong:
+        command = self._with_command_route(command)
         if isinstance(command, PlaceHeadCommand) and command.request.clOrdID is None:
             pair_state = self.state.pairs[command.request.pair_name]
             pair = pair_state.pair
@@ -2090,6 +2171,19 @@ class StrategyRuntime:
             )
         return command
 
+    def _with_command_route(self, command: DragonSong) -> DragonSong:
+        pair_state = self.state.pairs.get(command.pair_name)
+        if pair_state is None:
+            exchange = command.exchange or self.exchange
+            market_type = command.market_type or self.market_type
+        else:
+            route = _pair_route(pair_state, self)
+            exchange = command.exchange or route.exchange
+            market_type = command.market_type or route.market_type
+        if command.exchange == exchange and command.market_type == market_type:
+            return command
+        return replace(command, exchange=exchange, market_type=market_type)
+
     def _record_live_ack(self, command: DragonSong, ack: OrderAck) -> None:
         if self.simulate:
             return
@@ -2100,9 +2194,11 @@ class StrategyRuntime:
         merged = OrderIdentity(
             pair_name=identity.pair_name,
             role=identity.role,
-            client_order_id=identity.client_order_id,
+            client_order_id=ack.client_order_id or identity.client_order_id,
             exchange_order_id=str(ack.order_id) if ack.order_id else identity.exchange_order_id,
             symbol=identity.symbol,
+            exchange=identity.exchange,
+            market_type=identity.market_type,
         )
         self._live_command_identities[_identity_key(merged)] = merged
         if isinstance(command, CancelCommand):
@@ -2524,8 +2620,9 @@ class StrategyRuntime:
         ref_source = "-"
         ref_price: Decimal | None = None
         if self.public_state_reader is not None:
-            market = self.public_state_reader.fetch_market_state(
-                _pair_symbol(pair_state, self.symbol)
+            market = _fetch_market_state_for_route(
+                self.public_state_reader,
+                _pair_route(pair_state, self),
             )
             ref_source, ref_price_value = tail_reference_price(pair_state.pair, market)
             ref_price = to_decimal(ref_price_value)
@@ -2754,14 +2851,53 @@ def _pair_symbol(pair_state: PairCycleState, default_symbol: str) -> str:
     return _pair_symbol_from_pair(pair_state.pair, default_symbol)
 
 
-def _active_runtime_symbols(runtime: RuntimeQueueLike) -> tuple[str, ...]:
-    symbols = {
-        _pair_symbol(pair_state, runtime.symbol)
+def _pair_route(pair_state: PairCycleState, runtime: RuntimeQueueLike) -> ExchangeRoute:
+    return pair_route(
+        pair_state.pair,
+        default_exchange=getattr(runtime, "exchange", "kraken"),
+        default_symbol=runtime.symbol,
+        default_market_type=getattr(runtime, "market_type", "futures"),
+    )
+
+
+def _active_runtime_routes(runtime: RuntimeQueueLike) -> tuple[ExchangeRoute, ...]:
+    routes = {
+        _pair_route(pair_state, runtime)
         for pair_state in runtime.state.pairs.values()
     }
+    if not routes:
+        return (
+            ExchangeRoute(
+                exchange=getattr(runtime, "exchange", "kraken"),
+                market_type=getattr(runtime, "market_type", "futures"),
+                symbol=runtime.symbol,
+            ),
+        )
+    return tuple(sorted(routes))
+
+
+def _active_runtime_symbols(runtime: RuntimeQueueLike) -> tuple[str, ...]:
+    symbols = {route.symbol for route in _active_runtime_routes(runtime)}
     if not symbols:
         return (runtime.symbol,)
     return tuple(sorted(symbols))
+
+
+def _fetch_market_state_for_route(
+    reader: PublicRuntimeStateReader,
+    route: ExchangeRoute,
+) -> PublicMarketStateReader:
+    try:
+        return reader.fetch_market_state(
+            symbol=route.symbol,
+            exchange=route.exchange,
+            market_type=route.market_type,
+        )
+    except TypeError as exc:
+        message = str(exc)
+        if "exchange" not in message and "market_type" not in message:
+            raise
+        return reader.fetch_market_state(route.symbol)
 
 
 def _pair_runtime_complete(
@@ -2811,6 +2947,8 @@ def _head_timeout_cancel_command(
                 "text": "head_timeout",
             },
         ),
+        exchange=pair_state.pair.exchange or "",
+        market_type=pair_state.pair.market_type or "futures",
     )
 
 
@@ -3132,6 +3270,8 @@ def _decimal_payload(value: object) -> Decimal | None:
 
 
 def _record_matches_lease(record: object, lease: _OrderLease) -> bool:
+    if not _record_route_matches_lease(record, lease):
+        return False
     return _lease_matches_identity(
         lease,
         client_order_id=getattr(record, "client_order_id", None),
@@ -3152,11 +3292,40 @@ def _lease_matches_identity(
     return False
 
 
+def _is_mechanical_tail_amend_cancel(
+    runtime: RuntimeQueueLike,
+    pair_state: PairCycleState,
+    role: OrderRole,
+    move: EggMove,
+) -> bool:
+    """Drop the cancel half of cancel-replace tail amendments."""
+
+    if role != OrderRole.TAIL or move.kind != EggMoveKind.NOT_PLAYED_CANCELED:
+        return False
+    reply = move.reply or {}
+    filled = _decimal_payload(reply.get("cumQty")) or Decimal("0")
+    if filled != Decimal("0"):
+        return False
+    pending_by_slot = getattr(runtime, "_pending_tail_amends", None)
+    if not isinstance(pending_by_slot, Mapping):
+        return False
+    pending = pending_by_slot.get(
+        _CommandSlot(pair_state.pair.name, pair_state.attempt_index, "tail")
+    )
+    if pending is None:
+        return False
+    client_order_id = _string_payload(reply.get("clOrdID"))
+    exchange_order_id = _string_payload(reply.get("orderID"))
+    if client_order_id and client_order_id == pending.client_order_id:
+        return True
+    if exchange_order_id and exchange_order_id == pending.exchange_order_id:
+        return True
+    return False
+
+
 def _record_matches_identity(record, identity: OrderIdentity) -> bool:
-    record_symbol = _record_symbol(record)
-    if identity.symbol is not None:
-        if record_symbol is None or record_symbol != identity.symbol:
-            return False
+    if not _record_route_matches_identity(record, identity):
+        return False
     client_order_id = getattr(record, "client_order_id", None)
     exchange_order_id = getattr(record, "exchange_order_id", None)
     if client_order_id and identity.client_order_id == client_order_id:
@@ -3177,8 +3346,113 @@ def _record_symbol(record: object) -> str | None:
     return text or None
 
 
+def _record_exchange(record: object) -> str | None:
+    exchange = getattr(record, "exchange", None)
+    if exchange is None:
+        return None
+    text = str(exchange).strip().lower()
+    return text or None
+
+
+def _record_market_type(record: object) -> str | None:
+    market_type = getattr(record, "market_type", None)
+    if market_type is None:
+        return None
+    text = str(market_type).strip().lower()
+    return text or None
+
+
+def _record_route_matches_pair(
+    record: object,
+    pair_state: PairCycleState,
+    runtime: RuntimeQueueLike,
+) -> bool:
+    route = _pair_route(pair_state, runtime)
+    record_symbol = _record_symbol(record)
+    if record_symbol is not None and record_symbol != route.symbol:
+        return False
+    record_exchange = _record_exchange(record)
+    if record_exchange is not None and record_exchange != route.exchange:
+        return False
+    record_market_type = _record_market_type(record)
+    if record_market_type is not None and record_market_type != route.market_type:
+        return False
+    return True
+
+
+def _record_route_matches_lease(record: object, lease: _OrderLease) -> bool:
+    record_symbol = _record_symbol(record)
+    if record_symbol is not None and record_symbol != lease.symbol:
+        return False
+    record_exchange = _record_exchange(record)
+    if (
+        record_exchange is not None
+        and lease.exchange is not None
+        and record_exchange != lease.exchange
+    ):
+        return False
+    record_market_type = _record_market_type(record)
+    if (
+        record_market_type is not None
+        and lease.market_type is not None
+        and record_market_type != lease.market_type
+    ):
+        return False
+    return True
+
+
+def _record_route_matches_identity(record: object, identity: OrderIdentity) -> bool:
+    record_symbol = _record_symbol(record)
+    if identity.symbol is not None:
+        if record_symbol is None or record_symbol != identity.symbol:
+            return False
+    record_exchange = _record_exchange(record)
+    if (
+        identity.exchange is not None
+        and record_exchange is not None
+        and record_exchange != identity.exchange
+    ):
+        return False
+    record_market_type = _record_market_type(record)
+    if (
+        identity.market_type is not None
+        and record_market_type is not None
+        and record_market_type != identity.market_type
+    ):
+        return False
+    return True
+
+
+def _identity_route_matches(identity: OrderIdentity, route: ExchangeRoute) -> bool:
+    if identity.symbol is not None and identity.symbol != route.symbol:
+        return False
+    if identity.exchange is not None and identity.exchange != route.exchange:
+        return False
+    if identity.market_type is not None and identity.market_type != route.market_type:
+        return False
+    return True
+
+
+def _command_route_matches_lease(
+    command: DragonSong,
+    lease: _OrderLease,
+    default_exchange: str,
+    default_market_type: str,
+) -> bool:
+    if str(command.symbol) != lease.symbol:
+        return False
+    command_exchange = command.exchange or default_exchange
+    if lease.exchange is not None and command_exchange != lease.exchange:
+        return False
+    command_market_type = command.market_type or default_market_type
+    if lease.market_type is not None and command_market_type != lease.market_type:
+        return False
+    return True
+
+
 def _identity_key(identity: OrderIdentity) -> str:
     return (
+        f"{identity.exchange or '-'}|{identity.market_type or '-'}|"
         f"{identity.symbol or '-'}|{identity.pair_name}|{identity.role}|"
         f"{identity.client_order_id or '-'}|{identity.exchange_order_id or '-'}"
     )
@@ -3235,6 +3509,9 @@ def _pair_uses_relative_tail(pair_state: PairCycleState) -> bool:
 
 def _runtime_sources_should_stop(runtime: RuntimeQueueLike) -> bool:
     keep_alive = bool(getattr(runtime, "should_keep_sources_alive", False))
+    queue = getattr(runtime, "event_queue", None)
+    if queue is not None and not queue.empty():
+        return False
     return runtime.all_pairs_terminal and not keep_alive
 
 
