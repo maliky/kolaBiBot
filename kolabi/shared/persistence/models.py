@@ -60,6 +60,7 @@ class ExchangeConnection(Base):
             "exchange",
             "environment",
             "market_type",
+            "account_scope",
             "stream_kind",
         ),
     )
@@ -68,6 +69,12 @@ class ExchangeConnection(Base):
     exchange: Mapped[str] = mapped_column(String(32), nullable=False)
     environment: Mapped[str] = mapped_column(String(32), nullable=False)
     market_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_scope: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="default",
+        server_default="default",
+    )
     stream_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -394,6 +401,8 @@ class RawExchangeEvent(Base):
             "ix_raw_exchange_events_retention",
             "exchange",
             "environment",
+            "market_type",
+            "account_scope",
             "stream_kind",
             "created_at",
         ),
@@ -401,6 +410,8 @@ class RawExchangeEvent(Base):
             "ix_raw_exchange_events_identity",
             "exchange",
             "environment",
+            "market_type",
+            "account_scope",
             "stream_kind",
             "event_type",
             "correlation_id",
@@ -409,6 +420,8 @@ class RawExchangeEvent(Base):
             "ix_raw_exchange_events_event_latest",
             "exchange",
             "environment",
+            "market_type",
+            "account_scope",
             "stream_kind",
             "event_type",
             "received_at",

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import logging
 import time
 from dataclasses import dataclass
@@ -48,6 +51,18 @@ class _Ticker:
     mark_price: float
     index_price: float
     last: float
+
+
+@dataclass(frozen=True)
+class _KrakenSpotOrderRequest:
+    side: str
+    quantity: float
+    kolabi_type: str
+    kraken_type: str
+    price: float | None
+    stop_price: float | None
+    client_order_id: str | None
+    leverage: str | None
 
 
 def _default_audit_db_url(
@@ -1485,6 +1500,777 @@ def _ticker_from_payload(payload: Dict[str, Any]) -> _Ticker:
     index_price = float(ticker.get("indexPrice", ticker.get("index_price", mark)) or mark)
     last = float(ticker.get("last", ticker.get("lastPrice", mark)) or mark)
     return _Ticker(bid=bid, ask=ask, mark_price=mark, index_price=index_price, last=last)
+
+
+class KrakenSpotAdapter(ExchangeABC):
+    """REST adapter for Kraken Spot."""
+
+    market_type = "spot"
+
+    def __init__(
+        self,
+        api_key: str,
+        api_secret: str,
+        base_url: str,
+        symbol: str,
+        *,
+        environment: str = "live",
+        timeout: float = 10.0,
+        market_type: str | None = None,
+        leverage: str | int | float | None = None,
+        audit_db_url: str | None = None,
+        account_scope: str = "default",
+        rest_audit_retention_minutes: int = DEFAULT_PRUNING.rest_audit.retention_minutes,
+        rest_audit_retention_limit: int = DEFAULT_PRUNING.rest_audit.retention_limit,
+        rest_audit_maintenance_seconds: float = (
+            DEFAULT_PRUNING.rest_audit.maintenance_seconds
+        ),
+        session: requests.Session | None = None,
+        **_ignored: Any,
+    ) -> None:
+        super().__init__(api_key, api_secret, base_url.rstrip("/"), symbol)
+        self.environment = environment
+        self.timeout = float(timeout)
+        self.market_type = market_type or self.market_type
+        self.leverage = None if leverage in (None, "") else str(leverage)
+        self.session = session or requests.Session()
+        self.account_scope = account_scope or "default"
+        self.audit_db_url = audit_db_url
+        self.rest_audit_retention_minutes = max(0, int(rest_audit_retention_minutes))
+        self.rest_audit_retention_limit = max(0, int(rest_audit_retention_limit))
+        self.rest_audit_maintenance_seconds = max(
+            1.0,
+            float(rest_audit_maintenance_seconds),
+        )
+        self.rest_audit_errors: list[str] = []
+        self._last_rest_audit_prune_monotonic = 0.0
+        self._audit_engine = (
+            create_persistence_engine(audit_db_url) if audit_db_url else None
+        )
+        self._audit_sessionmaker = (
+            sessionmaker(
+                bind=self._audit_engine,
+                expire_on_commit=False,
+                class_=Session,
+            )
+            if self._audit_engine is not None
+            else None
+        )
+        if self._audit_engine is not None:
+            Base.metadata.create_all(self._audit_engine)
+        self._orders_by_order_id: dict[str, _KrakenSpotOrderRequest] = {}
+        self._orders_by_client_id: dict[str, _KrakenSpotOrderRequest] = {}
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Dict[str, Any] | None = None,
+        auth: bool = False,
+    ) -> Dict[str, Any]:
+        payload = {str(key): value for key, value in dict(params or {}).items() if value not in (None, "")}
+        headers: dict[str, str] = {}
+        if auth:
+            nonce = str(int(time.time() * 1000))
+            payload["nonce"] = nonce
+            encoded = urlencode(payload)
+            headers = {
+                "API-Key": self.api_key,
+                "API-Sign": _sign_spot_rest(path, encoded, nonce, self.api_secret),
+            }
+        method_name = method.upper()
+        try:
+            response = self.session.request(
+                method=method_name,
+                url=f"{self.base_url}{path}",
+                params=payload if method_name == "GET" else None,
+                data=payload if method_name != "GET" else None,
+                headers=headers,
+                timeout=self.timeout,
+            )
+        except requests.exceptions.RequestException as exc:
+            error = RuntimeError(
+                f"Kraken Spot transport error on {path}: {exc.__class__.__name__}: {exc}"
+            )
+            self._record_rest_call(
+                method=method_name,
+                path=path,
+                request_params=payload,
+                attempt_count=1,
+                http_status=None,
+                response_payload={},
+                result_kind="transport_error",
+                error_text=str(error),
+            )
+            raise error from exc
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw_text": getattr(response, "text", "")}
+        status_code = getattr(response, "status_code", 200)
+        if status_code >= 400:
+            error = RuntimeError(f"Kraken Spot HTTP {status_code} on {path}: {data}")
+            self._record_rest_call(
+                method=method_name,
+                path=path,
+                request_params=payload,
+                attempt_count=1,
+                http_status=status_code,
+                response_payload=data if isinstance(data, dict) else {"payload": data},
+                result_kind="http_error",
+                error_text=str(error),
+            )
+            raise error
+        if not isinstance(data, dict):
+            raise RuntimeError(f"Kraken Spot non-object response on {path}: {data}")
+        errors = data.get("error")
+        if isinstance(errors, list) and errors:
+            error = RuntimeError(f"Kraken Spot error on {path}: {errors}")
+            self._record_rest_call(
+                method=method_name,
+                path=path,
+                request_params=payload,
+                attempt_count=1,
+                http_status=status_code,
+                response_payload=data,
+                result_kind="exchange_error",
+                error_text=str(error),
+            )
+            raise error
+        self._record_rest_call(
+            method=method_name,
+            path=path,
+            request_params=payload,
+            attempt_count=1,
+            http_status=status_code,
+            response_payload=data,
+            result_kind="ok",
+            error_text=None,
+        )
+        return cast(Dict[str, Any], data)
+
+    def _record_rest_call(
+        self,
+        *,
+        method: str,
+        path: str,
+        request_params: Dict[str, Any],
+        attempt_count: int,
+        http_status: int | None,
+        response_payload: Dict[str, Any],
+        result_kind: str,
+        error_text: str | None,
+    ) -> None:
+        if self._audit_sessionmaker is None:
+            return
+        if not _should_persist_spot_rest_call(method=method, path=path):
+            return
+        request_payload = cast(Dict[str, Any], _json_safe_value(request_params))
+        payload = cast(Dict[str, Any], _json_safe_value(response_payload))
+        exchange_order_id, client_order_id = _spot_rest_identity(
+            path=path,
+            request_payload=request_payload,
+            response_payload=payload,
+        )
+        endpoint_order_id = exchange_order_id or client_order_id
+        with self._audit_sessionmaker() as session:
+            try:
+                session.add(
+                    ExchangeRestCall(
+                        local_uuid=str(uuid4()),
+                        exchange="kraken",
+                        environment=self.environment,
+                        market_type=self.market_type,
+                        account_scope=self.account_scope,
+                        symbol=self.symbol,
+                        method=method.upper(),
+                        path=path,
+                        request_params=request_payload,
+                        attempt_count=attempt_count,
+                        http_status=http_status,
+                        result_kind=result_kind,
+                        response_payload=payload,
+                        error_text=error_text,
+                        client_order_id=client_order_id,
+                        exchange_order_id=exchange_order_id,
+                        endpoint_order_id=endpoint_order_id,
+                        correlation_id=client_order_id or exchange_order_id,
+                        ack_status=_spot_rest_ack_status(path, result_kind),
+                        ack_order_id=exchange_order_id,
+                        ack_client_order_id=client_order_id,
+                    )
+                )
+                session.commit()
+                self._prune_rest_audit_if_due(session)
+            except Exception as exc:
+                session.rollback()
+                self._record_rest_audit_failure(
+                    method=method,
+                    path=path,
+                    client_order_id=client_order_id,
+                    endpoint_order_id=endpoint_order_id,
+                    exc=exc,
+                )
+
+    def _record_rest_audit_failure(
+        self,
+        *,
+        method: str,
+        path: str,
+        client_order_id: str | None,
+        endpoint_order_id: str | None,
+        exc: BaseException,
+    ) -> None:
+        error = _compact_error(exc)
+        self.rest_audit_errors.append(
+            (
+                f"method={method.upper()} path={path} "
+                f"clOrdID={client_order_id or '-'} orderID={endpoint_order_id or '-'} "
+                f"error={error}"
+            )
+        )
+        _LOGGER.warning(
+            "rest call audit persistence failed method=%s path=%s clOrdID=%s orderID=%s error=%s",
+            method.upper(),
+            path,
+            client_order_id or "-",
+            endpoint_order_id or "-",
+            error,
+        )
+
+    def _prune_rest_audit_if_due(self, session: Session) -> None:
+        now_monotonic = time.monotonic()
+        if (
+            now_monotonic - self._last_rest_audit_prune_monotonic
+            < self.rest_audit_maintenance_seconds
+        ):
+            return
+        self._last_rest_audit_prune_monotonic = now_monotonic
+        try:
+            prune_exchange_rest_calls(
+                session,
+                exchange="kraken",
+                environment=self.environment,
+                market_type=self.market_type,
+                account_scope=self.account_scope,
+                retention_minutes=self.rest_audit_retention_minutes,
+                retention_limit=self.rest_audit_retention_limit,
+                now=datetime.now(timezone.utc),
+            )
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            _LOGGER.warning("rest call audit pruning skipped error=%s", _compact_error(exc))
+
+    def instrument_rules(self, symbol: str | None = None) -> dict[str, object]:
+        target_symbol = symbol or self.symbol
+        payload = self._request(
+            "GET",
+            "/0/public/AssetPairs",
+            params={"pair": target_symbol},
+        )
+        pair = _first_spot_result(payload)
+        pair_decimals = int(float(pair.get("pair_decimals", 0) or 0))
+        lot_decimals = int(float(pair.get("lot_decimals", 0) or 0))
+        return {
+            "symbol": target_symbol,
+            "status": pair.get("status") or pair.get("wsname"),
+            "tickSize": float(Decimal(1).scaleb(-pair_decimals)) if pair_decimals >= 0 else None,
+            "stepSize": float(Decimal(1).scaleb(-lot_decimals)) if lot_decimals >= 0 else None,
+            "minQuantity": _optional_float(pair.get("ordermin")) or 0.0,
+            "leverageBuy": pair.get("leverage_buy"),
+            "leverageSell": pair.get("leverage_sell"),
+        }
+
+    def list_instruments(self) -> list[Dict[str, Any]]:
+        """Return Kraken spot asset pairs from the selected REST endpoint."""
+
+        payload = self._request("GET", "/0/public/AssetPairs")
+        result = payload.get("result") if isinstance(payload, dict) else {}
+        if not isinstance(result, dict):
+            return []
+        rows: list[Dict[str, Any]] = []
+        for pair_id, item in result.items():
+            if not isinstance(item, dict):
+                continue
+            symbol = str(pair_id)
+            wsname = optional_str(item.get("wsname"))
+            status = optional_str(item.get("status"))
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "product_id": symbol,
+                    "wsname": wsname,
+                    "type": self.market_type,
+                    "status": status,
+                    "tradeable": status not in {"cancel_only", "post_only"},
+                    **item,
+                }
+            )
+        return rows
+
+    def validate_symbol(self, symbol: str | None = None) -> Dict[str, Any]:
+        """Validate a Kraken spot/margin pair and return compact metadata."""
+
+        target_symbol = symbol or self.symbol
+        rules = self.instrument_rules(target_symbol)
+        status = optional_str(rules.get("status"))
+        return {
+            "symbol": target_symbol,
+            "product_id": target_symbol,
+            "type": self.market_type,
+            "tradeable": status not in {"cancel_only", "post_only"},
+            **rules,
+        }
+
+    def instrument(self, symbol: str) -> Dict[str, Any]:
+        rules = self.instrument_rules(symbol)
+        payload = self._request("GET", "/0/public/Ticker", params={"pair": symbol})
+        ticker = _first_spot_result(payload)
+        bid = _spot_array_float(ticker.get("b"))
+        ask = _spot_array_float(ticker.get("a"))
+        last = _spot_array_float(ticker.get("c"))
+        return {
+            "symbol": symbol,
+            "tickSize": rules.get("tickSize"),
+            "minQuantity": rules.get("minQuantity"),
+            "bidPrice": bid,
+            "askPrice": ask,
+            "markPrice": last,
+            "indicativeSettlePrice": last,
+            "lastPrice": last,
+        }
+
+    def place_order(
+        self,
+        side: str,
+        orderQty: OrderQty | float,
+        price: Price | float | None = None,
+        stopPx: StopPrice | float | None = None,
+        type_: str = "LIMIT",
+        **params: Any,
+    ) -> OrderAck:
+        exec_inst = str(params.pop("execInst", "") or "")
+        if _has_exec_flag(exec_inst, "ReduceOnly") or _truthy(params.pop("reduceOnly", False)):
+            raise ValueError(f"Kraken {self.market_type} does not support ReduceOnly")
+        kraken_type = _map_spot_order_type(type_)
+        leverage = self._order_leverage(params.pop("leverage", None))
+        request: dict[str, Any] = {
+            "pair": self.symbol,
+            "type": side.lower(),
+            "ordertype": kraken_type,
+            "volume": float(orderQty),
+        }
+        client_order_id = optional_str(params.pop("clOrdID", None))
+        if client_order_id:
+            request["cl_ord_id"] = client_order_id
+        if _has_exec_flag(exec_inst, "ParticipateDoNotInitiate"):
+            request["oflags"] = "post"
+        if leverage:
+            request["leverage"] = leverage
+        if kraken_type == "limit":
+            if price is None:
+                raise ValueError("Kraken Spot limit order requires price")
+            request["price"] = float(price)
+        elif kraken_type == "market":
+            pass
+        elif kraken_type == "stop-loss":
+            if stopPx is None:
+                raise ValueError("Kraken Spot stop-loss order requires stopPx")
+            request["price"] = float(stopPx)
+        elif kraken_type == "stop-loss-limit":
+            if stopPx is None or price is None:
+                raise ValueError("Kraken Spot stop-loss-limit requires stopPx and price")
+            request["price"] = float(stopPx)
+            request["price2"] = float(price)
+        else:
+            raise ValueError(f"Unsupported Kraken Spot order type: {kraken_type}")
+        payload = self._request("POST", "/0/private/AddOrder", params=request, auth=True)
+        ack = _spot_ack_from_payload(payload, client_order_id=client_order_id)
+        self._cache_order(
+            ack,
+            _KrakenSpotOrderRequest(
+                side=side.lower(),
+                quantity=float(orderQty),
+                kolabi_type=str(type_),
+                kraken_type=kraken_type,
+                price=float(price) if price is not None else None,
+                stop_price=float(stopPx) if stopPx is not None else None,
+                client_order_id=client_order_id,
+                leverage=leverage,
+            ),
+        )
+        return ack
+
+    def amend_order(self, order_id: str, **params: Any) -> OrderAck:
+        cached = self._lookup_cached_order(order_id, params.get("clOrdID"))
+        if cached is None:
+            raise ValueError(
+                "Kraken Spot amend requires a cached original order from this process; "
+                f"order_id={order_id}"
+            )
+        self.cancel_order(order_id)
+        return self.place_order(
+            side=cached.side,
+            orderQty=float(params.get("orderQty") or cached.quantity),
+            price=params.get("price", cached.price),
+            stopPx=params.get("stopPx", cached.stop_price),
+            type_=cached.kolabi_type,
+            clOrdID=params.get("newClOrdID")
+            or params.get("replaceClOrdID")
+            or _replacement_spot_client_id(cached.client_order_id),
+            leverage=params.get("leverage", cached.leverage),
+        )
+
+    def cancel_order(self, order_id: str) -> OrderAck:
+        key = "txid"
+        if _looks_like_client_order_id(order_id):
+            key = "cl_ord_id"
+        payload = self._request(
+            "POST",
+            "/0/private/CancelOrder",
+            params={key: order_id},
+            auth=True,
+        )
+        self._forget_order(order_id)
+        return OrderAck(order_id=order_id, status="Canceled")
+
+    def live_open_orders(self) -> list[Dict[str, Any]]:
+        payload = self._request("POST", "/0/private/OpenOrders", auth=True)
+        open_orders = payload.get("result", {}).get("open") if isinstance(payload.get("result"), dict) else {}
+        if not isinstance(open_orders, dict):
+            return []
+        return [
+            _normalise_spot_open_order(order_id, cast(Dict[str, Any], row))
+            for order_id, row in open_orders.items()
+            if isinstance(row, dict) and not _is_spot_trigger_order(row)
+        ]
+
+    def live_trigger_orders(self) -> list[Dict[str, Any]]:
+        payload = self._request("POST", "/0/private/OpenOrders", auth=True)
+        open_orders = payload.get("result", {}).get("open") if isinstance(payload.get("result"), dict) else {}
+        if not isinstance(open_orders, dict):
+            return []
+        return [
+            _normalise_spot_open_order(order_id, cast(Dict[str, Any], row))
+            for order_id, row in open_orders.items()
+            if isinstance(row, dict) and _is_spot_trigger_order(row)
+        ]
+
+    def live_trigger_orders_db(self) -> list[Dict[str, Any]]:
+        return []
+
+    def open_orders(self) -> list[Dict[str, Any]]:
+        return [
+            *_spot_legacy_orders(self.live_open_orders()),
+            *_spot_legacy_orders(self.live_trigger_orders()),
+        ]
+
+    def get_position(self) -> Position:
+        if self.market_type != "margin":
+            payload = self._request("POST", "/0/private/Balance", auth=True)
+            result = payload.get("result") if isinstance(payload, dict) else {}
+            return Position(
+                symbol=self.symbol,
+                qty=_spot_base_balance_quantity(result, self.symbol),
+                entry_price=None,
+            )
+        payload = self._request("POST", "/0/private/OpenPositions", auth=True)
+        result = payload.get("result") if isinstance(payload, dict) else {}
+        qty = 0.0
+        entry_price: float | None = None
+        if isinstance(result, dict):
+            for row in result.values():
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("pair") or row.get("symbol") or "") not in {
+                    "",
+                    self.symbol,
+                }:
+                    continue
+                volume = float(row.get("vol") or row.get("volume") or 0.0)
+                qty += _spot_position_side(row) * volume
+                if entry_price is None:
+                    entry_price = _spot_entry_price(row, volume)
+        return Position(symbol=self.symbol, qty=qty, entry_price=entry_price)
+
+    def get_balance(self) -> float:
+        payload = self._request("POST", "/0/private/Balance", auth=True)
+        result = payload.get("result") if isinstance(payload, dict) else {}
+        if not isinstance(result, dict):
+            return 0.0
+        quote = _spot_quote_asset(self.symbol)
+        for key, value in result.items():
+            if str(key).upper().replace("Z", "", 1) == quote:
+                return float(value or 0.0)
+        return 0.0
+
+    def _order_leverage(self, override: object | None) -> str | None:
+        leverage = None if override in (None, "") else str(override)
+        leverage = leverage or self.leverage
+        if self.market_type == "margin" and not leverage:
+            raise ValueError(
+                "Kraken margin orders require explicit leverage via adapter_kwargs "
+                "or KRAKEN_SPOT_MARGIN_LEVERAGE"
+            )
+        return leverage
+
+    def _lookup_cached_order(
+        self,
+        order_id: str,
+        client_order_id: object | None = None,
+    ) -> _KrakenSpotOrderRequest | None:
+        if order_id in self._orders_by_order_id:
+            return self._orders_by_order_id[order_id]
+        if order_id in self._orders_by_client_id:
+            return self._orders_by_client_id[order_id]
+        if client_order_id is not None and str(client_order_id) in self._orders_by_client_id:
+            return self._orders_by_client_id[str(client_order_id)]
+        return None
+
+    def _cache_order(self, ack: OrderAck, request: _KrakenSpotOrderRequest) -> None:
+        if ack.order_id:
+            self._orders_by_order_id[str(ack.order_id)] = request
+        if request.client_order_id:
+            self._orders_by_client_id[request.client_order_id] = request
+
+    def _forget_order(self, identity: str) -> None:
+        cached = self._orders_by_order_id.pop(identity, None)
+        if cached is not None and cached.client_order_id:
+            self._orders_by_client_id.pop(cached.client_order_id, None)
+            return
+        self._orders_by_client_id.pop(identity, None)
+
+
+class KrakenMarginAdapter(KrakenSpotAdapter):
+    """Kraken Spot margin adapter using AddOrder leverage."""
+
+    market_type = "margin"
+
+
+def _should_persist_spot_rest_call(*, method: str, path: str) -> bool:
+    """Persist only spot/margin trading mutations needed for order forensics."""
+
+    if method.upper() != "POST":
+        return False
+    return path in {"/0/private/AddOrder", "/0/private/CancelOrder"}
+
+
+def _spot_rest_identity(
+    *,
+    path: str,
+    request_payload: Dict[str, Any],
+    response_payload: Dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Extract exchange/client order identifiers from Kraken Spot REST evidence."""
+
+    client_order_id = optional_str(request_payload.get("cl_ord_id"))
+    exchange_order_id = optional_str(request_payload.get("txid"))
+    if path == "/0/private/AddOrder":
+        result = response_payload.get("result")
+        if isinstance(result, dict):
+            txids = result.get("txid")
+            if isinstance(txids, list) and txids:
+                exchange_order_id = optional_str(txids[0])
+            elif txids not in (None, ""):
+                exchange_order_id = optional_str(txids)
+    if path == "/0/private/CancelOrder":
+        if request_payload.get("cl_ord_id") not in (None, ""):
+            client_order_id = optional_str(request_payload.get("cl_ord_id"))
+            exchange_order_id = None
+        elif request_payload.get("txid") not in (None, ""):
+            exchange_order_id = optional_str(request_payload.get("txid"))
+    return exchange_order_id, client_order_id
+
+
+def _spot_rest_ack_status(path: str, result_kind: str) -> str | None:
+    if result_kind != "ok":
+        return "Rejected"
+    if path == "/0/private/AddOrder":
+        return "New"
+    if path == "/0/private/CancelOrder":
+        return "Canceled"
+    return None
+
+
+def _sign_spot_rest(path: str, post_data: str, nonce: str, api_secret: str) -> str:
+    sha = hashlib.sha256((nonce + post_data).encode("utf-8")).digest()
+    mac = hmac.new(
+        base64.b64decode(api_secret),
+        path.encode("utf-8") + sha,
+        hashlib.sha512,
+    )
+    return base64.b64encode(mac.digest()).decode("ascii")
+
+
+def _first_spot_result(payload: Dict[str, Any]) -> Dict[str, Any]:
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for value in result.values():
+            if isinstance(value, dict):
+                return cast(Dict[str, Any], value)
+    return {}
+
+
+def _spot_array_float(value: object) -> float | None:
+    if isinstance(value, list) and value:
+        return _optional_float(value[0])
+    return _optional_float(value)
+
+
+def _map_spot_order_type(value: object) -> str:
+    normalized = str(value or "").replace("_", "").replace("-", "").lower()
+    if normalized in {"m", "market"}:
+        return "market"
+    if normalized in {"l", "limit"}:
+        return "limit"
+    if normalized in {"s", "stp", "stop", "stoploss", "stopmarket"}:
+        return "stop-loss"
+    if normalized in {"sl", "stoplimit", "stoplosslimit"}:
+        return "stop-loss-limit"
+    raise ValueError(f"Unsupported Kraken Spot order type '{value}'")
+
+
+def _spot_ack_from_payload(
+    payload: Dict[str, Any],
+    *,
+    client_order_id: str | None,
+) -> OrderAck:
+    result = payload.get("result") if isinstance(payload, dict) else {}
+    txids: object = None
+    if isinstance(result, dict):
+        txids = result.get("txid")
+    order_id = ""
+    if isinstance(txids, list) and txids:
+        order_id = str(txids[0])
+    elif txids not in (None, ""):
+        order_id = str(txids)
+    return OrderAck(
+        order_id=order_id,
+        status="New",
+        client_order_id=client_order_id,
+    )
+
+
+def _normalise_spot_open_order(order_id: object, row: Dict[str, Any]) -> Dict[str, Any]:
+    descr = row.get("descr") if isinstance(row.get("descr"), dict) else {}
+    return {
+        "order_id": str(order_id),
+        "client_order_id": optional_str(row.get("cl_ord_id")),
+        "symbol": str(descr.get("pair") or row.get("pair") or ""),
+        "side": str(descr.get("type") or row.get("type") or "").lower(),
+        "order_type": str(descr.get("ordertype") or row.get("ordertype") or ""),
+        "qty": _optional_float(row.get("vol")),
+        "filled": _optional_float(row.get("vol_exec")),
+        "price": _optional_float(descr.get("price") or row.get("price")),
+        "stop_price": _optional_float(descr.get("price") or row.get("stopprice")),
+        "trigger_signal": "",
+        "reduce_only": False,
+        "status": _spot_status_to_legacy(row.get("status")),
+    }
+
+
+def _spot_legacy_orders(orders: Iterable[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    return [
+        {
+            "orderID": order.get("order_id", ""),
+            "clOrdID": order.get("client_order_id", ""),
+            "ordStatus": order.get("status", ""),
+            "price": order.get("price") or order.get("stop_price"),
+            "orderQty": order.get("qty"),
+            "cumQty": order.get("filled"),
+            "side": str(order.get("side") or "").capitalize(),
+        }
+        for order in orders
+    ]
+
+
+def _is_spot_trigger_order(row: Dict[str, Any]) -> bool:
+    descr = row.get("descr") if isinstance(row.get("descr"), dict) else {}
+    order_type = str(descr.get("ordertype") or row.get("ordertype") or "").lower()
+    return "stop" in order_type or "take-profit" in order_type
+
+
+def _spot_status_to_legacy(value: object) -> str:
+    normalized = str(value or "").lower()
+    if normalized == "open":
+        return "New"
+    if normalized == "closed":
+        return "Filled"
+    if normalized == "canceled":
+        return "Canceled"
+    return normalized.capitalize() or "New"
+
+
+def _looks_like_client_order_id(value: object) -> bool:
+    text = str(value or "")
+    return text.startswith(("H", "T")) or "-" in text and not text.startswith("O")
+
+
+def _replacement_spot_client_id(previous: str | None) -> str:
+    prefix = (previous or "krk")[:24].rstrip("-")
+    return f"{prefix}-r{uuid4().hex[:9]}"[:32]
+
+
+def _spot_quote_asset(symbol: str) -> str:
+    compact = _normalise_spot_symbol_text(symbol)
+    for quote in ("USDT", "USDC", "USD", "EUR", "BTC", "ETH"):
+        if compact.endswith(quote):
+            return quote
+    return "USD"
+
+
+def _spot_base_asset(symbol: str) -> str:
+    compact = _normalise_spot_symbol_text(symbol)
+    quote = _spot_quote_asset(compact)
+    if quote and compact.endswith(quote):
+        return compact[: -len(quote)]
+    return compact
+
+
+def _normalise_spot_symbol_text(symbol: str) -> str:
+    return symbol.replace("/", "").replace("_", "").replace("-", "").upper()
+
+
+def _spot_asset_key(value: object) -> str:
+    text = str(value or "").upper()
+    if "." in text:
+        text = text.split(".", 1)[0]
+    if len(text) > 3 and text[0] in {"X", "Z"}:
+        text = text[1:]
+    return text
+
+
+def _spot_base_balance_quantity(result: object, symbol: str) -> float:
+    if not isinstance(result, dict):
+        return 0.0
+    base = _spot_base_asset(symbol)
+    for key, value in result.items():
+        if _spot_asset_key(key) == base:
+            return float(value or 0.0)
+    return 0.0
+
+
+def _spot_position_side(row: Dict[str, Any]) -> float:
+    side = str(row.get("type") or row.get("side") or "").lower()
+    return -1.0 if side in {"sell", "short"} else 1.0
+
+
+def _spot_entry_price(row: Dict[str, Any], volume: float) -> float | None:
+    price = _optional_float(row.get("price") or row.get("entryPrice"))
+    if price is not None:
+        return price
+    cost = _optional_float(row.get("cost"))
+    if cost is None or volume == 0.0:
+        return None
+    return abs(cost / volume)
+
+
+def optional_str(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 Adapter = KrakenFuturesAdapter

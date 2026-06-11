@@ -13,6 +13,7 @@ class OrderAck:
     orig_qty: Optional[OrderQty | float] = None
     executed_qty: Optional[OrderQty | float] = None
     side: Optional[str] = None
+    client_order_id: Optional[str] = None
 
 @dataclass
 class Position:

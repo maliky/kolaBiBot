@@ -19,6 +19,19 @@ def test_public_stream_url_uses_combined_futures_stream() -> None:
     )
 
 
+def test_public_stream_url_uses_spot_stream_without_mark_price() -> None:
+    config = BinanceConfig(
+        pair="BTCUSDT",
+        ws_url="wss://example/stream",
+        depth=20,
+        market_type="spot",
+    )
+
+    assert public_stream_url(config) == (
+        "wss://example/stream?streams=btcusdt@depth20@500ms/btcusdt@ticker"
+    )
+
+
 def test_extract_depth_payload_from_combined_stream() -> None:
     message = unwrap_combined_stream(
         {

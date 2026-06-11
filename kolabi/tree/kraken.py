@@ -9,7 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Sequence
+from typing import Any, Sequence, cast
 from uuid import uuid4
 
 import requests
@@ -509,6 +509,21 @@ class KrakenTree:
         return ticker
 
     def _fetch_ticker_prices(self) -> TickerPrices:
+        if self.config.market_type != "futures":
+            response = self._rest_session.get(
+                f"{self.config.rest_url.rstrip('/')}/0/public/Ticker",
+                params={"pair": self.config.pair},
+                timeout=max(0.2, self.config.ticker_timeout_seconds),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            ticker_map = _first_spot_public_result(payload)
+            last = spot_ticker_price(ticker_map.get("c"))
+            return TickerPrices(
+                last_price=last,
+                mark_price=last,
+                index_price=last,
+            )
         response = self._rest_session.get(
             f"{self.config.rest_url.rstrip('/')}/tickers/{self.config.pair}",
             timeout=max(0.2, self.config.ticker_timeout_seconds),
@@ -728,7 +743,17 @@ def build_engine(db_url: str) -> Engine:
 
 
 def subscription_message(config: KrakenConfig) -> dict[str, object]:
-    """Construit le message d'abonnement Kraken Futures book."""
+    """Construit le message d'abonnement Kraken book."""
+    if config.market_type != "futures":
+        return {
+            "method": "subscribe",
+            "params": {
+                "channel": "book",
+                "symbol": [config.pair],
+                "depth": _kraken_spot_depth(config.depth),
+                "snapshot": True,
+            },
+        }
     return {
         "event": "subscribe",
         "feed": "book",
@@ -737,9 +762,12 @@ def subscription_message(config: KrakenConfig) -> dict[str, object]:
 
 
 def extract_book_payload(message: object) -> BookPayload | None:
-    """Extrait snapshot ou delta du feed Futures `book`."""
+    """Extrait snapshot ou delta du feed Kraken `book`."""
     if not isinstance(message, dict):
         return None
+    spot_payload = extract_spot_book_payload(message)
+    if spot_payload is not None:
+        return spot_payload
     # Les accusés de reception `event=subscribed` reutilisent parfois `feed=book`.
     # Il faut donc filtrer d'abord les evenements d'administration pour ne pas
     # les confondre avec un vrai delta.
@@ -773,6 +801,36 @@ def extract_book_payload(message: object) -> BookPayload | None:
             quantity=optional_float(message.get("qty")),
         )
     return None
+
+
+def extract_spot_book_payload(message: dict[str, object]) -> BookPayload | None:
+    if message.get("channel") != "book":
+        return None
+    data = message.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+    item = data[0]
+    if not isinstance(item, dict):
+        return None
+    message_type = str(message.get("type") or "")
+    if message_type not in {"snapshot", "update"}:
+        return None
+    if message_type == "update":
+        asks = tuple(parse_spot_update_levels(item.get("asks", []), depth=10_000))
+        bids = tuple(parse_spot_update_levels(item.get("bids", []), depth=10_000))
+    else:
+        asks = tuple(parse_levels(cast(Sequence[RawLevelT], item.get("asks", [])), depth=10_000))
+        bids = tuple(parse_levels(cast(Sequence[RawLevelT], item.get("bids", [])), depth=10_000))
+    if not asks and not bids:
+        return None
+    return BookPayload(
+        message_type="snapshot" if message_type == "snapshot" else "update",
+        symbol=str(item.get("symbol") or ""),
+        asks=asks,
+        bids=bids,
+        source_timestamp=parse_kraken_time(item.get("timestamp")),
+        sequence=None,
+    )
 
 
 def extract_book_update(
@@ -810,8 +868,12 @@ def apply_book_payload(
     if payload.sequence is not None and state.sequence is not None:
         if payload.sequence <= state.sequence:
             return state
-    asks = apply_side_update(state.asks, payload, depth, side_name="sell")
-    bids = apply_side_update(state.bids, payload, depth, side_name="buy")
+    if payload.asks or payload.bids:
+        asks = apply_bulk_side_update(state.asks, payload.asks, depth, reverse=False)
+        bids = apply_bulk_side_update(state.bids, payload.bids, depth, reverse=True)
+    else:
+        asks = apply_side_update(state.asks, payload, depth, side_name="sell")
+        bids = apply_side_update(state.bids, payload, depth, side_name="buy")
     if not asks or not bids:
         raise ValueError("kraken_tree local book lost one side")
     return OrderBookState(
@@ -837,6 +899,22 @@ def apply_side_update(
         else:
             levels[payload.price] = payload.quantity
     reverse = side_name == "buy"
+    return truncate_book_side(tuple(levels.items()), depth, reverse=reverse)
+
+
+def apply_bulk_side_update(
+    current: Sequence[BookLevelT],
+    updates: Sequence[BookLevelT],
+    depth: int,
+    *,
+    reverse: bool,
+) -> tuple[BookLevelT, ...]:
+    levels = {price: quantity for price, quantity in current}
+    for price, quantity in updates:
+        if quantity <= 0:
+            levels.pop(price, None)
+        else:
+            levels[price] = quantity
     return truncate_book_side(tuple(levels.items()), depth, reverse=reverse)
 
 
@@ -867,6 +945,25 @@ def parse_levels(levels: Sequence[RawLevelT], depth: int) -> list[BookLevelT]:
         else:
             continue
         if price is None or quantity is None or quantity <= 0:
+            continue
+        parsed.append((price, quantity))
+    return parsed
+
+
+def parse_spot_update_levels(levels: object, depth: int) -> list[BookLevelT]:
+    if not isinstance(levels, list):
+        return []
+    parsed: list[BookLevelT] = []
+    for level in levels[:depth]:
+        if isinstance(level, dict):
+            price = optional_float(level.get("price"))
+            quantity = optional_float(level.get("qty"))
+        elif isinstance(level, (list, tuple)) and len(level) >= 2:
+            price = optional_float(level[0])
+            quantity = optional_float(level[1])
+        else:
+            continue
+        if price is None or quantity is None:
             continue
         parsed.append((price, quantity))
     return parsed
@@ -1349,6 +1446,32 @@ def _format_status_price(value: float | None, *, tick_size: float | None) -> str
     return f"{rounded:.{decimals}f}"
 
 
+def _kraken_spot_depth(depth: int) -> int:
+    allowed = (10, 25, 100, 500, 1000)
+    for value in allowed:
+        if depth <= value:
+            return value
+    return allowed[-1]
+
+
+def _first_spot_public_result(payload: object) -> dict[str, object]:
+    if not isinstance(payload, dict):
+        return {}
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return {}
+    for value in result.values():
+        if isinstance(value, dict):
+            return cast(dict[str, object], value)
+    return {}
+
+
+def spot_ticker_price(value: object) -> float | None:
+    if isinstance(value, list) and value:
+        return optional_float(value[0])
+    return optional_float(value)
+
+
 def format_trace_message(message: object, raw_payload: str, trace_format: str) -> str:
     """Produit une trace lisible d'un message websocket."""
     if trace_format == "json":
@@ -1470,14 +1593,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def config_from_args(args: argparse.Namespace) -> KrakenConfig:
     """Convertit les arguments CLI en configuration immuable."""
-    env_cfg = kraken_futures_environment(args.environment)
+    defaults = kraken_public_defaults(args.environment, args.market_type)
     return KrakenConfig(
         pair=args.pair,
         depth=args.depth,
-        ws_url=args.ws_url or env_cfg.public_ws_url,
-        rest_url=args.rest_url or env_cfg.rest_url,
+        ws_url=args.ws_url or defaults["ws_url"],
+        rest_url=args.rest_url or defaults["rest_url"],
         db_url=args.db_url or kraken_futures_public_db_url(args.environment, args.pair),
-        private_db_url=args.private_db_url or env_cfg.private_db_url,
+        private_db_url=args.private_db_url or defaults["private_db_url"],
         exchange=args.exchange,
         environment=args.environment,
         market_type=args.market_type,
@@ -1494,6 +1617,27 @@ def config_from_args(args: argparse.Namespace) -> KrakenConfig:
         trace_ws_format=args.trace_ws_format,
         trace_ws_max_lines=args.trace_ws_max_lines,
     )
+
+
+def kraken_public_defaults(environment: str, market_type: str) -> dict[str, str]:
+    if market_type == "futures":
+        env_cfg = kraken_futures_environment(environment)
+        return {
+            "ws_url": env_cfg.public_ws_url,
+            "rest_url": env_cfg.rest_url,
+            "private_db_url": env_cfg.private_db_url,
+        }
+    if environment == "demo":
+        return {
+            "ws_url": "wss://ws.kraken.com/v2",
+            "rest_url": "",
+            "private_db_url": "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
+        }
+    return {
+        "ws_url": "wss://ws.kraken.com/v2",
+        "rest_url": "https://api.kraken.com",
+        "private_db_url": "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
+    }
 
 
 def print_status(tree: KrakenTree, pair: str) -> None:

@@ -27,8 +27,8 @@ _BINANCE_FUTURES_ENVIRONMENTS = {
         public_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market",
         private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
         critical_private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical",
-        api_key_env="BINANCE_FUTURES_DEMO_API_KEY",
-        api_secret_env="BINANCE_FUTURES_DEMO_API_SECRET",
+        api_key_env="BINF_DEMO_API_KEY",
+        api_secret_env="BINF_DEMO_API_SECRET",
     ),
     "live": BinanceFuturesEnvironment(
         environment="live",
@@ -38,8 +38,8 @@ _BINANCE_FUTURES_ENVIRONMENTS = {
         public_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market",
         private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
         critical_private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical",
-        api_key_env="BINANCE_FUTURES_API_KEY",
-        api_secret_env="BINANCE_FUTURES_API_SECRET",
+        api_key_env="BINF_API_KEY",
+        api_secret_env="BINF_API_SECRET",
     ),
 }
 

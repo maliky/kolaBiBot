@@ -1,8 +1,9 @@
-"""Binance USD-M Futures adapter.
+"""Binance REST adapters.
 
-This adapter deliberately talks to the `/fapi` Futures API directly instead of
-using the legacy spot `python-binance` client. The bot passes platform-specific
-symbols in TSV files, so no symbol mapping is attempted here.
+The bot passes platform-specific symbols in TSV files, so no symbol mapping is
+attempted here. USD-M Futures remains the default adapter; Spot and Margin share
+the same signing, rounding, audit, and runtime-facing order contract where the
+Binance APIs overlap.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_DOWN, ROUND_HALF_UP, ROUND_UP, Decimal
 from typing import Any, Dict, Iterable, Sequence, cast
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -56,6 +57,20 @@ class BinanceOrderRequest:
 class BinanceAdapter(ExchangeABC):
     """REST adapter for Binance USD-M Futures."""
 
+    market_type = "futures"
+    order_path = "/fapi/v1/order"
+    test_order_path: str | None = "/fapi/v1/order/test"
+    open_orders_path = "/fapi/v1/openOrders"
+    exchange_info_path = "/fapi/v1/exchangeInfo"
+    book_ticker_path = "/fapi/v1/ticker/bookTicker"
+    premium_index_path = "/fapi/v1/premiumIndex"
+    position_path = "/fapi/v2/positionRisk"
+    balance_path = "/fapi/v2/balance"
+    supports_reduce_only = True
+    supports_working_type = True
+    supports_native_limit_amend = True
+    uses_margin_order_params = False
+
     def __init__(
         self,
         api_key: str,
@@ -67,6 +82,10 @@ class BinanceAdapter(ExchangeABC):
         timeout: float = 10.0,
         audit_db_url: str | None = None,
         account_scope: str = "default",
+        market_type: str | None = None,
+        side_effect_type: str | None = None,
+        is_isolated: bool = False,
+        auto_repay_at_cancel: bool | None = None,
         rest_audit_retention_minutes: int = 1440,
         rest_audit_retention_limit: int = 10000,
         rest_audit_maintenance_seconds: float = _REST_AUDIT_MAINTENANCE_SECONDS,
@@ -74,6 +93,10 @@ class BinanceAdapter(ExchangeABC):
     ) -> None:
         super().__init__(api_key, api_secret, base_url.rstrip("/"), symbol)
         self.environment = environment
+        self.market_type = market_type or self.market_type
+        self.side_effect_type = side_effect_type
+        self.is_isolated = _truthy(is_isolated)
+        self.auto_repay_at_cancel = auto_repay_at_cancel
         self.timeout = float(timeout)
         self.account_scope = account_scope
         self.rest_audit_retention_minutes = rest_audit_retention_minutes
@@ -223,7 +246,7 @@ class BinanceAdapter(ExchangeABC):
                         local_uuid=str(uuid4()),
                         exchange="binance",
                         environment=self.environment,
-                        market_type="futures",
+                        market_type=self.market_type,
                         account_scope=self.account_scope,
                         symbol=optional_str(
                             order_like.get("symbol") or request_payload.get("symbol")
@@ -300,7 +323,7 @@ class BinanceAdapter(ExchangeABC):
             session,
             exchange="binance",
             environment=self.environment,
-            market_type="futures",
+            market_type=self.market_type,
             account_scope=self.account_scope,
             retention_minutes=self.rest_audit_retention_minutes,
             retention_limit=self.rest_audit_retention_limit,
@@ -316,7 +339,7 @@ class BinanceAdapter(ExchangeABC):
             return self._rules_cache[target_symbol]
         payload = self._request(
             "GET",
-            "/fapi/v1/exchangeInfo",
+            self.exchange_info_path,
             params={"symbol": target_symbol},
             auth=False,
         )
@@ -332,6 +355,8 @@ class BinanceAdapter(ExchangeABC):
             price_filter = filters.get("PRICE_FILTER", {})
             lot_filter = filters.get("LOT_SIZE", {})
             market_lot_filter = filters.get("MARKET_LOT_SIZE", {})
+            min_notional_filter = filters.get("MIN_NOTIONAL", {})
+            notional_filter = filters.get("NOTIONAL", {})
             rules: dict[str, object] = {
                 "symbol": target_symbol,
                 "status": item.get("status"),
@@ -345,12 +370,58 @@ class BinanceAdapter(ExchangeABC):
                     lot_filter.get("minQty")
                     or market_lot_filter.get("minQty")
                 ),
+                "minNotional": _optional_float(
+                    min_notional_filter.get("notional")
+                    or min_notional_filter.get("minNotional")
+                    or notional_filter.get("minNotional")
+                ),
                 "quantityPrecision": item.get("quantityPrecision"),
                 "pricePrecision": item.get("pricePrecision"),
             }
             self._rules_cache[target_symbol] = rules
             return rules
-        raise ValueError(f"Binance Futures symbol not found: {target_symbol}")
+        raise ValueError(f"Binance {self.market_type} symbol not found: {target_symbol}")
+
+    def list_instruments(self) -> list[Dict[str, Any]]:
+        """Return Binance symbols from the selected market exchange-info endpoint."""
+
+        payload = self._request(
+            "GET",
+            self.exchange_info_path,
+            auth=False,
+        )
+        symbols = payload.get("symbols", []) if isinstance(payload, dict) else []
+        rows: list[Dict[str, Any]] = []
+        for item in symbols:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol") or "")
+            if not symbol:
+                continue
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "product_id": symbol,
+                    "type": self.market_type,
+                    "status": item.get("status"),
+                    "tradeable": str(item.get("status") or "").upper() == "TRADING",
+                    **item,
+                }
+            )
+        return rows
+
+    def validate_symbol(self, symbol: str | None = None) -> Dict[str, Any]:
+        """Validate a Binance symbol and return operator-facing metadata."""
+
+        target_symbol = symbol or self.symbol
+        rules = self.instrument_rules(target_symbol)
+        return {
+            "symbol": target_symbol,
+            "product_id": target_symbol,
+            "type": self.market_type,
+            "tradeable": str(rules.get("status") or "").upper() == "TRADING",
+            **rules,
+        }
 
     def validate_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
         """Round quantity/price fields against Binance symbol filters."""
@@ -389,9 +460,21 @@ class BinanceAdapter(ExchangeABC):
             exec_inst,
             "ReduceOnly",
         )
-        binance_type = _map_order_type(type_)
+        binance_type = _map_order_type(type_, self.market_type)
+        if reduce_only and not self.supports_reduce_only:
+            raise ValueError(
+                f"Binance {self.market_type} orders do not support ReduceOnly"
+            )
         working_type = _working_type_from_exec_inst(exec_inst)
-        time_in_force = _time_in_force_from_exec_inst(exec_inst, binance_type)
+        if working_type is not None and not self.supports_working_type:
+            raise ValueError(
+                f"Binance {self.market_type} stop triggers do not support MarkPrice/LastPrice"
+            )
+        binance_type, time_in_force = _apply_post_only(
+            exec_inst,
+            binance_type,
+            self.market_type,
+        )
         client_order_id = str(params.pop("clOrdID", "") or _generated_client_order_id())
         request = {
             "symbol": self.symbol,
@@ -400,27 +483,38 @@ class BinanceAdapter(ExchangeABC):
             "quantity": float(orderQty),
             "newClientOrderId": client_order_id,
         }
-        if reduce_only:
+        if reduce_only and self.supports_reduce_only:
             request["reduceOnly"] = "true"
-        if working_type is not None:
+        if working_type is not None and self.supports_working_type:
             request["workingType"] = working_type
-        if binance_type == "LIMIT":
+        if binance_type in {"LIMIT", "LIMIT_MAKER"}:
             if price is None:
                 raise ValueError("Binance LIMIT order requires price")
             request["price"] = float(price)
-            request["timeInForce"] = time_in_force or "GTC"
+            if binance_type == "LIMIT":
+                request["timeInForce"] = time_in_force or "GTC"
         elif binance_type == "MARKET":
             pass
-        elif binance_type == "STOP_MARKET":
+        elif binance_type in {"STOP_MARKET", "STOP_LOSS"}:
             if stopPx is None:
-                raise ValueError("Binance STOP_MARKET order requires stopPx")
+                raise ValueError(f"Binance {binance_type} order requires stopPx")
             request["stopPrice"] = float(stopPx)
+        elif binance_type == "STOP_LOSS_LIMIT":
+            if stopPx is None:
+                raise ValueError("Binance STOP_LOSS_LIMIT order requires stopPx")
+            if price is None:
+                raise ValueError("Binance STOP_LOSS_LIMIT order requires price")
+            request["stopPrice"] = float(stopPx)
+            request["price"] = float(price)
+            request["timeInForce"] = time_in_force or "GTC"
         else:
             raise ValueError(f"Unsupported Binance order type: {binance_type}")
-        normalised = self.validate_order(request)
+        normalised = self.validate_order(
+            self._with_route_params(request, include_side_effect=True)
+        )
         payload = self._request(
             "POST",
-            "/fapi/v1/order",
+            self.order_path,
             params=normalised,
             auth=True,
         )
@@ -449,6 +543,8 @@ class BinanceAdapter(ExchangeABC):
                 "Binance amend requires a cached original order from this process; "
                 f"order_id={order_id}"
             )
+        if not self.supports_native_limit_amend:
+            return self._amend_by_cancel_replace(order_id, cached, params)
         if cached.binance_type == "LIMIT":
             quantity = float(params.get("orderQty") or cached.quantity)
             price = params.get("price")
@@ -467,7 +563,7 @@ class BinanceAdapter(ExchangeABC):
             )
             payload = self._request(
                 "PUT",
-                "/fapi/v1/order",
+                self.order_path,
                 params=request,
                 auth=True,
             )
@@ -503,6 +599,28 @@ class BinanceAdapter(ExchangeABC):
             execInst=_exec_inst_from_cached(cached),
         )
 
+    def _amend_by_cancel_replace(
+        self,
+        order_id: str,
+        cached: BinanceOrderRequest,
+        params: dict[str, Any],
+    ) -> OrderAck:
+        self.cancel_order(order_id)
+        return self.place_order(
+            side=cached.side,
+            orderQty=float(params.get("orderQty") or cached.quantity),
+            price=params.get("price", cached.price),
+            stopPx=params.get("stopPx", cached.stop_price),
+            type_=cached.kolabi_type,
+            clOrdID=str(
+                params.get("newClOrdID")
+                or params.get("replaceClOrdID")
+                or _replacement_client_order_id(cached.client_order_id)
+            ),
+            reduceOnly=cached.reduce_only,
+            execInst=_exec_inst_from_cached(cached),
+        )
+
     def cancel_order(self, order_id: str) -> OrderAck:
         request = {
             "symbol": self.symbol,
@@ -510,8 +628,8 @@ class BinanceAdapter(ExchangeABC):
         }
         payload = self._request(
             "DELETE",
-            "/fapi/v1/order",
-            params=request,
+            self.order_path,
+            params=self._with_route_params(request, include_auto_repay=True),
             auth=True,
         )
         ack = _ack_from_payload(payload)
@@ -522,8 +640,8 @@ class BinanceAdapter(ExchangeABC):
     def live_open_orders(self) -> list[Dict[str, Any]]:
         payload = self._request(
             "GET",
-            "/fapi/v1/openOrders",
-            params={"symbol": self.symbol},
+            self.open_orders_path,
+            params=self._with_route_params({"symbol": self.symbol}),
             auth=True,
         )
         rows = payload if isinstance(payload, list) else []
@@ -536,8 +654,8 @@ class BinanceAdapter(ExchangeABC):
     def live_trigger_orders(self) -> list[Dict[str, Any]]:
         payload = self._request(
             "GET",
-            "/fapi/v1/openOrders",
-            params={"symbol": self.symbol},
+            self.open_orders_path,
+            params=self._with_route_params({"symbol": self.symbol}),
             auth=True,
         )
         rows = payload if isinstance(payload, list) else []
@@ -557,32 +675,61 @@ class BinanceAdapter(ExchangeABC):
         rules = self.instrument_rules(symbol)
         ticker = self._request(
             "GET",
-            "/fapi/v1/ticker/bookTicker",
+            self.book_ticker_path,
             params={"symbol": symbol},
             auth=False,
         )
-        premium = self._request(
-            "GET",
-            "/fapi/v1/premiumIndex",
-            params={"symbol": symbol},
-            auth=False,
+        premium = {}
+        if self.premium_index_path:
+            premium = self._request(
+                "GET",
+                self.premium_index_path,
+                params={"symbol": symbol},
+                auth=False,
+            )
+        mark_price = (
+            _optional_float(premium.get("markPrice"))
+            if isinstance(premium, dict)
+            else None
         )
+        last_price = mark_price
+        if not self.premium_index_path and isinstance(ticker, dict):
+            last_price = _optional_float(ticker.get("lastPrice"))
         return {
             "symbol": symbol,
             "tickSize": rules.get("tickSize"),
             "minQuantity": rules.get("minQuantity"),
+            "minNotional": rules.get("minNotional"),
+            "stepSize": rules.get("stepSize"),
             "bidPrice": _optional_float(ticker.get("bidPrice")) if isinstance(ticker, dict) else None,
             "askPrice": _optional_float(ticker.get("askPrice")) if isinstance(ticker, dict) else None,
-            "markPrice": _optional_float(premium.get("markPrice")) if isinstance(premium, dict) else None,
-            "lastPrice": _optional_float(premium.get("markPrice")) if isinstance(premium, dict) else None,
+            "markPrice": mark_price,
+            "lastPrice": last_price,
             "indicativeSettlePrice": _optional_float(premium.get("indexPrice")) if isinstance(premium, dict) else None,
         }
 
     def get_position(self) -> Position:
+        if not self.position_path:
+            payload = self._request(
+                "GET",
+                self.balance_path,
+                params=self._balance_params(),
+                auth=True,
+            )
+            return Position(
+                symbol=self.symbol,
+                qty=_spot_position_qty(
+                    payload,
+                    self.symbol,
+                    market_type=self.market_type,
+                    is_isolated=self.is_isolated,
+                ),
+                entry_price=None,
+            )
         payload = self._request(
             "GET",
-            "/fapi/v2/positionRisk",
-            params={"symbol": self.symbol},
+            self.position_path,
+            params=self._with_route_params({"symbol": self.symbol}),
             auth=True,
         )
         rows = payload if isinstance(payload, list) else [payload]
@@ -597,7 +744,14 @@ class BinanceAdapter(ExchangeABC):
         return Position(symbol=self.symbol, qty=0.0, entry_price=None)
 
     def get_balance(self) -> float:
-        payload = self._request("GET", "/fapi/v2/balance", auth=True)
+        payload = self._request("GET", self.balance_path, params=self._balance_params(), auth=True)
+        if isinstance(payload, dict):
+            if "balances" in payload:
+                return _balance_from_asset_rows(payload.get("balances"), self.symbol)
+            if "userAssets" in payload:
+                return _margin_balance_from_assets(payload.get("userAssets"), self.symbol)
+            if "assets" in payload:
+                return _isolated_margin_balance_from_assets(payload.get("assets"), self.symbol)
         rows = payload if isinstance(payload, list) else []
         for item in rows:
             if not isinstance(item, dict):
@@ -605,6 +759,105 @@ class BinanceAdapter(ExchangeABC):
             if str(item.get("asset") or "").upper() == "USDT":
                 return float(item.get("availableBalance") or item.get("balance") or 0.0)
         return 0.0
+
+    def permission_status(self) -> dict[str, object]:
+        """Validate order-write permission without creating an order when possible."""
+
+        if self.test_order_path is None:
+            return {
+                "exchange": "binance",
+                "market_type": self.market_type,
+                "symbol": self.symbol,
+                "permission_probe": "not_supported",
+                "can_place_orders": None,
+                "reason": "adapter does not expose a no-order permission probe",
+            }
+        try:
+            request = self._permission_test_order()
+            self._request(
+                "POST",
+                self.test_order_path,
+                params=request,
+                auth=True,
+            )
+        except Exception as exc:
+            return {
+                "exchange": "binance",
+                "market_type": self.market_type,
+                "symbol": self.symbol,
+                "permission_probe": "test_order",
+                "test_order_path": self.test_order_path,
+                "can_place_orders": False,
+                "reason": "test_order_failed",
+                "error": _compact_error(exc),
+            }
+        return {
+            "exchange": "binance",
+            "market_type": self.market_type,
+            "symbol": self.symbol,
+            "permission_probe": "test_order",
+            "test_order_path": self.test_order_path,
+            "can_place_orders": True,
+            "reason": "ok",
+        }
+
+    def _permission_test_order(self) -> Dict[str, Any]:
+        rules = self.instrument_rules(self.symbol)
+        reference_price = self._permission_reference_price(rules)
+        quantity = _permission_test_quantity(rules, reference_price)
+        request = {
+            "symbol": self.symbol,
+            "side": "BUY",
+            "type": "LIMIT",
+            "quantity": quantity,
+            "price": reference_price,
+            "timeInForce": "GTC",
+            "newClientOrderId": _generated_client_order_id(),
+        }
+        return self.validate_order(
+            self._with_route_params(request, include_side_effect=False)
+        )
+
+    def _permission_reference_price(self, rules: dict[str, object]) -> float:
+        ticker = self._request(
+            "GET",
+            self.book_ticker_path,
+            params={"symbol": self.symbol},
+            auth=False,
+        )
+        if isinstance(ticker, dict):
+            for key in ("bidPrice", "askPrice", "lastPrice"):
+                value = _optional_float(ticker.get(key))
+                if value and value > 0:
+                    return value
+        min_price = _optional_float(rules.get("minPrice")) or 1.0
+        tick = _optional_float(rules.get("tickSize")) or 1.0
+        return max(min_price, tick)
+
+    def _with_route_params(
+        self,
+        params: Dict[str, Any],
+        *,
+        include_side_effect: bool = False,
+        include_auto_repay: bool = False,
+    ) -> Dict[str, Any]:
+        payload = dict(params)
+        if not self.uses_margin_order_params:
+            return payload
+        if self.is_isolated:
+            payload["isIsolated"] = "TRUE"
+        if include_side_effect and self.side_effect_type:
+            payload["sideEffectType"] = self.side_effect_type
+        if include_auto_repay and self.auto_repay_at_cancel is not None:
+            payload["autoRepayAtCancel"] = (
+                "TRUE" if self.auto_repay_at_cancel else "FALSE"
+            )
+        return payload
+
+    def _balance_params(self) -> Dict[str, Any]:
+        if self.uses_margin_order_params and self.is_isolated:
+            return {"symbols": self.symbol}
+        return {}
 
     def _lookup_cached_order(
         self,
@@ -632,27 +885,27 @@ class BinanceAdapter(ExchangeABC):
         self._orders_by_client_id.pop(identity, None)
 
 
-def _map_order_type(value: object) -> str:
+def _map_order_type(value: object, market_type: str) -> str:
     normalized = str(value or "").replace("_", "").replace("-", "").lower()
     if normalized in {"m", "market"}:
         return "MARKET"
     if normalized in {"l", "limit"}:
         return "LIMIT"
     if normalized in {"s", "stp", "stop", "stopmarket", "stoploss"}:
-        return "STOP_MARKET"
-    if normalized in {
-        "sl",
-        "stoplimit",
-        "marketiftouched",
-        "limitiftouched",
-        "mt",
-        "lt",
-    }:
+        return "STOP_MARKET" if market_type == "futures" else "STOP_LOSS"
+    if normalized in {"sl", "stoplimit", "stoplosslimit"}:
+        if market_type == "futures":
+            raise ValueError(
+                f"Unsupported Binance Futures order type '{value}'. "
+                "Supported v1 types are M, L, and S/STOP_MARKET."
+            )
+        return "STOP_LOSS_LIMIT"
+    if normalized in {"marketiftouched", "limitiftouched", "mt", "lt"}:
         raise ValueError(
-            f"Unsupported Binance Futures order type '{value}'. "
-            "Supported v1 types are M, L, and S/STOP_MARKET."
+            f"Unsupported Binance {market_type} order type '{value}'. "
+            "Supported v1 types are M, L, S, and spot/margin SL."
         )
-    raise ValueError(f"Unsupported Binance Futures order type '{value}'")
+    raise ValueError(f"Unsupported Binance {market_type} order type '{value}'")
 
 
 def _working_type_from_exec_inst(exec_inst: str) -> str | None:
@@ -665,12 +918,18 @@ def _working_type_from_exec_inst(exec_inst: str) -> str | None:
     return None
 
 
-def _time_in_force_from_exec_inst(exec_inst: str, order_type: str) -> str | None:
+def _apply_post_only(
+    exec_inst: str,
+    order_type: str,
+    market_type: str,
+) -> tuple[str, str | None]:
     if _has_exec_flag(exec_inst, "ParticipateDoNotInitiate"):
         if order_type != "LIMIT":
             raise ValueError("Binance post-only/GTX is only valid for LIMIT orders")
-        return "GTX"
-    return None
+        if market_type == "futures":
+            return order_type, "GTX"
+        return "LIMIT_MAKER", None
+    return order_type, None
 
 
 def _exec_inst_from_cached(cached: BinanceOrderRequest) -> str:
@@ -681,7 +940,7 @@ def _exec_inst_from_cached(cached: BinanceOrderRequest) -> str:
         flags.append("MarkPrice")
     elif cached.working_type == "CONTRACT_PRICE":
         flags.append("LastPrice")
-    if cached.time_in_force == "GTX":
+    if cached.time_in_force == "GTX" or cached.binance_type == "LIMIT_MAKER":
         flags.append("ParticipateDoNotInitiate")
     return ",".join(flags)
 
@@ -695,12 +954,12 @@ def _ack_from_payload(payload: Any) -> OrderAck:
         orig_qty=_optional_float(order.get("origQty")),
         executed_qty=_optional_float(order.get("executedQty") or order.get("cumQty")),
         side=optional_str(order.get("side")),
+        client_order_id=optional_str(order.get("clientOrderId")),
     )
 
 
 def ack_client_id(ack: OrderAck, default: str) -> str:
-    # OrderAck does not carry client ids. Keep the caller-provided identity.
-    return default
+    return ack.client_order_id or default
 
 
 def _normalize_live_order(order: Dict[str, Any]) -> Dict[str, Any]:
@@ -739,6 +998,8 @@ def _is_trigger_order(order: Dict[str, Any]) -> bool:
     order_type = str(order.get("type") or order.get("origType") or "").upper()
     if order_type in {
         "STOP",
+        "STOP_LOSS",
+        "STOP_LOSS_LIMIT",
         "STOP_MARKET",
         "TAKE_PROFIT",
         "TAKE_PROFIT_MARKET",
@@ -760,7 +1021,7 @@ def _effective_retry_attempts(
     payload: Dict[str, Any],
     configured: int,
 ) -> int:
-    if method.upper() != "POST" or path != "/fapi/v1/order":
+    if method.upper() != "POST" or not path.endswith("/order"):
         return max(1, configured)
     if str(payload.get("newClientOrderId") or "").strip():
         return max(1, configured)
@@ -768,7 +1029,7 @@ def _effective_retry_attempts(
 
 
 def _should_persist_rest_call(*, method: str, path: str) -> bool:
-    return path == "/fapi/v1/order" and method.upper() in {"POST", "PUT", "DELETE"}
+    return path.endswith("/order") and method.upper() in {"POST", "PUT", "DELETE"}
 
 
 def _sign_params(params: Dict[str, Any], api_secret: str) -> str:
@@ -829,6 +1090,23 @@ def _round_decimal(value: object, step: float, rounding: str) -> float:
     return float((number / quantum).to_integral_value(rounding=rounding) * quantum)
 
 
+def _round_up_decimal(value: object, step: float) -> float:
+    number = Decimal(str(value))
+    quantum = Decimal(str(step))
+    return float((number / quantum).to_integral_value(rounding=ROUND_UP) * quantum)
+
+
+def _permission_test_quantity(rules: dict[str, object], reference_price: float) -> float:
+    quantity = _optional_float(rules.get("minQuantity")) or 1.0
+    min_notional = _optional_float(rules.get("minNotional"))
+    if min_notional and reference_price > 0:
+        quantity = max(quantity, min_notional / reference_price)
+    step = _optional_float(rules.get("stepSize"))
+    if step and step > 0:
+        quantity = max(step, _round_up_decimal(quantity, step))
+    return quantity
+
+
 def _format_decimal(value: float) -> str:
     return format(Decimal(str(value)).normalize(), "f")
 
@@ -851,11 +1129,191 @@ def _generated_client_order_id() -> str:
     return f"b-{uuid4().hex[:30]}"
 
 
+def _replacement_client_order_id(previous: str) -> str:
+    prefix = (previous or "b")[:24].rstrip("-")
+    return f"{prefix}-r{uuid4().hex[:9]}"[:36]
+
+
+_QUOTE_ASSETS = (
+    "USDT",
+    "USDC",
+    "BUSD",
+    "FDUSD",
+    "TUSD",
+    "BTC",
+    "ETH",
+    "BNB",
+    "USD",
+)
+
+
+def _normalise_symbol_text(symbol: str) -> str:
+    return symbol.replace("/", "").replace("_", "").replace("-", "").upper()
+
+
+def _quote_asset_from_symbol(symbol: str) -> str:
+    upper = _normalise_symbol_text(symbol)
+    for quote in _QUOTE_ASSETS:
+        if upper.endswith(quote):
+            return quote
+    return "USDT"
+
+
+def _base_asset_from_symbol(symbol: str) -> str:
+    upper = _normalise_symbol_text(symbol)
+    quote = _quote_asset_from_symbol(upper)
+    if quote and upper.endswith(quote):
+        return upper[: -len(quote)]
+    return upper
+
+
+def _balance_from_asset_rows(rows: object, symbol: str) -> float:
+    quote = _quote_asset_from_symbol(symbol)
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("asset") or "").upper() == quote:
+            return float(item.get("free") or item.get("availableBalance") or 0.0)
+    return 0.0
+
+
+def _margin_balance_from_assets(rows: object, symbol: str) -> float:
+    quote = _quote_asset_from_symbol(symbol)
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("asset") or "").upper() == quote:
+            return float(item.get("free") or item.get("netAsset") or 0.0)
+    return 0.0
+
+
+def _isolated_margin_balance_from_assets(rows: object, symbol: str) -> float:
+    quote = _quote_asset_from_symbol(symbol)
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        quote_asset = item.get("quoteAsset")
+        if (
+            isinstance(quote_asset, dict)
+            and str(quote_asset.get("asset") or "").upper() == quote
+        ):
+            return float(quote_asset.get("free") or quote_asset.get("netAsset") or 0.0)
+    return 0.0
+
+
+def _spot_position_qty(
+    payload: object,
+    symbol: str,
+    *,
+    market_type: str,
+    is_isolated: bool,
+) -> float:
+    if not isinstance(payload, dict):
+        return 0.0
+    if market_type == "spot":
+        return _spot_base_quantity_from_balances(payload.get("balances"), symbol)
+    if is_isolated:
+        return _isolated_margin_base_quantity(payload.get("assets"), symbol)
+    return _margin_base_quantity_from_assets(payload.get("userAssets"), symbol)
+
+
+def _spot_base_quantity_from_balances(rows: object, symbol: str) -> float:
+    base = _base_asset_from_symbol(symbol)
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("asset") or "").upper() != base:
+            continue
+        return _numeric_sum(item.get("free"), item.get("locked"))
+    return 0.0
+
+
+def _margin_base_quantity_from_assets(rows: object, symbol: str) -> float:
+    base = _base_asset_from_symbol(symbol)
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("asset") or "").upper() != base:
+            continue
+        return _first_numeric(item.get("netAsset"), item.get("free"))
+    return 0.0
+
+
+def _isolated_margin_base_quantity(rows: object, symbol: str) -> float:
+    base = _base_asset_from_symbol(symbol)
+    normalised_symbol = _normalise_symbol_text(symbol)
+    for item in rows if isinstance(rows, list) else []:
+        if not isinstance(item, dict):
+            continue
+        item_symbol = str(item.get("symbol") or "").upper()
+        if item_symbol and _normalise_symbol_text(item_symbol) != normalised_symbol:
+            continue
+        base_asset = item.get("baseAsset")
+        if not isinstance(base_asset, dict):
+            continue
+        if str(base_asset.get("asset") or "").upper() != base:
+            continue
+        return _first_numeric(base_asset.get("netAsset"), base_asset.get("free"))
+    return 0.0
+
+
+def _first_numeric(*values: object) -> float:
+    for value in values:
+        if value not in (None, ""):
+            return float(value)
+    return 0.0
+
+
+def _numeric_sum(*values: object) -> float:
+    return sum(float(value) for value in values if value not in (None, ""))
+
+
 def _compact_error(exc: BaseException) -> str:
     message = str(exc).strip().replace("\n", " ")
     if len(message) <= 280:
         return message
     return f"{message[:277]}..."
+
+
+BinanceFuturesAdapter = BinanceAdapter
+
+
+class BinanceSpotAdapter(BinanceAdapter):
+    """REST adapter for Binance Spot."""
+
+    market_type = "spot"
+    order_path = "/api/v3/order"
+    test_order_path = "/api/v3/order/test"
+    open_orders_path = "/api/v3/openOrders"
+    exchange_info_path = "/api/v3/exchangeInfo"
+    book_ticker_path = "/api/v3/ticker/bookTicker"
+    premium_index_path = ""
+    position_path = ""
+    balance_path = "/api/v3/account"
+    supports_reduce_only = False
+    supports_working_type = False
+    supports_native_limit_amend = False
+
+
+class BinanceMarginAdapter(BinanceSpotAdapter):
+    """REST adapter for Binance cross and isolated margin."""
+
+    market_type = "margin"
+    order_path = "/sapi/v1/margin/order"
+    test_order_path = None
+    open_orders_path = "/sapi/v1/margin/openOrders"
+    balance_path = "/sapi/v1/margin/account"
+    uses_margin_order_params = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        is_isolated = _truthy(kwargs.get("is_isolated", False))
+        if is_isolated:
+            kwargs.setdefault("market_type", "isolated_margin")
+            self.balance_path = "/sapi/v1/margin/isolated/account"
+        else:
+            kwargs.setdefault("market_type", "margin")
+        kwargs.setdefault("side_effect_type", "NO_SIDE_EFFECT")
+        super().__init__(*args, **kwargs)
 
 
 Adapter = BinanceAdapter

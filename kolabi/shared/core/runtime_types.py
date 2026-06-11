@@ -339,11 +339,15 @@ class PrivateOrderRecord:
     source_timestamp: str | None = None
     local_timestamp: str | None = None
     local_id: int | None = None
+    exchange: str | None = None
+    market_type: str | None = None
 
 
 @dataclass(frozen=True)
 class PrivateFillRecord:
     symbol: str
+    exchange: str | None = None
+    market_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -351,6 +355,8 @@ class PrivatePositionRecord:
     symbol: str
     size: float | None
     entry_price: float | None
+    exchange: str | None = None
+    market_type: str | None = None
 
 
 class CryptoApiLike(Protocol):
@@ -403,6 +409,8 @@ class PlaceHeadCommand:
     role: OrderRole = OrderRole.HEAD
     reason: str = OrderRole.HEAD.value
     legacy_order: OrderDict | None = None
+    exchange: str = ""
+    market_type: str = "futures"
 
     def __post_init__(self) -> None:
         if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
@@ -418,6 +426,8 @@ class PlaceTailCommand:
     role: OrderRole = OrderRole.TAIL
     reason: str = OrderRole.TAIL.value
     legacy_order: OrderDict | None = None
+    exchange: str = ""
+    market_type: str = "futures"
 
     def __post_init__(self) -> None:
         if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
@@ -433,6 +443,8 @@ class AmendTailCommand:
     role: OrderRole = OrderRole.TAIL
     reason: str = OrderRole.TAIL.value
     legacy_order: OrderDict | None = None
+    exchange: str = ""
+    market_type: str = "futures"
 
     def __post_init__(self) -> None:
         if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
@@ -448,6 +460,8 @@ class AmendHeadCommand:
     role: OrderRole = OrderRole.HEAD
     reason: str = OrderRole.HEAD.value
     legacy_order: OrderDict | None = None
+    exchange: str = ""
+    market_type: str = "futures"
 
     def __post_init__(self) -> None:
         if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
@@ -463,6 +477,8 @@ class CancelCommand:
     role: OrderRole = OrderRole.CANCEL
     reason: str = OrderRole.CANCEL.value
     legacy_order: OrderDict | None = None
+    exchange: str = ""
+    market_type: str = "futures"
 
     def __post_init__(self) -> None:
         if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):
@@ -484,6 +500,8 @@ class RuntimeCommand:
     legacy_order: OrderDict | None = None
     order: OrderDict | None = None
     reason: str | None = None
+    exchange: str = ""
+    market_type: str = "futures"
 
     def __post_init__(self) -> None:
         if self.legacy_order is not None and not isinstance(self.legacy_order, MappingProxyType):

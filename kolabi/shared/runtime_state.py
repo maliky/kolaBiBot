@@ -100,6 +100,8 @@ class StrategyRuntimeState:
     position_entry_price: float | None
     ready: bool
     reasons: tuple[str, ...]
+    exchange: str | None = None
+    market_type: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-friendly mapping."""
@@ -215,18 +217,25 @@ class KrakenRuntimeStateClient:
             class_=Session,
         )
 
-    def fetch_market_state(self, symbol: str | None = None) -> PublicMarketState:
+    def fetch_market_state(
+        self,
+        symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> PublicMarketState:
         """Load the latest public book snapshot and compact indicators."""
         target_symbol = symbol or self.symbol
+        target_exchange = exchange or self.exchange
+        target_market_type = market_type or self.market_type
         current_time = datetime.now(timezone.utc)
         try:
             with self._market_sessionmaker() as session:
                 snapshot = latest_snapshot(
                     session,
                     target_symbol,
-                    self.exchange,
+                    target_exchange,
                     self.environment,
-                    self.market_type,
+                    target_market_type,
                 )
                 if snapshot is None:
                     return _missing_public_market_state(
@@ -236,17 +245,17 @@ class KrakenRuntimeStateClient:
                 indicators = latest_indicator_values(
                     session,
                     target_symbol,
-                    self.exchange,
+                    target_exchange,
                     self.environment,
-                    self.market_type,
+                    target_market_type,
                 )
                 public_book = _public_book_record_from_snapshot(snapshot, target_symbol)
                 tick_size = _instrument_tick_size(
                     session,
                     symbol=target_symbol,
-                    exchange=self.exchange,
+                    exchange=target_exchange,
                     environment=self.environment,
-                    market_type=self.market_type,
+                    market_type=target_market_type,
                 )
                 public_indicators = _public_indicator_records(indicators, target_symbol)
                 freshest_local_time = _latest_public_timestamp(
@@ -291,27 +300,57 @@ class KrakenRuntimeStateClient:
                 "public market DB schema missing",
             )
 
-    def fetch_runtime_state(self, symbol: str | None = None) -> StrategyRuntimeState:
+    def fetch_runtime_state(
+        self,
+        symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
+    ) -> StrategyRuntimeState:
         """Load the combined runtime state used by the Kraken TSV route."""
         target_symbol = symbol or self.symbol
-        public = self.fetch_market_state(target_symbol)
+        target_exchange = exchange or self.exchange
+        target_market_type = market_type or self.market_type
+        public = self.fetch_market_state(
+            target_symbol,
+            exchange=target_exchange,
+            market_type=target_market_type,
+        )
         with self._critical_account_sessionmaker() as session:
             private_ws = self._private_feed_state(
                 session,
                 "private_ws",
                 self.max_private_age_seconds,
                 db_url=self.critical_account_db_url,
+                exchange=target_exchange,
+                market_type=target_market_type,
             )
-            open_order_count = self._count_open_orders(session, target_symbol)
-            fill_count = self._count_fills(session, target_symbol)
+            open_order_count = self._count_open_orders(
+                session,
+                target_symbol,
+                exchange=target_exchange,
+                market_type=target_market_type,
+            )
+            fill_count = self._count_fills(
+                session,
+                target_symbol,
+                exchange=target_exchange,
+                market_type=target_market_type,
+            )
         with self._account_sessionmaker() as session:
             reconciler = self._private_feed_state(
                 session,
                 "rest_reconciler",
                 self.max_reconcile_age_seconds,
                 db_url=self.account_db_url,
+                exchange=target_exchange,
+                market_type=target_market_type,
             )
-            position = self._latest_position(session, target_symbol)
+            position = self._latest_position(
+                session,
+                target_symbol,
+                exchange=target_exchange,
+                market_type=target_market_type,
+            )
         reasons = tuple(
             reason
             for reason in (
@@ -331,6 +370,8 @@ class KrakenRuntimeStateClient:
             position_entry_price=None if position is None else position.entry_price,
             ready=public.ready and private_ws.ready,
             reasons=reasons,
+            exchange=target_exchange,
+            market_type=target_market_type,
         )
 
     def fetch_private_orders_since(
@@ -339,15 +380,20 @@ class KrakenRuntimeStateClient:
         after_local_timestamp: datetime | None = None,
         after_local_id: int | None = None,
         symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
         limit: int = 200,
     ) -> tuple[PrivateOrderRecord, ...]:
         """Return private order rows strictly newer than the supplied cursor."""
         target_symbol = symbol or self.symbol
+        target_exchange = exchange or self.exchange
+        target_market_type = market_type or self.market_type
         with self._critical_account_sessionmaker() as session:
             predicates = [
-                ExchangeOrder.exchange == self.exchange,
+                ExchangeOrder.exchange == target_exchange,
                 ExchangeOrder.environment == self.environment,
-                ExchangeOrder.market_type == self.market_type,
+                ExchangeOrder.market_type == target_market_type,
+                ExchangeOrder.account_scope == self.account_scope,
                 ExchangeOrder.symbol == target_symbol,
             ]
             if after_local_timestamp is not None:
@@ -379,15 +425,20 @@ class KrakenRuntimeStateClient:
         after_local_timestamp: datetime | None = None,
         after_local_id: int | None = None,
         symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
         limit: int = 200,
     ) -> tuple[PrivateOrderRecord, ...]:
         """Return fill-derived private order records newer than the supplied cursor."""
         target_symbol = symbol or self.symbol
+        target_exchange = exchange or self.exchange
+        target_market_type = market_type or self.market_type
         with self._critical_account_sessionmaker() as session:
             predicates = [
-                ExchangeOrder.exchange == self.exchange,
+                ExchangeOrder.exchange == target_exchange,
                 ExchangeOrder.environment == self.environment,
-                ExchangeOrder.market_type == self.market_type,
+                ExchangeOrder.market_type == target_market_type,
+                ExchangeOrder.account_scope == self.account_scope,
                 ExchangeOrder.symbol == target_symbol,
             ]
             if after_local_timestamp is not None:
@@ -420,12 +471,16 @@ class KrakenRuntimeStateClient:
         client_order_ids: tuple[str, ...] = (),
         exchange_order_ids: tuple[str, ...] = (),
         symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
         limit: int = 400,
     ) -> tuple[PrivateOrderRecord, ...]:
         """Return latest private order rows matching active order identities."""
         if not client_order_ids and not exchange_order_ids:
             return ()
         target_symbol = symbol or self.symbol
+        target_exchange = exchange or self.exchange
+        target_market_type = market_type or self.market_type
         with self._critical_account_sessionmaker() as session:
             predicates = []
             if client_order_ids:
@@ -435,9 +490,10 @@ class KrakenRuntimeStateClient:
             statement = (
                 select(ExchangeOrder)
                 .where(
-                    ExchangeOrder.exchange == self.exchange,
+                    ExchangeOrder.exchange == target_exchange,
                     ExchangeOrder.environment == self.environment,
-                    ExchangeOrder.market_type == self.market_type,
+                    ExchangeOrder.market_type == target_market_type,
+                    ExchangeOrder.account_scope == self.account_scope,
                     ExchangeOrder.symbol == target_symbol,
                     or_(*predicates),
                 )
@@ -451,19 +507,23 @@ class KrakenRuntimeStateClient:
         self,
         *,
         symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
         open_only: bool = False,
     ) -> tuple[PrivateOrderRecord, ...]:
         """Return latest private order state per exchange/client identity."""
 
         target_symbol = symbol or self.symbol
+        target_exchange = exchange or self.exchange
+        target_market_type = market_type or self.market_type
         with self._critical_account_sessionmaker() as session:
             rows = (
                 session.execute(
                     select(ExchangeOrder)
                     .where(
-                        ExchangeOrder.exchange == self.exchange,
+                        ExchangeOrder.exchange == target_exchange,
                         ExchangeOrder.environment == self.environment,
-                        ExchangeOrder.market_type == self.market_type,
+                        ExchangeOrder.market_type == target_market_type,
                         ExchangeOrder.account_scope == self.account_scope,
                         ExchangeOrder.symbol == target_symbol,
                     )
@@ -492,12 +552,16 @@ class KrakenRuntimeStateClient:
         client_order_ids: tuple[str, ...] = (),
         exchange_order_ids: tuple[str, ...] = (),
         symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
         limit: int = 400,
     ) -> tuple[PrivateOrderRecord, ...]:
         """Return latest fill-derived records matching active order identities."""
         if not client_order_ids and not exchange_order_ids:
             return ()
         target_symbol = symbol or self.symbol
+        target_exchange = exchange or self.exchange
+        target_market_type = market_type or self.market_type
         with self._critical_account_sessionmaker() as session:
             predicates = []
             if client_order_ids:
@@ -508,9 +572,10 @@ class KrakenRuntimeStateClient:
                 select(ExchangeFill, ExchangeOrder)
                 .join(ExchangeOrder, ExchangeFill.order_id == ExchangeOrder.id)
                 .where(
-                    ExchangeOrder.exchange == self.exchange,
+                    ExchangeOrder.exchange == target_exchange,
                     ExchangeOrder.environment == self.environment,
-                    ExchangeOrder.market_type == self.market_type,
+                    ExchangeOrder.market_type == target_market_type,
+                    ExchangeOrder.account_scope == self.account_scope,
                     ExchangeOrder.symbol == target_symbol,
                     or_(*predicates),
                 )
@@ -527,14 +592,24 @@ class KrakenRuntimeStateClient:
         self,
         *,
         symbol: str | None = None,
+        exchange: str | None = None,
+        market_type: str | None = None,
         timeout_seconds: float,
         poll_seconds: float = 1.0,
     ) -> StrategyRuntimeState:
         """Block until public and private runtime state are fresh enough."""
         deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
-        last_state = self.fetch_runtime_state(symbol)
+        last_state = self.fetch_runtime_state(
+            symbol,
+            exchange=exchange,
+            market_type=market_type,
+        )
         while datetime.now(timezone.utc).timestamp() < deadline:
-            last_state = self.fetch_runtime_state(symbol)
+            last_state = self.fetch_runtime_state(
+                symbol,
+                exchange=exchange,
+                market_type=market_type,
+            )
             if last_state.ready:
                 return last_state
             sleep(poll_seconds)
@@ -547,13 +622,15 @@ class KrakenRuntimeStateClient:
         max_age_seconds: float,
         *,
         db_url: str,
+        exchange: str,
+        market_type: str,
     ) -> PrivateFeedState:
         """Read one private feed status with a strict freshness gate."""
         config = AccountStreamConfig(
             db_url=db_url,
-            exchange=self.exchange,
+            exchange=exchange,
             environment=self.environment,
-            market_type=self.market_type,
+            market_type=market_type,
             account_scope=self.account_scope,
         )
         try:
@@ -564,6 +641,7 @@ class KrakenRuntimeStateClient:
         except _MISSING_SCHEMA_EXCEPTIONS as exc:
             if not _is_missing_schema_error(exc):
                 raise
+            session.rollback()
             return _missing_private_feed_state(stream_kind)
         if connection is None:
             if stream_kind == "rest_reconciler":
@@ -627,15 +705,23 @@ class KrakenRuntimeStateClient:
             reason=reason,
         )
 
-    def _count_open_orders(self, session: Session, symbol: str) -> int:
+    def _count_open_orders(
+        self,
+        session: Session,
+        symbol: str,
+        *,
+        exchange: str,
+        market_type: str,
+    ) -> int:
         """Count strategy-relevant open orders for one symbol."""
         try:
             rows = (
                 session.execute(
                     select(ExchangeOrder).where(
-                        ExchangeOrder.exchange == self.exchange,
+                        ExchangeOrder.exchange == exchange,
                         ExchangeOrder.environment == self.environment,
-                        ExchangeOrder.market_type == self.market_type,
+                        ExchangeOrder.market_type == market_type,
+                        ExchangeOrder.account_scope == self.account_scope,
                         ExchangeOrder.symbol == symbol,
                     )
                     .order_by(
@@ -649,6 +735,7 @@ class KrakenRuntimeStateClient:
         except _MISSING_SCHEMA_EXCEPTIONS as exc:
             if not _is_missing_schema_error(exc):
                 raise
+            session.rollback()
             return 0
         latest: dict[tuple[str, str], ExchangeOrder] = {}
         for row in rows:
@@ -662,7 +749,14 @@ class KrakenRuntimeStateClient:
             if _private_order_record_is_open(_private_order_record(row))
         )
 
-    def _count_fills(self, session: Session, symbol: str) -> int:
+    def _count_fills(
+        self,
+        session: Session,
+        symbol: str,
+        *,
+        exchange: str,
+        market_type: str,
+    ) -> int:
         """Count fills for one symbol."""
         try:
             rows = (
@@ -670,9 +764,10 @@ class KrakenRuntimeStateClient:
                     select(ExchangeFill)
                     .join(ExchangeOrder)
                     .where(
-                        ExchangeOrder.exchange == self.exchange,
+                        ExchangeOrder.exchange == exchange,
                         ExchangeOrder.environment == self.environment,
-                        ExchangeOrder.market_type == self.market_type,
+                        ExchangeOrder.market_type == market_type,
+                        ExchangeOrder.account_scope == self.account_scope,
                         ExchangeOrder.symbol == symbol,
                     )
                 )
@@ -682,18 +777,26 @@ class KrakenRuntimeStateClient:
         except _MISSING_SCHEMA_EXCEPTIONS as exc:
             if not _is_missing_schema_error(exc):
                 raise
+            session.rollback()
             return 0
         fill_records = [_private_fill_record(symbol) for _ in rows]
         return len(fill_records)
 
-    def _latest_position(self, session: Session, symbol: str) -> PrivatePositionRecord | None:
+    def _latest_position(
+        self,
+        session: Session,
+        symbol: str,
+        *,
+        exchange: str,
+        market_type: str,
+    ) -> PrivatePositionRecord | None:
         """Read the latest position row for one symbol."""
         stmt = (
             select(AccountPosition)
             .where(
-                AccountPosition.exchange == self.exchange,
+                AccountPosition.exchange == exchange,
                 AccountPosition.environment == self.environment,
-                AccountPosition.market_type == self.market_type,
+                AccountPosition.market_type == market_type,
                 AccountPosition.account_scope == self.account_scope,
                 AccountPosition.symbol == symbol,
             )
@@ -704,6 +807,7 @@ class KrakenRuntimeStateClient:
         except _MISSING_SCHEMA_EXCEPTIONS as exc:
             if not _is_missing_schema_error(exc):
                 raise
+            session.rollback()
             return None
         return None if row is None else _private_position_record(row)
 
@@ -851,6 +955,8 @@ def _private_order_record(row: ExchangeOrder) -> PrivateOrderRecord:
         ),
         local_timestamp=row.local_timestamp.isoformat(),
         local_id=row.id,
+        exchange=row.exchange,
+        market_type=row.market_type,
     )
 
 
@@ -960,6 +1066,8 @@ def _private_order_record_from_fill(
         ),
         local_timestamp=fill_row.local_timestamp.isoformat(),
         local_id=fill_row.id,
+        exchange=order_row.exchange,
+        market_type=order_row.market_type,
     )
 
 
@@ -968,4 +1076,6 @@ def _private_position_record(row: AccountPosition) -> PrivatePositionRecord:
         symbol=row.symbol,
         size=row.size,
         entry_price=row.entry_price,
+        exchange=row.exchange,
+        market_type=row.market_type,
     )

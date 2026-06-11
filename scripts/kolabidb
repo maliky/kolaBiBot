@@ -11,6 +11,7 @@ DRY_RUN=0
 DB_BACKEND="postgres"
 ENV_FILE=".env.postgres"
 EXCHANGE="kraken"
+MARKET_TYPE="futures"
 PAIR="PI_XBTUSD"
 PAIR_SET=0
 ENVIRONMENT="demo"
@@ -22,6 +23,12 @@ PUBLIC_DB_URL=""
 PRIVATE_DB_URL=""
 ACCOUNT_DB_URL=""
 CRITICAL_DB_URL=""
+WS_URL=""
+REST_URL=""
+PUBLIC_WS_URL=""
+PUBLIC_REST_URL=""
+PRIVATE_WS_URL=""
+PRIVATE_REST_URL=""
 LOG_LEVEL="INFO"
 TAIL_LINES=80
 STOP_TIMEOUT_SECONDS=10
@@ -46,24 +53,39 @@ Actions:
   logs        Tail the selected feeder log from ./logs.
 
 Public options:
-  --exchange kraken|binance      Exchange feeder to run. Default: kraken.
-  --pair SYMBOL                 Futures product id. Default: PI_XBTUSD.
+  --exchange kraken|binance|bitmex
+                                Exchange feeder to run. Default: kraken.
+  --market-type futures|spot|margin|isolated_margin
+                                Exchange market lane. Binance supports all four.
+                                Kraken supports futures, spot, and margin.
+                                BitMEX supports futures and spot.
+  --pair SYMBOL                 Exchange product id. Default: PI_XBTUSD.
                                 Binance default when --pair is omitted: BTCUSDT.
+                                BitMEX default when --pair is omitted: XBTUSD futures,
+                                XBT_USDT spot.
   --environment demo|live       Endpoint family. Default: demo.
   --db-url URL                  Public DB URL override. Default comes from the selected backend.
   --private-db-url URL          Private DB URL used by the public feeder for correlation.
+  --public-ws-url URL           Public websocket URL override.
+  --public-rest-url URL         Public REST URL override for metadata/ticker polling.
 
 Private options:
   --account-scope NAME          Logical account/persona label stored with private rows.
                                 Default: default. Example: advers for the adversarial account.
   --account-db-url URL          Private account DB URL override. Default comes from the selected backend.
   --critical-db-url URL         Critical open_orders/fills DB URL. Default follows account DB naming.
+  --private-ws-url URL          Private websocket URL override. BitMEX private is REST-only.
+  --private-rest-url URL        Private REST URL override.
   --api-key-env NAME            Environment variable containing the exchange API key.
   --api-secret-env NAME         Environment variable containing the exchange API secret.
   --public reuse|spawn          For private start/reload, reuse existing public DB feeder or start one too.
                                 Default: reuse.
 
 Common options:
+  --ws-url URL                  Websocket URL override for the selected feeder. With --public spawn,
+                               applies to both feeders unless public/private-specific URLs are set.
+  --rest-url URL                REST URL override for the selected feeder. With --public spawn,
+                               applies to both feeders unless public/private-specific URLs are set.
   --backend postgres           DB lane defaults to use for public/private feeders. Default: postgres.
   --postgres                   Shortcut for --backend postgres.
   --env-file PATH              PostgreSQL env file loaded for feeders and the postgres target.
@@ -77,9 +99,16 @@ Examples:
   scripts/kolabidb public start --pair PI_XBTUSD
   scripts/kolabidb private start
   scripts/kolabidb public start --exchange binance --pair BTCUSDT
+  scripts/kolabidb public start --exchange binance --market-type spot --pair BTCUSDT
+  scripts/kolabidb private start --exchange binance --market-type margin --pair BTCUSDT
+  scripts/kolabidb private start --exchange binance --market-type isolated_margin --pair BTCUSDT --public spawn
+  scripts/kolabidb public start --exchange kraken --market-type spot --pair XBT/USD
+  scripts/kolabidb private start --exchange kraken --market-type margin
+  scripts/kolabidb public start --exchange bitmex --pair XBTUSD
+  scripts/kolabidb public start --exchange bitmex --market-type spot --pair XBT_USDT
   scripts/kolabidb private start --exchange binance
   scripts/kolabidb postgres logs
-  scripts/kolabidb private start --account-scope advers --api-key-env KRAKEN_FUTURE_DEMO2_API_KEY --api-secret-env KRAKEN_FUTURE_DEMO2_API_SECRET
+  scripts/kolabidb private start --account-scope advers --api-key-env KRKF_DEMO2_API_KEY --api-secret-env KRKF_DEMO2_API_SECRET
   scripts/kolabidb private start --public spawn --pair PI_XBTUSD
 
 Systemctl-shaped equivalents:
@@ -205,10 +234,10 @@ critical_db_url() {
 unit_name() {
     case "$1" in
         public)
-            printf 'kolabidb-public-%s-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$PAIR")"
+            printf 'kolabidb-public-%s-%s-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$MARKET_TYPE")" "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$PAIR")"
             ;;
         private)
-            printf 'kolabidb-private-%s-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$ACCOUNT_SCOPE")"
+            printf 'kolabidb-private-%s-%s-%s-%s-%s' "$(safe_name "$EXCHANGE")" "$(safe_name "$MARKET_TYPE")" "$(safe_name "$DB_BACKEND")" "$(safe_name "$ENVIRONMENT")" "$(safe_name "$ACCOUNT_SCOPE")"
             ;;
         postgres)
             printf 'kolabidb-postgres'
@@ -249,33 +278,61 @@ ensure_dirs() {
 public_command() {
     local db_url
     local private_url
+    local ws_url
+    local rest_url
+    local cmd
     db_url="$(market_db_url)"
     private_url="${PRIVATE_DB_URL:-$(account_db_url)}"
+    ws_url="${PUBLIC_WS_URL:-$WS_URL}"
+    rest_url="${PUBLIC_REST_URL:-$REST_URL}"
     if [[ "$EXCHANGE" == "binance" ]]; then
-        printf '%q ' python -m kolabi.tree.binance run \
-            --pair "$PAIR" \
-            --environment "$ENVIRONMENT" \
-            --db-url "$db_url" \
-            --private-db-url "$private_url" \
-            --log-level "$LOG_LEVEL"
+        cmd=(python -m kolabi.tree.binance run
+            --pair "$PAIR"
+            --environment "$ENVIRONMENT"
+            --market-type "$MARKET_TYPE"
+            --db-url "$db_url"
+            --private-db-url "$private_url"
+            --log-level "$LOG_LEVEL")
+    elif [[ "$EXCHANGE" == "bitmex" ]]; then
+        cmd=(python -m kolabi.tree.bitmex run
+            --pair "$PAIR"
+            --environment "$ENVIRONMENT"
+            --market-type "$MARKET_TYPE"
+            --db-url "$db_url"
+            --private-db-url "$private_url"
+            --log-level "$LOG_LEVEL")
     else
-        printf '%q ' python -m kolabi.tree.kraken run \
-            --pair "$PAIR" \
-            --environment "$ENVIRONMENT" \
-            --db-url "$db_url" \
-            --private-db-url "$private_url" \
-            --log-level "$LOG_LEVEL"
+        cmd=(python -m kolabi.tree.kraken run
+            --pair "$PAIR"
+            --environment "$ENVIRONMENT"
+            --market-type "$MARKET_TYPE"
+            --db-url "$db_url"
+            --private-db-url "$private_url"
+            --log-level "$LOG_LEVEL")
     fi
+    if [[ -n "$ws_url" ]]; then
+        cmd+=(--ws-url "$ws_url")
+    fi
+    if [[ -n "$rest_url" ]]; then
+        cmd+=(--rest-url "$rest_url")
+    fi
+    printf '%q ' "${cmd[@]}"
 }
 
 private_command() {
     local account_url
     local critical_url
+    local ws_url
+    local rest_url
     account_url="$(account_db_url)"
     critical_url="$(critical_db_url)"
+    ws_url="${PRIVATE_WS_URL:-$WS_URL}"
+    rest_url="${PRIVATE_REST_URL:-$REST_URL}"
     local module="kolabi.tree.account"
     if [[ "$EXCHANGE" == "binance" ]]; then
         module="kolabi.tree.binance_account"
+    elif [[ "$EXCHANGE" == "bitmex" ]]; then
+        module="kolabi.tree.bitmex_account"
     fi
     local cmd=(python -m "$module" run
         --environment "$ENVIRONMENT"
@@ -283,11 +340,23 @@ private_command() {
         --account-db-url "$account_url"
         --critical-db-url "$critical_url"
         --log-level "$LOG_LEVEL")
+    if [[ "$EXCHANGE" == "binance" || "$EXCHANGE" == "kraken" || "$EXCHANGE" == "bitmex" ]]; then
+        cmd+=(--market-type "$MARKET_TYPE")
+    fi
+    if [[ "$EXCHANGE" == "binance" || "$EXCHANGE" == "bitmex" ]]; then
+        cmd+=(--symbol "$PAIR")
+    fi
     if [[ -n "$API_KEY_ENV" ]]; then
         cmd+=(--api-key-env "$API_KEY_ENV")
     fi
     if [[ -n "$API_SECRET_ENV" ]]; then
         cmd+=(--api-secret-env "$API_SECRET_ENV")
+    fi
+    if [[ -n "$ws_url" && "$EXCHANGE" != "bitmex" ]]; then
+        cmd+=(--ws-url "$ws_url")
+    fi
+    if [[ -n "$rest_url" ]]; then
+        cmd+=(--rest-url "$rest_url")
     fi
     printf '%q ' "${cmd[@]}"
 }
@@ -491,6 +560,10 @@ parse_args() {
                 EXCHANGE="${2:-}"
                 shift 2
                 ;;
+            --market-type)
+                MARKET_TYPE="${2:-}"
+                shift 2
+                ;;
             public|private|postgres)
                 if [[ -z "$TARGET" ]]; then
                     TARGET="$1"
@@ -522,6 +595,30 @@ parse_args() {
                 ;;
             --private-db-url)
                 PRIVATE_DB_URL="${2:-}"
+                shift 2
+                ;;
+            --ws-url)
+                WS_URL="${2:-}"
+                shift 2
+                ;;
+            --rest-url)
+                REST_URL="${2:-}"
+                shift 2
+                ;;
+            --public-ws-url)
+                PUBLIC_WS_URL="${2:-}"
+                shift 2
+                ;;
+            --public-rest-url)
+                PUBLIC_REST_URL="${2:-}"
+                shift 2
+                ;;
+            --private-ws-url)
+                PRIVATE_WS_URL="${2:-}"
+                shift 2
+                ;;
+            --private-rest-url)
+                PRIVATE_REST_URL="${2:-}"
                 shift 2
                 ;;
             --account-scope)
@@ -571,9 +668,34 @@ validate() {
     [[ -n "$TARGET" ]] || die "missing target public|private|postgres"
     [[ -n "$ACTION" ]] || die "missing action start|status|stop|reload|logs"
     [[ "$DB_BACKEND" == "postgres" ]] || die "SQLite backend is no longer supported; use PostgreSQL"
-    [[ "$EXCHANGE" == "kraken" || "$EXCHANGE" == "binance" ]] || die "--exchange must be kraken or binance"
+    [[ "$EXCHANGE" == "kraken" || "$EXCHANGE" == "binance" || "$EXCHANGE" == "bitmex" ]] || die "--exchange must be kraken, binance, or bitmex"
+    [[ "$MARKET_TYPE" == "futures" || "$MARKET_TYPE" == "spot" || "$MARKET_TYPE" == "margin" || "$MARKET_TYPE" == "isolated_margin" ]] || die "--market-type must be futures, spot, margin, or isolated_margin"
+    if [[ "$EXCHANGE" == "kraken" && "$MARKET_TYPE" == "isolated_margin" ]]; then
+        die "--market-type isolated_margin is only supported for --exchange binance"
+    fi
+    if [[ "$EXCHANGE" == "bitmex" && "$MARKET_TYPE" != "futures" && "$MARKET_TYPE" != "spot" ]]; then
+        die "--exchange bitmex supports --market-type futures or spot"
+    fi
+    if [[ "$EXCHANGE" == "bitmex" && "$TARGET" == "private" ]]; then
+        if [[ -n "$PRIVATE_WS_URL" ]]; then
+            die "--private-ws-url is not supported for BitMEX private REST reconciliation; use --private-rest-url"
+        fi
+        if [[ "$PUBLIC_MODE" == "reuse" && -n "$WS_URL" ]]; then
+            die "--ws-url is not supported for BitMEX private REST reconciliation; use --rest-url or --public spawn"
+        fi
+    fi
     if [[ "$EXCHANGE" == "binance" && "$PAIR_SET" -eq 0 ]]; then
         PAIR="BTCUSDT"
+    fi
+    if [[ "$EXCHANGE" == "kraken" && "$MARKET_TYPE" != "futures" && "$PAIR_SET" -eq 0 ]]; then
+        PAIR="XBT/USD"
+    fi
+    if [[ "$EXCHANGE" == "bitmex" && "$PAIR_SET" -eq 0 ]]; then
+        if [[ "$MARKET_TYPE" == "spot" ]]; then
+            PAIR="XBT_USDT"
+        else
+            PAIR="XBTUSD"
+        fi
     fi
     [[ "$ENVIRONMENT" == "demo" || "$ENVIRONMENT" == "live" ]] || die "--environment must be demo or live"
     [[ "$PUBLIC_MODE" == "reuse" || "$PUBLIC_MODE" == "spawn" ]] || die "--public must be reuse or spawn"

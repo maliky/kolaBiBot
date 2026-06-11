@@ -42,6 +42,7 @@ class BitMEX(object):
         apiSecret=None,
         orderIDPrefix=ORDERID_PREFIX,
         shouldWSAuth=True,
+        useWebsocket=True,
         postOnly=False,
         timeout=8,
         logger=None,
@@ -51,7 +52,8 @@ class BitMEX(object):
         self.logger = get_logger(logger, name=__name__, sLL="INFO")
         self.base_url = base_url
         self.symbol = symbol
-        self.prec = PRICE_PRECISION[symbol]
+        self.ws = None
+        self.prec = PRICE_PRECISION.get(symbol, 1e-8)
         self.postOnly = postOnly
 
         if apiKey is None:
@@ -75,13 +77,14 @@ class BitMEX(object):
         self.session.headers.update({"content-type": "application/json"})
         self.session.headers.update({"accept": "application/json"})
 
-        # Create websocket for streaming data
-        ws = BitMEXWebsocket(
-            self.apiKey, self.apiSecret, logger=self.logger, symbol=symbol
-        )
-        self.ws = ws
-        self.logger.debug(f"ws={ws}")
-        self.ws.connect(base_url, symbol, shouldAuth=shouldWSAuth)
+        # Create websocket for legacy streaming users. Adapter/order paths use REST.
+        if useWebsocket:
+            ws = BitMEXWebsocket(
+                self.apiKey, self.apiSecret, logger=self.logger, symbol=symbol
+            )
+            self.ws = ws
+            self.logger.debug(f"ws={ws}")
+            self.ws.connect(base_url, symbol, shouldAuth=shouldWSAuth)
         self.timeout = timeout
         self.logger.info(f"Fini init {self}")
 
@@ -408,7 +411,8 @@ class BitMEX(object):
 
     def exit(self):
         """Close websocket."""
-        self.ws.exit()
+        if self.ws is not None:
+            self.ws.exit()
 
     @authentication_required
     @trim_output()
@@ -424,6 +428,8 @@ class BitMEX(object):
     def funds(self):
         """Get your current balance."""
         # check abonnement à "wallet"
+        if self.ws is None:
+            return self.margin()
         return self.ws.funds()
 
     @authentication_required
@@ -448,6 +454,11 @@ class BitMEX(object):
     @trim_output()
     def instrument(self, symbol):
         """Get an instrument's details."""
+        if self.ws is None:
+            rows = self.instruments({"symbol": symbol})
+            if isinstance(rows, list) and rows:
+                return rows[0]
+            return {}
         return self.ws.get_instrument(symbol)
 
     @trim_output()
@@ -478,6 +489,8 @@ class BitMEX(object):
     @authentication_required
     def open_orders(self):
         """Get open orders."""
+        if self.ws is None:
+            return self.http_open_orders()
         try:
             return self.ws.open_orders(self.orderIDPrefix)
         except Exception:
@@ -576,6 +589,15 @@ class BitMEX(object):
     @authentication_required
     def position(self, symbol):
         """Get your open position."""
+        if self.ws is None:
+            rows = self._curl_bitmex(
+                path="position",
+                query={"filter": dumps({"symbol": symbol}), "count": 1},
+                verb="GET",
+            )
+            if isinstance(rows, list) and rows:
+                return rows[0]
+            return {}
         try:
             return self.ws.position(symbol)
         except Exception:

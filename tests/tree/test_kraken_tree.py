@@ -21,6 +21,7 @@ from kolabi.tree.kraken import (
     extract_book_payload,
     normal_mgf,
     parse_levels,
+    subscription_message,
 )
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -68,6 +69,84 @@ def test_extract_book_payload_reads_futures_snapshot():
     assert parsed.sequence == 7
     assert parsed.asks == ((101.0, 1.5),)
     assert parsed.bids == ((99.0, 2.0),)
+
+
+def test_subscription_message_uses_spot_v2_book() -> None:
+    message = subscription_message(
+        KrakenConfig(pair="XBT/USD", market_type="spot", depth=25)
+    )
+
+    assert message == {
+        "method": "subscribe",
+        "params": {
+            "channel": "book",
+            "symbol": ["XBT/USD"],
+            "depth": 25,
+            "snapshot": True,
+        },
+    }
+
+
+def test_extract_book_payload_reads_spot_v2_snapshot() -> None:
+    parsed = extract_book_payload(
+        {
+            "channel": "book",
+            "type": "snapshot",
+            "data": [
+                {
+                    "symbol": "XBT/USD",
+                    "timestamp": "2026-06-10T12:00:00.000000Z",
+                    "asks": [{"price": 101.0, "qty": 1.5}],
+                    "bids": [{"price": 99.0, "qty": 2.0}],
+                    "checksum": 123,
+                }
+            ],
+        }
+    )
+
+    assert parsed is not None
+    assert parsed.message_type == "snapshot"
+    assert parsed.symbol == "XBT/USD"
+    assert parsed.sequence is None
+    assert parsed.asks == ((101.0, 1.5),)
+    assert parsed.bids == ((99.0, 2.0),)
+
+
+def test_apply_book_payload_accepts_spot_bulk_update() -> None:
+    snapshot = extract_book_payload(
+        {
+            "channel": "book",
+            "type": "snapshot",
+            "data": [
+                {
+                    "symbol": "XBT/USD",
+                    "asks": [{"price": 101.0, "qty": 1.0}],
+                    "bids": [{"price": 99.0, "qty": 1.0}],
+                }
+            ],
+        }
+    )
+    update = extract_book_payload(
+        {
+            "channel": "book",
+            "type": "update",
+            "data": [
+                {
+                    "symbol": "XBT/USD",
+                    "asks": [{"price": 101.0, "qty": 0.0}, {"price": 102.0, "qty": 2.0}],
+                    "bids": [{"price": 100.0, "qty": 3.0}],
+                }
+            ],
+        }
+    )
+
+    assert snapshot is not None
+    assert update is not None
+    state = apply_book_payload(None, snapshot, depth=5)
+    state = apply_book_payload(state, update, depth=5)
+
+    assert state.asks == ((102.0, 2.0),)
+    assert state.bids == ((100.0, 3.0), (99.0, 1.0))
 
 
 def test_apply_book_payload_accepts_one_sided_delta():

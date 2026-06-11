@@ -27,8 +27,8 @@ _KRAKEN_FUTURES_ENVIRONMENTS = {
         public_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market",
         private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
         critical_private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical",
-        api_key_env="KRAKEN_FUTURE_DEMO_API_KEY",
-        api_secret_env="KRAKEN_FUTURE_DEMO_API_SECRET",
+        api_key_env="KRKF_DEMO_API_KEY",
+        api_secret_env="KRKF_DEMO_API_SECRET",
     ),
     "live": KrakenFuturesEnvironment(
         environment="live",
@@ -38,8 +38,8 @@ _KRAKEN_FUTURES_ENVIRONMENTS = {
         public_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_market",
         private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
         critical_private_db_url="postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical",
-        api_key_env="KRAKEN_FUTURE_API_KEY",
-        api_secret_env="KRAKEN_FUTURE_API_SECRET",
+        api_key_env="KRKF_API_KEY",
+        api_secret_env="KRKF_API_SECRET",
     ),
 }
 

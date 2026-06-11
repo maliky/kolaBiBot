@@ -10,6 +10,7 @@ import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence, cast
 from urllib.parse import urlencode
 
@@ -21,10 +22,16 @@ from kolabi.shared.binance_futures import (
     binance_futures_environment,
     binance_futures_private_db_url,
 )
+from kolabi.shared.config import (
+    exchange_credential_env_names,
+    first_configured_env_name,
+)
 from kolabi.shared.logging import setup_logging
 from kolabi.tree.account import (
     AccountStateStore,
     AccountStreamConfig,
+    _compact_exception_text,
+    _rest_reconcile_log_state,
     stream_kind_uses_critical_db,
 )
 
@@ -33,7 +40,7 @@ JsonDictT = dict[str, Any]
 
 @dataclass(frozen=True)
 class BinanceAccountConfig:
-    """Configuration for Binance USD-M Futures private DB ingestion."""
+    """Configuration for Binance private DB ingestion."""
 
     db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account"
     critical_db_url: str = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical"
@@ -43,8 +50,9 @@ class BinanceAccountConfig:
     account_scope: str = "default"
     ws_url: str = "wss://stream.binancefuture.com/ws"
     rest_url: str = "https://testnet.binancefuture.com"
-    api_key_env: str = "BINANCE_FUTURES_DEMO_API_KEY"
-    api_secret_env: str = "BINANCE_FUTURES_DEMO_API_SECRET"
+    api_key_env: str = "BINF_DEMO_API_KEY"
+    api_secret_env: str = "BINF_DEMO_API_SECRET"
+    symbol: str = "BTCUSDT"
     reconnect_seconds: int = 5
     heartbeat_log_seconds: int = 60
     listen_key_keepalive_seconds: int = 1800
@@ -170,42 +178,46 @@ class BinancePrivateStream:
         while self._running:
             await asyncio.sleep(max(60, self.config.listen_key_keepalive_seconds))
             if self._listen_key:
-                self._request("PUT", "/fapi/v1/listenKey", {"listenKey": self._listen_key})
+                self._request("PUT", listen_key_path(self.config), self._listen_key_params())
 
     async def _reconcile_loop(self) -> None:
         if self.config.rest_reconcile_seconds <= 0:
             return
+        reconcile_log = _rest_reconcile_log_state(
+            self,
+            self.config.rest_reconcile_seconds,
+        )
+        reconcile_log.log_start(self.logger)
         while self._running:
             try:
                 await asyncio.sleep(self.config.rest_reconcile_seconds)
                 stats = self.reconcile_once()
                 self.account_store.record_connection_status("rest_reconciler", "healthy")
-                self.logger.info(
-                    "binance_account rest_reconcile orders=%s positions=%s balances=%s interval=%.1fs",
-                    stats["orders"],
-                    stats["positions"],
-                    stats["balances"],
-                    self.config.rest_reconcile_seconds,
-                )
+                reconcile_log.log_success(self.logger, stats)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.account_store.record_connection_status(
                     "rest_reconciler",
                     "error",
-                    last_error=str(exc),
+                    last_error=_compact_exception_text(exc),
                 )
-                self.logger.warning(
-                    "binance_account rest_reconcile failed interval=%.1fs error=%s",
-                    self.config.rest_reconcile_seconds,
-                    exc,
-                )
+                reconcile_log.log_failure(self.logger, _compact_exception_text(exc))
 
     def reconcile_once(self) -> dict[str, int]:
         now = datetime.now(timezone.utc)
-        orders = self._signed_request("GET", "/fapi/v1/openOrders")
-        positions = self._signed_request("GET", "/fapi/v2/positionRisk")
-        balances = self._signed_request("GET", "/fapi/v2/balance")
+        orders = self._signed_request("GET", open_orders_path(self.config), self._route_params())
+        position_endpoint = position_path(self.config)
+        positions = (
+            []
+            if not position_endpoint
+            else self._signed_request("GET", position_endpoint, self._route_params())
+        )
+        balances = self._signed_request(
+            "GET",
+            balance_path(self.config),
+            self._balance_params(),
+        )
         order_message = {
             "feed": "open_orders_snapshot",
             "event": "rest_reconcile",
@@ -214,7 +226,10 @@ class BinancePrivateStream:
         position_message = {
             "feed": "open_positions_snapshot",
             "event": "rest_reconcile",
-            "positions": [normalise_rest_position(item) for item in _list_payload(positions)],
+            "positions": [
+                normalise_rest_position(item)
+                for item in _list_payload(positions)
+            ],
         }
         balance_message = {
             "feed": "balances_snapshot",
@@ -222,10 +237,18 @@ class BinancePrivateStream:
             "flex_futures": {
                 "currencies": {
                     str(item.get("asset")): {
-                        "available_balance": item.get("availableBalance"),
-                        "balance_value": item.get("balance"),
+                        "available_balance": first_non_empty(
+                            item.get("availableBalance"),
+                            item.get("free"),
+                            item.get("balance"),
+                        ),
+                        "balance_value": first_non_empty(
+                            item.get("balance"),
+                            item.get("total"),
+                            item.get("netAsset"),
+                        ),
                     }
-                    for item in _list_payload(balances)
+                    for item in normalise_balance_rows(balances)
                     if isinstance(item, dict) and item.get("asset")
                 }
             },
@@ -258,7 +281,7 @@ class BinancePrivateStream:
         }
 
     def _create_listen_key(self) -> str:
-        payload = self._request("POST", "/fapi/v1/listenKey", {})
+        payload = self._request("POST", listen_key_path(self.config), self._listen_key_params())
         listen_key = str(payload.get("listenKey") or "")
         if not listen_key:
             raise RuntimeError(f"Binance listenKey missing: {payload}")
@@ -281,6 +304,21 @@ class BinancePrivateStream:
         payload["timestamp"] = int(time.time() * 1000)
         payload["signature"] = sign_payload(payload, self.api_secret)
         return self._request(method, path, payload)
+
+    def _route_params(self) -> dict[str, Any]:
+        if self.config.market_type == "isolated_margin":
+            return {"symbol": self.config.symbol}
+        return {}
+
+    def _listen_key_params(self) -> dict[str, Any]:
+        if self.config.market_type == "isolated_margin":
+            return {"symbol": self.config.symbol}
+        return {}
+
+    def _balance_params(self) -> dict[str, Any]:
+        if self.config.market_type == "isolated_margin":
+            return {"symbols": self.config.symbol}
+        return self._route_params()
 
     def _record_status(
         self,
@@ -328,8 +366,8 @@ class BinancePrivateStream:
 
 def normalise_binance_private_event(payload: JsonDictT) -> list[tuple[JsonDictT, bool]]:
     event_type = str(payload.get("e") or "")
-    if event_type == "ORDER_TRADE_UPDATE":
-        order = payload.get("o")
+    if event_type in {"ORDER_TRADE_UPDATE", "executionReport"}:
+        order = payload.get("o") if event_type == "ORDER_TRADE_UPDATE" else payload
         if not isinstance(order, Mapping):
             return []
         order_message = {
@@ -350,8 +388,8 @@ def normalise_binance_private_event(payload: JsonDictT) -> list[tuple[JsonDictT,
                 )
             )
         return messages
-    if event_type == "ACCOUNT_UPDATE":
-        account = payload.get("a")
+    if event_type in {"ACCOUNT_UPDATE", "outboundAccountPosition"}:
+        account = payload.get("a") if event_type == "ACCOUNT_UPDATE" else payload
         if not isinstance(account, Mapping):
             return []
         return [
@@ -389,7 +427,7 @@ def normalise_order_update(order: Mapping[str, Any]) -> JsonDictT:
         "quantity": order.get("q"),
         "filled": order.get("z"),
         "price": binance_order_price(order),
-        "stop_price": non_zero_or_none(order.get("sp")),
+        "stop_price": non_zero_or_none(first_non_empty(order.get("sp"), order.get("P"))),
         "reduceOnly": order.get("R"),
         "lastUpdateTime": order.get("T"),
         "reason": str(order.get("x") or ""),
@@ -448,14 +486,23 @@ def normalise_account_balances(account: Mapping[str, Any]) -> dict[str, JsonDict
     rows = account.get("B")
     if not isinstance(rows, list):
         return {}
-    return {
-        str(row.get("a")): {
-            "available_balance": row.get("cw") or row.get("wb"),
-            "balance_value": row.get("wb"),
+    balances: dict[str, JsonDictT] = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or not row.get("a"):
+            continue
+        available = first_non_empty(row.get("cw"), row.get("f"), row.get("wb"))
+        locked = first_non_empty(row.get("l"), row.get("locked"))
+        total = first_non_empty(
+            row.get("wb"),
+            row.get("balance"),
+            add_decimal_text(row.get("f"), locked),
+            available,
+        )
+        balances[str(row["a"])] = {
+            "available_balance": available,
+            "balance_value": total,
         }
-        for row in rows
-        if isinstance(row, Mapping) and row.get("a")
-    }
+    return balances
 
 
 def normalise_account_positions(account: Mapping[str, Any]) -> list[JsonDictT]:
@@ -504,7 +551,13 @@ def non_zero_or_none(value: object) -> object | None:
 def binance_order_price(order: Mapping[str, Any]) -> object | None:
     order_type = str(order.get("o") or order.get("type") or order.get("origType") or "")
     if "STOP" in order_type.upper() or "TAKE_PROFIT" in order_type.upper():
-        return first_non_zero(order.get("sp"), order.get("stopPrice"), order.get("p"), order.get("price"))
+        return first_non_zero(
+            order.get("sp"),
+            order.get("P"),
+            order.get("stopPrice"),
+            order.get("p"),
+            order.get("price"),
+        )
     return first_non_zero(order.get("p"), order.get("price"), order.get("ap"), order.get("avgPrice"))
 
 
@@ -528,6 +581,204 @@ def sign_payload(params: Mapping[str, Any], api_secret: str) -> str:
     encoded = urlencode({key: value for key, value in params.items() if value != ""})
     return hmac.new(api_secret.encode("utf-8"), encoded.encode("utf-8"), hashlib.sha256).hexdigest()
 
+
+def listen_key_path(config: BinanceAccountConfig) -> str:
+    if config.market_type == "futures":
+        return "/fapi/v1/listenKey"
+    if config.market_type == "spot":
+        return "/api/v3/userDataStream"
+    if config.market_type == "isolated_margin":
+        return "/sapi/v1/userDataStream/isolated"
+    return "/sapi/v1/userDataStream"
+
+
+def open_orders_path(config: BinanceAccountConfig) -> str:
+    if config.market_type == "futures":
+        return "/fapi/v1/openOrders"
+    if config.market_type == "spot":
+        return "/api/v3/openOrders"
+    return "/sapi/v1/margin/openOrders"
+
+
+def position_path(config: BinanceAccountConfig) -> str:
+    if config.market_type == "futures":
+        return "/fapi/v2/positionRisk"
+    return ""
+
+
+def balance_path(config: BinanceAccountConfig) -> str:
+    if config.market_type == "futures":
+        return "/fapi/v2/balance"
+    if config.market_type == "spot":
+        return "/api/v3/account"
+    if config.market_type == "isolated_margin":
+        return "/sapi/v1/margin/isolated/account"
+    return "/sapi/v1/margin/account"
+
+
+def normalise_balance_rows(payload: Any) -> list[Mapping[str, Any]]:
+    if isinstance(payload, list):
+        return [
+            normalised
+            for item in payload
+            if isinstance(item, Mapping)
+            for normalised in _normalise_balance_row(item)
+        ]
+    if not isinstance(payload, Mapping):
+        return []
+    balances = payload.get("balances")
+    if isinstance(balances, list):
+        return [
+            normalised
+            for item in balances
+            if isinstance(item, Mapping)
+            for normalised in _normalise_balance_row(item)
+        ]
+    user_assets = payload.get("userAssets")
+    if isinstance(user_assets, list):
+        return [
+            normalised
+            for item in user_assets
+            if isinstance(item, Mapping)
+            for normalised in _normalise_balance_row(item)
+        ]
+    isolated_assets = payload.get("assets")
+    rows: list[Mapping[str, Any]] = []
+    if isinstance(isolated_assets, list):
+        for item in isolated_assets:
+            if not isinstance(item, Mapping):
+                continue
+            for key in ("baseAsset", "quoteAsset"):
+                asset = item.get(key)
+                if isinstance(asset, Mapping):
+                    rows.extend(_normalise_balance_row(asset))
+    return rows
+
+
+def _normalise_balance_row(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    asset = first_non_empty(row.get("asset"), row.get("currency"), row.get("coin"))
+    if asset in (None, ""):
+        return []
+    available = first_non_empty(
+        row.get("availableBalance"),
+        row.get("withdrawAvailable"),
+        row.get("free"),
+        row.get("available"),
+        row.get("balance"),
+    )
+    locked = first_non_empty(row.get("locked"), row.get("freeze"), row.get("freezeAmount"))
+    total = first_non_empty(
+        row.get("balance"),
+        row.get("walletBalance"),
+        row.get("marginBalance"),
+        row.get("crossWalletBalance"),
+        row.get("totalWalletBalance"),
+        add_decimal_text(available, locked),
+        row.get("netAsset"),
+        available,
+    )
+    normalised = dict(row)
+    normalised["asset"] = asset
+    if available is not None:
+        normalised["availableBalance"] = available
+    if total is not None:
+        normalised["balance"] = total
+    return [normalised]
+
+
+def add_decimal_text(left: object, right: object) -> str | None:
+    left_decimal = optional_decimal(left)
+    right_decimal = optional_decimal(right)
+    if left_decimal is None and right_decimal is None:
+        return None
+    total = (left_decimal or Decimal("0")) + (right_decimal or Decimal("0"))
+    return format(total.normalize(), "f")
+
+
+def optional_decimal(value: object) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, (int, float, str, Decimal)):
+        return None
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return None
+
+
+def binance_account_defaults(environment: str, market_type: str) -> dict[str, str]:
+    if market_type == "futures":
+        env_cfg = binance_futures_environment(environment)
+        key_names = exchange_credential_env_names("binance", "futures", environment)
+        secret_names = exchange_credential_env_names(
+            "binance",
+            "futures",
+            environment,
+            secret=True,
+        )
+        return {
+            "ws_url": env_cfg.private_ws_url,
+            "rest_url": env_cfg.rest_url,
+            "api_key_env": first_configured_env_name(key_names),
+            "api_secret_env": first_configured_env_name(secret_names),
+        }
+    if market_type == "spot":
+        if environment == "demo":
+            key_names = exchange_credential_env_names("binance", "spot", "demo")
+            secret_names = exchange_credential_env_names(
+                "binance",
+                "spot",
+                "demo",
+                secret=True,
+            )
+            return {
+                "ws_url": "wss://stream.testnet.binance.vision/ws",
+                "rest_url": "https://testnet.binance.vision",
+                "api_key_env": first_configured_env_name(key_names),
+                "api_secret_env": first_configured_env_name(secret_names),
+            }
+        key_names = exchange_credential_env_names("binance", "spot", "live")
+        secret_names = exchange_credential_env_names(
+            "binance",
+            "spot",
+            "live",
+            secret=True,
+        )
+        return {
+            "ws_url": "wss://stream.binance.com:9443/ws",
+            "rest_url": "https://api.binance.com",
+            "api_key_env": first_configured_env_name(key_names),
+            "api_secret_env": first_configured_env_name(secret_names),
+        }
+    if environment == "demo":
+        key_names = exchange_credential_env_names("binance", market_type, "demo")
+        secret_names = exchange_credential_env_names(
+            "binance",
+            market_type,
+            "demo",
+            secret=True,
+        )
+        return {
+            "ws_url": "wss://stream.binance.com:9443/ws",
+            "rest_url": os.environ.get("BINANCE_MARGIN_TEST_BASE_URL", ""),
+            "api_key_env": first_configured_env_name(key_names),
+            "api_secret_env": first_configured_env_name(secret_names),
+        }
+    key_names = exchange_credential_env_names("binance", market_type, "live")
+    secret_names = exchange_credential_env_names(
+        "binance",
+        market_type,
+        "live",
+        secret=True,
+    )
+    return {
+        "ws_url": "wss://stream.binance.com:9443/ws",
+        "rest_url": "https://api.binance.com",
+        "api_key_env": first_configured_env_name(key_names),
+        "api_secret_env": first_configured_env_name(secret_names),
+    }
+
+
 def account_config(config: BinanceAccountConfig, *, critical: bool = False) -> AccountStreamConfig:
     return AccountStreamConfig(
         db_url=config.critical_db_url if critical else config.db_url,
@@ -549,13 +800,19 @@ def account_config(config: BinanceAccountConfig, *, critical: bool = False) -> A
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m kolabi.tree.binance_account",
-        description="Private account/order DB service for Binance USD-M Futures.",
+        description="Private account/order DB service for Binance futures, spot, and margin.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("run", "status", "reconcile"):
         cmd = subparsers.add_parser(command, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
         cmd.add_argument("--environment", choices=("demo", "live"), default=BinanceAccountConfig.environment)
+        cmd.add_argument(
+            "--market-type",
+            choices=("futures", "spot", "margin", "isolated_margin"),
+            default=BinanceAccountConfig.market_type,
+        )
+        cmd.add_argument("--symbol", default=BinanceAccountConfig.symbol)
         cmd.add_argument("--account-scope", default=BinanceAccountConfig.account_scope)
         cmd.add_argument("--account-db-url", "--db-url", dest="db_url")
         cmd.add_argument("--critical-db-url")
@@ -570,18 +827,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> BinanceAccountConfig:
-    env_cfg = binance_futures_environment(args.environment)
+    defaults = binance_account_defaults(args.environment, args.market_type)
+    rest_url = args.rest_url or defaults["rest_url"]
+    if args.market_type in {"margin", "isolated_margin"} and args.environment == "demo" and not rest_url:
+        raise RuntimeError(
+            "Binance margin demo requires --rest-url or BINANCE_MARGIN_TEST_BASE_URL"
+        )
     return BinanceAccountConfig(
         db_url=args.db_url
         or binance_futures_private_db_url(args.environment, args.account_scope),
         critical_db_url=args.critical_db_url
         or binance_futures_critical_db_url(args.environment, args.account_scope),
         environment=args.environment,
+        market_type=args.market_type,
         account_scope=args.account_scope,
-        ws_url=args.ws_url or env_cfg.private_ws_url,
-        rest_url=args.rest_url or env_cfg.rest_url,
-        api_key_env=args.api_key_env or env_cfg.api_key_env,
-        api_secret_env=args.api_secret_env or env_cfg.api_secret_env,
+        ws_url=args.ws_url or defaults["ws_url"],
+        rest_url=rest_url,
+        api_key_env=args.api_key_env or defaults["api_key_env"],
+        api_secret_env=args.api_secret_env or defaults["api_secret_env"],
+        symbol=args.symbol,
         rest_reconcile_seconds=max(0.0, args.rest_reconcile_seconds),
         log_level=args.log_level,
     )

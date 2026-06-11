@@ -5,9 +5,19 @@ import json
 import os
 import time
 from dataclasses import asdict
-from typing import Any, Sequence, cast
+from typing import Any, Mapping, Sequence, cast
 
-from kolabi.shared.config import load_exchange_config
+from kolabi.bargain.smoke import smoke_client_order_id
+from kolabi.bot.exchange_routes import (
+    EXCHANGE_MARKET_TYPES,
+    default_symbol_for_route,
+    route_codes_for_market,
+)
+from kolabi.shared.config import (
+    exchange_credential_env_names,
+    exchange_requires_explicit_base_url,
+    load_exchange_config,
+)
 from kolabi.shared.core.models import OrderAck, Position
 from kolabi.shared.exchanges import get_adapter
 
@@ -19,8 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m kolabi.bargain.cli",
         usage=(
-            "python -m kolabi.bargain.cli [--exchange EXCHANGE] [--symbol SYMBOL] "
+            "python -m kolabi.bargain.cli [--exchange EXCHANGE] "
+            "[--market-type MARKET_TYPE] [--symbol SYMBOL] "
             "[--environment {demo,live}] [--account-scope ACCOUNT_SCOPE] "
+            "[--base-url BASE_URL] "
             "[--api-key-env API_KEY_ENV] [--api-secret-env API_SECRET_ENV] "
             "<command> [<args>]"
         ),
@@ -30,8 +42,24 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--exchange", choices=EXCHANGES, default="kraken", help="Target exchange adapter.")
-    parser.add_argument("--symbol", default="PI_XBTUSD", help="Trading symbol / instrument id.")
+    parser.add_argument(
+        "--market-type",
+        choices=("futures", "spot", "margin", "isolated_margin"),
+        default="futures",
+        help="Exchange market lane for direct adapter operations.",
+    )
+    parser.add_argument(
+        "--symbol",
+        default=argparse.SUPPRESS,
+        help="Trading symbol / instrument id. Default follows --exchange and --market-type.",
+    )
     parser.add_argument("--environment", choices=("demo", "live"), default="demo", help="API environment.")
+    parser.add_argument(
+        "--base-url",
+        "--rest-url",
+        dest="base_url",
+        help="REST base URL override for demo/live bring-up.",
+    )
     parser.add_argument(
         "--account-scope",
         default="default",
@@ -57,6 +85,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_command("balance", "Show available margin.", "Show available margin for the selected exchange account.")
     add_command("position", "Show current position.", "Show current position for the selected symbol.")
+    add_command(
+        "permissions",
+        "Check API key order-write permission.",
+        "Check API key order-write permission without placing an order when the adapter supports it.",
+    )
+    add_command(
+        "routes",
+        "List supported route codes.",
+        "List exchange/market route codes, defaults, and credential environment names without connecting.",
+    )
 
     instruments = add_command(
         "instruments",
@@ -107,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_command("open-orders", "Show live resting orders.", "Show live resting orders for the selected symbol.")
     add_command("trigger-orders", "Show live trigger orders.", "Show live trigger orders for the selected symbol.")
     add_command("cancel-all", "Cancel all open and trigger orders.", "Cancel all open and trigger orders for the selected symbol.")
-    add_command("close-all", "Cancel all orders and close position.", "Cancel all orders and close current position with reduce-only market logic.")
+    add_command("close-all", "Cancel all orders and close position.", "Cancel all orders and close current position with market-type-aware close logic.")
 
     for command in ("limit", "market"):
         cmd = add_command(
@@ -219,30 +257,24 @@ def build_adapter(
     symbol: str,
     environment: str,
     *,
+    market_type: str = "futures",
     account_scope: str = "default",
     api_key_env: str | None = None,
     api_secret_env: str | None = None,
+    base_url: str | None = None,
 ):
     """Build the adapter for the selected exchange from environment credentials."""
     config = load_exchange_config(
         exchange,
         symbol=symbol,
         environment=environment,
+        market_type=market_type,
         api_key_env=api_key_env,
         api_secret_env=api_secret_env,
+        base_url=base_url,
     )
-    if exchange.lower() == "kraken":
-        config.adapter_kwargs["account_scope"] = account_scope
-        public_db_url = os.environ.get("KOLABI_MARKET_DB_URL")
-        account_db_url = _kolabi_scoped_db_url("ACCOUNT", account_scope)
-        audit_db_url = _kolabi_scoped_db_url("AUDIT", account_scope)
-        if public_db_url is not None:
-            config.adapter_kwargs["public_db_url"] = public_db_url
-        if account_db_url is not None:
-            config.adapter_kwargs["account_db_url"] = account_db_url
-        if audit_db_url is not None:
-            config.adapter_kwargs["audit_db_url"] = audit_db_url
-    adapter_cls = get_adapter(exchange)
+    _decorate_adapter_config(config, account_scope=account_scope)
+    adapter_cls = get_adapter(exchange, market_type)
     return adapter_cls(
         api_key=config.api_key,
         api_secret=config.api_secret,
@@ -252,11 +284,31 @@ def build_adapter(
     )
 
 
+def _decorate_adapter_config(
+    config,
+    *,
+    account_scope: str,
+) -> None:
+    """Attach shared DB lanes used by direct operator adapter commands."""
+
+    config.adapter_kwargs["account_scope"] = account_scope
+    public_db_url = os.environ.get("KOLABI_MARKET_DB_URL")
+    account_db_url = _kolabi_scoped_db_url("ACCOUNT", account_scope)
+    audit_db_url = _kolabi_scoped_db_url("AUDIT", account_scope)
+    if public_db_url is not None:
+        config.adapter_kwargs["public_db_url"] = public_db_url
+    if account_db_url is not None:
+        config.adapter_kwargs["account_db_url"] = account_db_url
+    if audit_db_url is not None:
+        config.adapter_kwargs["audit_db_url"] = audit_db_url
+
+
 def build_bot_service(
     exchange: str,
     symbol: str,
     environment: str,
     *,
+    market_type: str = "futures",
     account_scope: str = "default",
     api_key_env: str | None = None,
     api_secret_env: str | None = None,
@@ -267,6 +319,7 @@ def build_bot_service(
     return BotService(
         BotConfig(
             exchange=exchange,
+            market_type=market_type,
             symbol=symbol,
             environment=environment,
             account_scope=account_scope,
@@ -283,9 +336,160 @@ def print_json(payload: object) -> None:
     print(json.dumps(payload, sort_keys=True))
 
 
+_MARKET_TYPE_ORDER = ("futures", "spot", "margin", "isolated_margin")
+_ADAPTER_PERMISSION_PROBES: dict[tuple[str, str], str] = {
+    ("binance", "futures"): "test_order",
+    ("binance", "spot"): "test_order",
+    ("bitmex", "futures"): "apiKey",
+    ("bitmex", "spot"): "apiKey",
+}
+def _first_present_env_name(
+    names: Sequence[str],
+    env: Mapping[str, str],
+) -> str | None:
+    for name in names:
+        if env.get(name):
+            return name
+    return None
+
+
+def route_matrix_payload(
+    environment: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Return the operator-facing route matrix without reading secret values."""
+
+    routes: list[dict[str, object]] = []
+    normalized_environment = str(environment or "demo").strip().lower()
+    env_mapping = os.environ if env is None else env
+    for exchange in sorted(EXCHANGE_MARKET_TYPES):
+        market_types = EXCHANGE_MARKET_TYPES[exchange]
+        ordered_market_types = [
+            market_type
+            for market_type in _MARKET_TYPE_ORDER
+            if market_type in market_types
+        ]
+        for market_type in ordered_market_types:
+            api_key_env = list(
+                exchange_credential_env_names(
+                    exchange,
+                    market_type,
+                    normalized_environment,
+                )
+            )
+            api_secret_env = list(
+                exchange_credential_env_names(
+                    exchange,
+                    market_type,
+                    normalized_environment,
+                    secret=True,
+                )
+            )
+            api_key_source = _first_present_env_name(api_key_env, env_mapping)
+            api_secret_source = _first_present_env_name(api_secret_env, env_mapping)
+            routes.append(
+                {
+                    "exchange": exchange,
+                    "market_type": market_type,
+                    "codes": list(route_codes_for_market(exchange, market_type)),
+                    "default_symbol": default_symbol_for_route(exchange, market_type),
+                    "api_key_env": api_key_env,
+                    "api_secret_env": api_secret_env,
+                    "api_key_present": api_key_source is not None,
+                    "api_secret_present": api_secret_source is not None,
+                    "credentials_present": (
+                        api_key_source is not None and api_secret_source is not None
+                    ),
+                    "api_key_source": api_key_source,
+                    "api_secret_source": api_secret_source,
+                    "permission_probe": _permission_probe_name(
+                        exchange,
+                        market_type,
+                    ),
+                    "order_write_probe": _permission_probe_can_prove_order_write(
+                        exchange,
+                        market_type,
+                    ),
+                    "demo_requires_base_url_override": (
+                        exchange_requires_explicit_base_url(
+                            exchange,
+                            market_type,
+                            normalized_environment,
+                        )
+                    ),
+                }
+            )
+    return {"environment": normalized_environment, "routes": routes}
+
+
+def permission_status_payload(
+    adapter: Any,
+    *,
+    exchange: str,
+    market_type: str,
+    symbol: str,
+    environment: str,
+) -> dict[str, object]:
+    """Return an operator permission payload without submitting an order."""
+
+    status = getattr(adapter, "permission_status", None)
+    if callable(status):
+        payload = dict(status())
+    else:
+        payload = {
+            "exchange": exchange,
+            "market_type": market_type,
+            "symbol": symbol,
+            "permission_probe": "not_supported",
+            "can_place_orders": None,
+            "reason": "adapter does not expose a no-order permission probe",
+        }
+    payload.setdefault("exchange", exchange)
+    payload.setdefault("market_type", market_type)
+    payload.setdefault("symbol", symbol)
+    payload["environment"] = environment
+    return payload
+
+
+def _permission_probe_needs_adapter(exchange: str, market_type: str) -> bool:
+    """Return whether permissions can run a real no-order adapter probe."""
+
+    return _permission_probe_name(exchange, market_type) != "not_supported"
+
+
+def _permission_probe_name(exchange: str, market_type: str) -> str:
+    """Return the static permission probe type for one direct route."""
+
+    route = (
+        str(exchange or "").strip().lower(),
+        str(market_type or "futures").strip().lower(),
+    )
+    return _ADAPTER_PERMISSION_PROBES.get(route, "not_supported")
+
+
+def _permission_probe_can_prove_order_write(exchange: str, market_type: str) -> bool:
+    """Return whether the probe confirms order-write capability."""
+
+    return _permission_probe_name(exchange, market_type) != "not_supported"
+
+
 def ack_to_payload(ack: OrderAck) -> dict[str, object]:
     """Convertir un dataclass ack vers JSON stable."""
     return asdict(ack)
+
+
+def _ack_payload_with_client_id(
+    ack: OrderAck,
+    client_order_id: str,
+) -> dict[str, object]:
+    payload = ack_to_payload(ack)
+    payload["client_order_id"] = payload.get("client_order_id") or client_order_id
+    return payload
+
+
+def _client_order_id_for_command(command: str) -> str:
+    return smoke_client_order_id(f"cli_{command}")
 
 
 def position_to_payload(position: Position) -> dict[str, object]:
@@ -441,8 +645,12 @@ def _safe_cancel_order_candidates(adapter: Any) -> list[dict[str, object]]:
     return candidates
 
 
-def _close_position(adapter: Any) -> dict[str, object] | None:
-    """Fermer la position existante via un ordre market reduce-only."""
+def _close_position(
+    adapter: Any,
+    *,
+    market_type: str = "futures",
+) -> dict[str, object] | None:
+    """Fermer la position existante via un ordre market adapte au marche."""
     position_before = adapter.get_position()
     initial_qty = float(position_before.qty)
     if initial_qty == 0:
@@ -460,11 +668,14 @@ def _close_position(adapter: Any) -> dict[str, object] | None:
             verification_reason = "position_closed"
             break
         attempts += 1
+        close_params = _market_close_order_params(market_type)
+        client_order_id = _client_order_id_for_command("close")
         ack = adapter.place_order(
             side=side,
             orderQty=abs(current_qty),
             type_="MARKET",
-            reduceOnly=True,
+            clOrdID=client_order_id,
+            **close_params,
         )
         for _ in range(10):
             try:
@@ -491,17 +702,46 @@ def _close_position(adapter: Any) -> dict[str, object] | None:
     return payload
 
 
+def _market_close_order_params(market_type: str) -> dict[str, object]:
+    if (market_type or "futures").strip().lower() == "futures":
+        return {"reduceOnly": True}
+    return {}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Point d'entree CLI pour tests de communication directs."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "routes":
+        print_json(route_matrix_payload(args.environment))
+        return 0
+    symbol = getattr(args, "symbol", None) or default_symbol_for_route(
+        args.exchange,
+        args.market_type,
+    )
+    if (
+        args.command == "permissions"
+        and not _permission_probe_needs_adapter(args.exchange, args.market_type)
+    ):
+        print_json(
+            permission_status_payload(
+                object(),
+                exchange=args.exchange,
+                market_type=args.market_type,
+                symbol=symbol,
+                environment=args.environment,
+            )
+        )
+        return 0
     adapter = build_adapter(
         args.exchange,
-        args.symbol,
+        symbol,
         args.environment,
+        market_type=args.market_type,
         account_scope=args.account_scope,
         api_key_env=args.api_key_env,
         api_secret_env=args.api_secret_env,
+        base_url=args.base_url,
     )
 
     if args.command == "instruments":
@@ -526,14 +766,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command == "check-symbol":
-        print_json(adapter.validate_symbol(args.symbol))
+        print_json(adapter.validate_symbol(symbol))
         return 0
 
     if args.command == "balance":
         print_json(
             {
                 "environment": args.environment,
-                "symbol": args.symbol,
+                "symbol": symbol,
                 "availableMargin": adapter.get_balance(),
             }
         )
@@ -541,6 +781,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "position":
         print_json(position_to_payload(adapter.get_position()))
         return 0
+    if args.command == "permissions":
+        payload = permission_status_payload(
+            adapter,
+            exchange=args.exchange,
+            market_type=args.market_type,
+            symbol=symbol,
+            environment=args.environment,
+        )
+        print_json(payload)
+        can_place_orders = payload.get("can_place_orders")
+        return 1 if can_place_orders is False else 0
     if args.command == "cancel":
         print_json(ack_to_payload(adapter.cancel_order(args.order_id)))
         return 0
@@ -556,7 +807,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_json(
             {
                 "environment": args.environment,
-                "symbol": args.symbol,
+                "symbol": symbol,
                 "orders": adapter.live_open_orders(),
             }
         )
@@ -565,7 +816,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_json(
             {
                 "environment": args.environment,
-                "symbol": args.symbol,
+                "symbol": symbol,
                 "orders": adapter.live_trigger_orders(),
             }
         )
@@ -573,8 +824,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "cancel-all":
         service = build_bot_service(
             args.exchange,
-            args.symbol,
+            symbol,
             args.environment,
+            market_type=args.market_type,
             account_scope=args.account_scope,
             api_key_env=args.api_key_env,
             api_secret_env=args.api_secret_env,
@@ -582,8 +834,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_json(
             {
                 "environment": args.environment,
+                "market_type": args.market_type,
                 "account_scope": args.account_scope,
-                "symbol": args.symbol,
+                "symbol": symbol,
                 "cancelled": [ack_to_payload(ack) for ack in service.cancel_all_orders()],
             }
         )
@@ -591,8 +844,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "close-all":
         service = build_bot_service(
             args.exchange,
-            args.symbol,
+            symbol,
             args.environment,
+            market_type=args.market_type,
             account_scope=args.account_scope,
             api_key_env=args.api_key_env,
             api_secret_env=args.api_secret_env,
@@ -601,8 +855,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_json(
             {
                 "environment": args.environment,
+                "market_type": args.market_type,
                 "account_scope": args.account_scope,
-                "symbol": args.symbol,
+                "symbol": symbol,
                 "cancelled": [ack_to_payload(ack) for ack in result["cancelled"]],
                 "close_order": (
                     None
@@ -621,27 +876,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command == "limit":
-        adapter.validate_symbol(args.symbol)
+        adapter.validate_symbol(symbol)
+        client_order_id = _client_order_id_for_command("limit")
         print_json(
-            ack_to_payload(
+            _ack_payload_with_client_id(
                 adapter.place_order(
                     side=args.side,
                     orderQty=args.qty,
                     price=args.price,
                     type_="LIMIT",
-                )
+                    clOrdID=client_order_id,
+                ),
+                client_order_id,
             )
         )
         return 0
     if args.command == "market":
-        adapter.validate_symbol(args.symbol)
+        adapter.validate_symbol(symbol)
         initial_position = adapter.get_position()
+        client_order_id = _client_order_id_for_command("market")
         ack = adapter.place_order(
             side=args.side,
             orderQty=args.qty,
             type_="MARKET",
+            clOrdID=client_order_id,
         )
-        payload = ack_to_payload(ack)
+        payload = _ack_payload_with_client_id(ack, client_order_id)
         executed_qty = _safe_float(payload.get("executed_qty")) or 0.0
         if (
             str(payload.get("status", "")).lower() == "filled"
@@ -652,7 +912,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         verification = _verify_market_submission(
             adapter,
-            order_id=str(payload.get("order_id") or ""),
+            order_id=str(payload.get("order_id") or payload.get("client_order_id") or ""),
             initial_qty=float(initial_position.qty),
             side=args.side,
             quantity=float(args.qty),
@@ -661,31 +921,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_json(payload)
         return 0 if bool(verification.get("filled")) else 2
     if args.command == "trailing":
-        adapter.validate_symbol(args.symbol)
+        adapter.validate_symbol(symbol)
+        client_order_id = _client_order_id_for_command("trailing")
         print_json(
-            ack_to_payload(
+            _ack_payload_with_client_id(
                 adapter.place_order(
                     side=args.side,
                     orderQty=args.qty,
                     type_="TrailingStop",
+                    clOrdID=client_order_id,
                     trailingStopMaxDeviation=args.deviation,
                     trailingStopDeviationUnit=args.unit,
-                )
+                ),
+                client_order_id,
             )
         )
         return 0
     if args.command == "trailing-limit":
-        adapter.validate_symbol(args.symbol)
+        adapter.validate_symbol(symbol)
+        client_order_id = _client_order_id_for_command("trailing_limit")
         print_json(
-            ack_to_payload(
+            _ack_payload_with_client_id(
                 adapter.place_order(
                     side=args.side,
                     orderQty=args.qty,
                     price=args.price,
                     type_="TrailingStopLimit",
+                    clOrdID=client_order_id,
                     trailingStopMaxDeviation=args.deviation,
                     trailingStopDeviationUnit=args.unit,
-                )
+                ),
+                client_order_id,
             )
         )
         return 0

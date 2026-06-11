@@ -8,6 +8,8 @@ import pytest
 from kolabi.shared.exchanges import get_adapter
 from kolabi.shared.exchanges.kraken_adapter import (
     KrakenFuturesAdapter,
+    KrakenMarginAdapter,
+    KrakenSpotAdapter,
     _extract_available_margin,
     _map_order_status_from_payload,
     build_exec_orders,
@@ -52,6 +54,346 @@ class DummySession:
 def test_get_adapter_loads_kraken():
     adapter_cls = get_adapter("kraken")
     assert adapter_cls.__name__ == "KrakenFuturesAdapter"
+
+
+def test_get_adapter_loads_kraken_market_types():
+    assert get_adapter("kraken", "futures") is KrakenFuturesAdapter
+    assert get_adapter("kraken", "spot") is KrakenSpotAdapter
+    assert get_adapter("kraken", "margin") is KrakenMarginAdapter
+
+
+def test_kraken_spot_limit_order_uses_spot_add_order() -> None:
+    session = DummySession(
+        [
+            {
+                "error": [],
+                "result": {
+                    "txid": ["OID-SPOT"],
+                    "descr": {"order": "buy 0.1 XBT/USD @ limit 100.0"},
+                },
+            }
+        ]
+    )
+    adapter = KrakenSpotAdapter(
+        api_key="key",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XBT/USD",
+        session=cast(Any, session),
+    )
+
+    ack = adapter.place_order(
+        "buy",
+        0.1,
+        price=100.0,
+        type_="Limit",
+        clOrdID="H1spot-260610000000",
+        execInst="ParticipateDoNotInitiate",
+    )
+
+    assert ack.order_id == "OID-SPOT"
+    assert ack.client_order_id == "H1spot-260610000000"
+    call = session.calls[0]
+    assert call["url"].endswith("/0/private/AddOrder")
+    assert "API-Key" in call["headers"]
+    sent = call["data"]
+    assert sent["pair"] == "XBT/USD"
+    assert sent["type"] == "buy"
+    assert sent["ordertype"] == "limit"
+    assert sent["price"] == 100.0
+    assert sent["volume"] == 0.1
+    assert sent["cl_ord_id"] == "H1spot-260610000000"
+    assert sent["oflags"] == "post"
+
+
+def test_kraken_spot_add_order_writes_rest_audit(postgres_url_factory) -> None:
+    session = DummySession(
+        [
+            {
+                "error": [],
+                "result": {
+                    "txid": ["OID-SPOT"],
+                    "descr": {"order": "buy 0.1 XBT/USD @ limit 100.0"},
+                },
+            }
+        ]
+    )
+    adapter = KrakenSpotAdapter(
+        api_key="key",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XBT/USD",
+        environment="live",
+        audit_db_url=postgres_url_factory("audit"),
+        account_scope="advers",
+        session=cast(Any, session),
+    )
+
+    adapter.place_order(
+        "buy",
+        0.1,
+        price=100.0,
+        type_="Limit",
+        clOrdID="H1spot-260610000000",
+    )
+
+    assert adapter._audit_engine is not None
+    with Session(adapter._audit_engine) as db_session:
+        row = db_session.execute(select(ExchangeRestCall)).scalars().one()
+    assert row.exchange == "kraken"
+    assert row.environment == "live"
+    assert row.market_type == "spot"
+    assert row.account_scope == "advers"
+    assert row.symbol == "XBT/USD"
+    assert row.path == "/0/private/AddOrder"
+    assert row.result_kind == "ok"
+    assert row.client_order_id == "H1spot-260610000000"
+    assert row.exchange_order_id == "OID-SPOT"
+    assert row.endpoint_order_id == "OID-SPOT"
+    assert row.correlation_id == "H1spot-260610000000"
+    assert row.ack_status == "New"
+    assert row.ack_order_id == "OID-SPOT"
+    assert row.ack_client_order_id == "H1spot-260610000000"
+    assert row.request_params["pair"] == "XBT/USD"
+    assert row.response_payload["result"]["txid"] == ["OID-SPOT"]
+
+
+def test_kraken_margin_cancel_order_writes_rest_audit(postgres_url_factory) -> None:
+    session = DummySession(
+        [
+            {
+                "error": [],
+                "result": {"count": 1},
+            }
+        ]
+    )
+    adapter = KrakenMarginAdapter(
+        api_key="key",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XBT/USD",
+        environment="live",
+        audit_db_url=postgres_url_factory("audit"),
+        account_scope="advers",
+        leverage="2",
+        session=cast(Any, session),
+    )
+
+    ack = adapter.cancel_order("H1margin-260610000000")
+
+    assert ack.status == "Canceled"
+    assert adapter._audit_engine is not None
+    with Session(adapter._audit_engine) as db_session:
+        row = db_session.execute(select(ExchangeRestCall)).scalars().one()
+    assert row.exchange == "kraken"
+    assert row.market_type == "margin"
+    assert row.path == "/0/private/CancelOrder"
+    assert row.result_kind == "ok"
+    assert row.client_order_id == "H1margin-260610000000"
+    assert row.exchange_order_id is None
+    assert row.endpoint_order_id == "H1margin-260610000000"
+    assert row.correlation_id == "H1margin-260610000000"
+    assert row.ack_status == "Canceled"
+
+
+def test_kraken_margin_requires_explicit_leverage() -> None:
+    adapter = KrakenMarginAdapter(
+        api_key="key",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XBT/USD",
+        session=cast(Any, DummySession([])),
+    )
+
+    with pytest.raises(ValueError, match="explicit leverage"):
+        adapter.place_order("buy", 0.1, price=100.0, type_="Limit")
+
+
+def test_kraken_margin_order_sends_leverage() -> None:
+    session = DummySession(
+        [
+            {
+                "error": [],
+                "result": {
+                    "txid": ["OID-MARGIN"],
+                    "descr": {"order": "buy 0.1 XBT/USD @ limit 100.0"},
+                },
+            }
+        ]
+    )
+    adapter = KrakenMarginAdapter(
+        api_key="key",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XBT/USD",
+        leverage="2",
+        session=cast(Any, session),
+    )
+
+    ack = adapter.place_order("buy", 0.1, price=100.0, type_="Limit")
+
+    assert ack.order_id == "OID-MARGIN"
+    assert session.calls[0]["data"]["leverage"] == "2"
+
+
+def test_kraken_spot_position_reads_base_balance() -> None:
+    session = DummySession(
+        [
+            {
+                "error": [],
+                "result": {
+                    "XXBT": "0.125",
+                    "ZUSD": "1000.0",
+                },
+            }
+        ]
+    )
+    adapter = KrakenSpotAdapter(
+        api_key="key",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XBT/USD",
+        session=cast(Any, session),
+    )
+
+    position = adapter.get_position()
+
+    assert position.symbol == "XBT/USD"
+    assert position.qty == 0.125
+    assert position.entry_price is None
+    assert session.calls[0]["url"].endswith("/0/private/Balance")
+
+
+def test_kraken_margin_position_is_signed_by_open_position_side() -> None:
+    session = DummySession(
+        [
+            {
+                "error": [],
+                "result": {
+                    "P1": {
+                        "pair": "XBT/USD",
+                        "type": "buy",
+                        "vol": "0.40",
+                        "price": "100.0",
+                    },
+                    "P2": {
+                        "pair": "XBT/USD",
+                        "type": "sell",
+                        "vol": "0.15",
+                        "price": "120.0",
+                    },
+                },
+            }
+        ]
+    )
+    adapter = KrakenMarginAdapter(
+        api_key="key",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XBT/USD",
+        leverage="2",
+        session=cast(Any, session),
+    )
+
+    position = adapter.get_position()
+
+    assert position.symbol == "XBT/USD"
+    assert position.qty == 0.25
+    assert position.entry_price == 100.0
+    assert session.calls[0]["url"].endswith("/0/private/OpenPositions")
+
+
+def test_kraken_spot_amend_cancel_replaces_with_fresh_client_id() -> None:
+    session = DummySession(
+        [
+            {
+                "error": [],
+                "result": {
+                    "txid": ["OID-SPOT"],
+                    "descr": {"order": "buy 0.1 XBT/USD @ limit 100.0"},
+                },
+            },
+            {"error": [], "result": {"count": 1}},
+            {
+                "error": [],
+                "result": {
+                    "txid": ["OID-SPOT-R"],
+                    "descr": {"order": "buy 0.1 XBT/USD @ limit 101.0"},
+                },
+            },
+        ]
+    )
+    adapter = KrakenSpotAdapter(
+        api_key="key",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XBT/USD",
+        session=cast(Any, session),
+    )
+    adapter.place_order(
+        "buy",
+        0.1,
+        price=100.0,
+        type_="Limit",
+        clOrdID="H1spot-260610000000",
+    )
+
+    ack = adapter.amend_order("OID-SPOT", price=101.0)
+
+    assert ack.order_id == "OID-SPOT-R"
+    assert session.calls[1]["url"].endswith("/0/private/CancelOrder")
+    assert session.calls[1]["data"]["txid"] == "OID-SPOT"
+    replacement = session.calls[2]["data"]
+    assert replacement["ordertype"] == "limit"
+    assert replacement["price"] == 101.0
+    assert replacement["volume"] == 0.1
+    assert replacement["cl_ord_id"] != "H1spot-260610000000"
+    assert replacement["cl_ord_id"].startswith("H1spot-260610000000-r")
+
+
+def test_kraken_margin_amend_preserves_leverage_on_replacement() -> None:
+    session = DummySession(
+        [
+            {
+                "error": [],
+                "result": {
+                    "txid": ["OID-MARGIN"],
+                    "descr": {"order": "buy 0.1 XBT/USD @ limit 100.0"},
+                },
+            },
+            {"error": [], "result": {"count": 1}},
+            {
+                "error": [],
+                "result": {
+                    "txid": ["OID-MARGIN-R"],
+                    "descr": {"order": "buy 0.2 XBT/USD @ limit 101.0"},
+                },
+            },
+        ]
+    )
+    adapter = KrakenMarginAdapter(
+        api_key="key",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XBT/USD",
+        leverage="2",
+        session=cast(Any, session),
+    )
+    adapter.place_order(
+        "buy",
+        0.1,
+        price=100.0,
+        type_="Limit",
+        clOrdID="H1margin-260610000000",
+    )
+
+    ack = adapter.amend_order("OID-MARGIN", orderQty=0.2, price=101.0)
+
+    assert ack.order_id == "OID-MARGIN-R"
+    replacement = session.calls[2]["data"]
+    assert replacement["leverage"] == "2"
+    assert replacement["price"] == 101.0
+    assert replacement["volume"] == 0.2
 
 
 def test_default_audit_lane_is_postgres_environment_scoped(monkeypatch) -> None:
@@ -1198,3 +1540,51 @@ def test_validate_symbol_syncs_instrument_rules_to_public_db(postgres_url_factor
         assert row.symbol == "PI_XBTUSD"
         assert row.tick_size == 0.5
         assert row.min_quantity == 1.0
+
+
+def test_kraken_spot_adapter_lists_and_validates_asset_pairs() -> None:
+    session = DummySession(
+        [
+            {
+                "error": [],
+                "result": {
+                    "XXBTZUSD": {
+                        "wsname": "XBT/USD",
+                        "status": "online",
+                        "pair_decimals": 1,
+                        "lot_decimals": 8,
+                        "ordermin": "0.0001",
+                    }
+                },
+            },
+            {
+                "error": [],
+                "result": {
+                    "XXBTZUSD": {
+                        "wsname": "XBT/USD",
+                        "status": "online",
+                        "pair_decimals": 1,
+                        "lot_decimals": 8,
+                        "ordermin": "0.0001",
+                    }
+                },
+            },
+        ]
+    )
+    adapter = KrakenSpotAdapter(
+        api_key="k",
+        api_secret="c2VjcmV0",
+        base_url="https://api.kraken.test",
+        symbol="XXBTZUSD",
+        session=cast(Any, session),
+    )
+
+    instruments = adapter.list_instruments()
+    metadata = adapter.validate_symbol("XXBTZUSD")
+
+    assert instruments[0]["symbol"] == "XXBTZUSD"
+    assert instruments[0]["wsname"] == "XBT/USD"
+    assert instruments[0]["tradeable"] is True
+    assert metadata["symbol"] == "XXBTZUSD"
+    assert metadata["type"] == "spot"
+    assert metadata["minQuantity"] == 0.0001

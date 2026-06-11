@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from kolabi.shared.persistence import (
     AccountBalance,
     AccountPosition,
+    ExchangeConnection,
     ExchangeFill,
     ExchangeOrder,
     PrivateIngestAudit,
@@ -24,6 +28,7 @@ from kolabi.tree.account import (
     KrakenFuturesCredentials,
     KrakenFuturesPrivateStream,
     KrakenFuturesRestReconciler,
+    KrakenSpotRestReconciler,
     OrderWrite,
     PrivateIngestMirror,
     PrivateStreamProfile,
@@ -34,9 +39,12 @@ from kolabi.tree.account import (
     map_order,
     map_positions,
     map_rest_balances,
+    map_spot_rest_balances,
+    map_spot_rest_order,
     prune_raw_events,
     sign_challenge,
     sign_rest_auth,
+    sign_spot_rest_auth,
     stream_kind_uses_critical_db,
     subscribe_messages,
 )
@@ -46,6 +54,34 @@ from sqlalchemy.orm import Session
 
 def _result_items(result: dict[str, object], key: str) -> list[Any]:
     return cast(list[Any], result[key])
+
+
+def _utc_naive(value: datetime | str) -> datetime:
+    parsed = datetime.fromisoformat(value) if isinstance(value, str) else value
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+class _DummyResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict[str, object]:
+        return self.payload
+
+
+class _DummyPostSession:
+    def __init__(self, payloads: list[dict[str, object]]) -> None:
+        self.payloads = list(payloads)
+        self.calls: list[dict[str, object]] = []
+
+    def post(self, **kwargs: object) -> _DummyResponse:
+        self.calls.append(dict(kwargs))
+        return _DummyResponse(self.payloads.pop(0))
 
 
 def test_account_state_status_is_empty_before_events(postgres_url_factory):
@@ -69,7 +105,7 @@ def test_record_connection_status_updates_existing_row(postgres_url_factory):
 
     assert first.id == second.id
     assert second.status == "healthy"
-    assert second.last_heartbeat_at == second_time.replace(tzinfo=None)
+    assert _utc_naive(second.last_heartbeat_at) == second_time.replace(tzinfo=None)
 
 
 def test_reconnecting_status_does_not_refresh_connection_heartbeat(postgres_url_factory):
@@ -88,9 +124,49 @@ def test_reconnecting_status_does_not_refresh_connection_heartbeat(postgres_url_
 
     assert healthy.id == reconnecting.id
     assert reconnecting.status == "reconnecting"
-    assert reconnecting.updated_at == reconnect_time.replace(tzinfo=None)
-    assert reconnecting.last_heartbeat_at == healthy_time.replace(tzinfo=None)
+    assert _utc_naive(reconnecting.updated_at) == reconnect_time.replace(tzinfo=None)
+    assert _utc_naive(reconnecting.last_heartbeat_at) == healthy_time.replace(tzinfo=None)
     assert reconnecting.last_error == "server rejected WebSocket connection: HTTP 503"
+
+
+def test_connection_status_is_account_scope_scoped(postgres_url_factory):
+    db_url = postgres_url_factory("prv-health-scope")
+    default_store = AccountStateStore(
+        AccountStreamConfig(db_url=db_url, account_scope="default")
+    )
+    advers_store = AccountStateStore(
+        AccountStreamConfig(db_url=db_url, account_scope="advers")
+    )
+    baseline = datetime(2026, 5, 6, 1, 0, tzinfo=timezone.utc)
+
+    default_connection = default_store.record_connection_status(
+        "private_ws",
+        "healthy",
+        baseline,
+    )
+    advers_connection = advers_store.record_connection_status(
+        "private_ws",
+        "reconnecting",
+        baseline + timedelta(minutes=1),
+        last_error="advers reconnect",
+    )
+
+    assert advers_connection.id != default_connection.id
+    assert default_store.latest_status("private_ws")["status"] == "healthy"
+    assert default_store.latest_status("private_ws")["account_scope"] == "default"
+    advers_status = advers_store.latest_status("private_ws")
+    assert advers_status["status"] == "reconnecting"
+    assert advers_status["account_scope"] == "advers"
+    assert advers_status["last_error"] == "advers reconnect"
+    with Session(default_store.engine) as session:
+        rows = (
+            session.execute(
+                select(ExchangeConnection).order_by(ExchangeConnection.account_scope)
+            )
+            .scalars()
+            .all()
+        )
+    assert [row.account_scope for row in rows] == ["advers", "default"]
 
 
 def test_critical_liveness_refresh_updates_private_ws_alias(postgres_url_factory):
@@ -121,8 +197,8 @@ def test_critical_liveness_refresh_updates_private_ws_alias(postgres_url_factory
     baseline_naive = baseline.replace(tzinfo=None)
     status_alias = store.latest_status("private_ws")
     status_critical = store.latest_status("private_ws_critical")
-    assert datetime.fromisoformat(str(status_alias["updated_at"])) > baseline_naive
-    assert datetime.fromisoformat(str(status_critical["updated_at"])) > baseline_naive
+    assert _utc_naive(str(status_alias["updated_at"])) > baseline_naive
+    assert _utc_naive(str(status_critical["updated_at"])) > baseline_naive
 
 
 def test_account_liveness_refresh_does_not_touch_private_ws_alias(postgres_url_factory):
@@ -152,8 +228,8 @@ def test_account_liveness_refresh_does_not_touch_private_ws_alias(postgres_url_f
     baseline_naive = baseline.replace(tzinfo=None)
     status_alias = store.latest_status("private_ws")
     status_account = store.latest_status("private_ws_account")
-    assert datetime.fromisoformat(str(status_alias["updated_at"])) == baseline_naive
-    assert datetime.fromisoformat(str(status_account["updated_at"])) > baseline_naive
+    assert _utc_naive(str(status_alias["updated_at"])) == baseline_naive
+    assert _utc_naive(str(status_account["updated_at"])) > baseline_naive
 
 
 def test_private_ws_status_uses_critical_db_selector() -> None:
@@ -273,6 +349,86 @@ def test_record_order_and_fill(postgres_url_factory):
         assert fill.exchange_fill_id == "FID-1"
 
 
+def test_order_idempotency_is_account_scope_scoped(postgres_url_factory):
+    db_url = postgres_url_factory("prv-scope-dedupe")
+    default_store = AccountStateStore(
+        AccountStreamConfig(db_url=db_url, account_scope="default")
+    )
+    advers_store = AccountStateStore(
+        AccountStreamConfig(db_url=db_url, account_scope="advers")
+    )
+
+    default_order = default_store.record_order(
+        OrderWrite(
+            symbol="PF_XBTUSD",
+            side="buy",
+            order_type="limit",
+            status="open",
+            quantity=1.0,
+            exchange_order_id="OID-SHARED",
+            client_order_id="CID-SHARED",
+            price=80000.0,
+        )
+    )
+    advers_order = advers_store.record_order(
+        OrderWrite(
+            symbol="PF_XBTUSD",
+            side="sell",
+            order_type="limit",
+            status="filled",
+            quantity=2.0,
+            exchange_order_id="OID-SHARED",
+            client_order_id="CID-SHARED",
+            price=81000.0,
+        )
+    )
+    default_client_only = default_store.record_order(
+        OrderWrite(
+            symbol="PF_ETHUSD",
+            side="buy",
+            order_type="limit",
+            status="open",
+            quantity=1.0,
+            exchange_order_id=None,
+            client_order_id="CID-ONLY",
+            price=2000.0,
+        )
+    )
+    advers_client_only = advers_store.record_order(
+        OrderWrite(
+            symbol="PF_ETHUSD",
+            side="sell",
+            order_type="limit",
+            status="filled",
+            quantity=2.0,
+            exchange_order_id=None,
+            client_order_id="CID-ONLY",
+            price=2100.0,
+        )
+    )
+
+    assert advers_order.id != default_order.id
+    assert advers_client_only.id != default_client_only.id
+    with Session(default_store.engine) as session:
+        rows = (
+            session.execute(
+                select(ExchangeOrder).order_by(
+                    ExchangeOrder.symbol.asc(),
+                    ExchangeOrder.account_scope.asc(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(rows) == 4
+    by_scope_symbol = {(row.account_scope, row.symbol): row for row in rows}
+    assert by_scope_symbol[("default", "PF_XBTUSD")].status == "open"
+    assert by_scope_symbol[("advers", "PF_XBTUSD")].status == "filled"
+    assert by_scope_symbol[("default", "PF_ETHUSD")].status == "open"
+    assert by_scope_symbol[("advers", "PF_ETHUSD")].status == "filled"
+
+
 def test_sign_challenge_matches_kraken_documented_example():
     challenge = "c100b894-1729-464d-ace1-52dbce11db42"
     api_secret = (
@@ -309,6 +465,57 @@ def test_sign_rest_auth_uses_v3_path_without_derivatives_prefix():
     assert isinstance(signed, str)
     assert signed
     assert signed != signed_with_wrong_prefix
+
+
+def test_sign_spot_rest_auth_uses_zero_private_path() -> None:
+    api_secret = (
+        "7zxMEF5p/Z8l2p2U7Ghv6x14Af+Fx+92tPgUdVQ748FOIrEoT9bgT+"
+        "bTRfXc5pz8na+hL/QdrCVG7bh9KpT0eMTm"
+    )
+    signed = sign_spot_rest_auth(
+        endpoint_path="/0/private/OpenOrders",
+        post_data="nonce=1415957147987",
+        nonce="1415957147987",
+        api_secret=api_secret,
+    )
+    signed_wrong_path = sign_spot_rest_auth(
+        endpoint_path="/private/OpenOrders",
+        post_data="nonce=1415957147987",
+        nonce="1415957147987",
+        api_secret=api_secret,
+    )
+
+    assert isinstance(signed, str)
+    assert signed
+    assert signed != signed_wrong_path
+
+
+def test_map_spot_rest_order_and_balances() -> None:
+    order = map_spot_rest_order(
+        "OID-SPOT",
+        {
+            "descr": {
+                "pair": "XBT/USD",
+                "type": "buy",
+                "ordertype": "limit",
+                "price": "100.0",
+            },
+            "vol": "0.5",
+            "vol_exec": "0.1",
+            "status": "open",
+            "cl_ord_id": "H1spot-260610000000",
+            "opentm": "1781092800.0",
+        },
+    )
+    balances = map_spot_rest_balances({"result": {"XXBT": "1.5", "ZUSD": "20"}})
+
+    assert order.symbol == "XBT/USD"
+    assert order.exchange_order_id == "OID-SPOT"
+    assert order.client_order_id == "H1spot-260610000000"
+    assert order.quantity == 0.5
+    assert order.filled_quantity == 0.1
+    assert balances[0].asset == "XXBT"
+    assert balances[0].total == 1.5
 
 
 def test_subscribe_messages_include_signed_challenge_without_secret():
@@ -469,6 +676,42 @@ def test_duplicate_fill_id_is_idempotent(postgres_url_factory):
     assert second.id == first.id
     with Session(store.engine) as session:
         assert len(session.execute(select(ExchangeFill)).scalars().all()) == 1
+
+
+def test_fill_idempotency_is_account_scope_scoped(postgres_url_factory):
+    db_url = postgres_url_factory("prv-fill-scope-dedupe")
+    default_store = AccountStateStore(
+        AccountStreamConfig(db_url=db_url, account_scope="default")
+    )
+    advers_store = AccountStateStore(
+        AccountStreamConfig(db_url=db_url, account_scope="advers")
+    )
+    payload = {
+        "buy": False,
+        "fill_id": "FID-SHARED",
+        "instrument": "PI_XBTUSD",
+        "order_id": "OID-SHARED",
+        "order_type": "market",
+        "price": 76447.0,
+        "qty": 1.0,
+    }
+
+    default_fill = default_store.record_fill_event(map_fill_event(payload))
+    advers_fill = advers_store.record_fill_event(map_fill_event(payload))
+
+    assert advers_fill.id != default_fill.id
+    with Session(default_store.engine) as session:
+        rows = (
+            session.execute(
+                select(ExchangeFill, ExchangeOrder)
+                .join(ExchangeOrder, ExchangeFill.order_id == ExchangeOrder.id)
+                .order_by(ExchangeOrder.account_scope.asc())
+            )
+            .all()
+        )
+
+    assert len(rows) == 2
+    assert [order.account_scope for _fill, order in rows] == ["advers", "default"]
 
 
 def test_handle_message_persists_raw_event_and_fill_snapshot(postgres_url_factory):
@@ -890,9 +1133,67 @@ def test_rest_reconcile_tombstones_missing_open_order_in_critical_db(postgres_ur
         assert row.raw_payload["reason"] == "absent_from_open_orders_snapshot"
 
 
+def test_spot_rest_reconciler_writes_orders_balances_and_health(postgres_url_factory):
+    account_db = postgres_url_factory("account-spot")
+    critical_db = postgres_url_factory("critical-spot")
+    config = AccountStreamConfig(
+        db_url=account_db,
+        critical_db_url=critical_db,
+        market_type="spot",
+        rest_url="https://api.kraken.test",
+    )
+    account_store = AccountStateStore(config)
+    critical_store = AccountStateStore(critical_private_config(config))
+    session = _DummyPostSession(
+        [
+            {
+                "error": [],
+                "result": {
+                    "open": {
+                        "OID-SPOT": {
+                            "descr": {
+                                "pair": "XBT/USD",
+                                "type": "buy",
+                                "ordertype": "limit",
+                                "price": "100.0",
+                            },
+                            "vol": "0.5",
+                            "vol_exec": "0.1",
+                            "status": "open",
+                            "cl_ord_id": "H1spot-260610000000",
+                        }
+                    }
+                },
+            },
+            {"error": [], "result": {"XXBT": "1.5", "ZUSD": "20"}},
+        ]
+    )
+    reconciler = KrakenSpotRestReconciler(
+        config,
+        account_store,
+        KrakenFuturesCredentials(api_key="key", api_secret="c2VjcmV0"),
+        session=cast(Any, session),
+        critical_store=critical_store,
+    )
+
+    stats = reconciler.reconcile_once()
+
+    assert stats == {"orders": 1, "positions": 0, "balances": 2}
+    assert session.calls[0]["url"] == "https://api.kraken.test/0/private/OpenOrders"
+    assert session.calls[1]["url"] == "https://api.kraken.test/0/private/Balance"
+    with Session(account_store.engine) as db_session:
+        order = db_session.execute(select(ExchangeOrder)).scalar_one()
+        balances = db_session.execute(select(AccountBalance)).scalars().all()
+    assert order.exchange_order_id == "OID-SPOT"
+    assert order.client_order_id == "H1spot-260610000000"
+    assert len(balances) == 2
+    assert critical_store.latest_status("private_ws")["status"] == "healthy"
+
+
 def test_rest_reconcile_summary_logs_success_at_most_every_five_minutes(caplog):
     logger = logging.getLogger("kola")
     state = account_module._RestReconcileLogState(
+        exchange="kraken",
         environment="live",
         interval_seconds=10.0,
     )
@@ -916,6 +1217,7 @@ def test_rest_reconcile_summary_logs_success_at_most_every_five_minutes(caplog):
 def test_rest_reconcile_failure_logs_immediately_and_counts_next_summary(caplog):
     logger = logging.getLogger("kola")
     state = account_module._RestReconcileLogState(
+        exchange="kraken",
         environment="live",
         interval_seconds=10.0,
     )
@@ -928,6 +1230,30 @@ def test_rest_reconcile_failure_logs_immediately_and_counts_next_summary(caplog)
     messages = [record.getMessage() for record in caplog.records]
     assert "kraken_reconcile_failed\tlive\t10.0s\ttimeout" in messages
     assert "kraken_reconcile\tlive\t2\t1\t10\t10.0s\t1\t1\ttimeout" in messages
+
+
+def test_rest_reconcile_summary_uses_exchange_label(caplog):
+    logger = logging.getLogger("kola")
+    state = account_module._RestReconcileLogState(
+        exchange="binance",
+        environment="demo",
+        interval_seconds=10.0,
+    )
+
+    with caplog.at_level(logging.INFO, logger="kola"):
+        state.log_start(logger)
+        state.log_success(
+            logger,
+            {"orders": 1, "positions": 0, "balances": 2},
+            now=0.0,
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "binance_reconcile\tenv\torders\tpositions\tbalances\tinterval\tok\tfail\tlast_error"
+        in messages
+    )
+    assert "binance_reconcile\tdemo\t1\t0\t2\t10.0s\t1\t0\t-" in messages
 
 
 def test_critical_mirror_config_uses_broad_account_lane() -> None:
@@ -1329,6 +1655,47 @@ def test_raw_event_time_retention_deletes_old_events(postgres_url_factory):
         assert [row.exchange_sequence for row in rows] == ["new"]
 
 
+def test_raw_event_retention_limit_is_account_scope_scoped(postgres_url_factory):
+    db_url = postgres_url_factory("prv-raw-retention-scope")
+    default_store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            account_scope="default",
+            raw_retention_minutes=0,
+            raw_retention_limit=1,
+        )
+    )
+    advers_store = AccountStateStore(
+        AccountStreamConfig(
+            db_url=db_url,
+            account_scope="advers",
+            raw_retention_minutes=0,
+            raw_retention_limit=0,
+        )
+    )
+
+    default_store.record_raw_event({"feed": "fills", "seq": "default-old", "fills": []})
+    advers_store.record_raw_event({"feed": "fills", "seq": "advers-kept", "fills": []})
+    default_store.record_raw_event({"feed": "fills", "seq": "default-new", "fills": []})
+
+    with Session(default_store.engine) as session:
+        rows = (
+            session.execute(
+                select(RawExchangeEvent).order_by(
+                    RawExchangeEvent.account_scope.asc(),
+                    RawExchangeEvent.exchange_sequence.asc(),
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert [(row.account_scope, row.exchange_sequence) for row in rows] == [
+        ("advers", "advers-kept"),
+        ("default", "default-new"),
+    ]
+
+
 def test_private_storage_maintenance_prunes_duplicate_state_and_audits(postgres_url_factory):
     db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(
@@ -1627,6 +1994,37 @@ def test_raw_event_dedup_is_scoped_by_event_and_stream(postgres_url_factory):
         ]
 
 
+def test_raw_event_dedup_is_account_scope_scoped(postgres_url_factory):
+    db_url = postgres_url_factory("prv-raw-dedup-scope")
+    default_store = AccountStateStore(
+        AccountStreamConfig(db_url=db_url, account_scope="default")
+    )
+    advers_store = AccountStateStore(
+        AccountStreamConfig(db_url=db_url, account_scope="advers")
+    )
+    message = {"feed": "notifications_auth", "notifications": []}
+
+    first_default = default_store.record_raw_event(message)
+    first_advers = advers_store.record_raw_event(message)
+    second_default = default_store.record_raw_event(message)
+
+    assert first_default.id == second_default.id
+    assert first_advers.id != first_default.id
+    with Session(default_store.engine) as session:
+        rows = (
+            session.execute(
+                select(RawExchangeEvent).order_by(RawExchangeEvent.account_scope.asc())
+            )
+            .scalars()
+            .all()
+        )
+
+    assert [(row.account_scope, row.duplicate_count) for row in rows] == [
+        ("advers", 0),
+        ("default", 1),
+    ]
+
+
 def test_private_schema_adds_raw_event_latest_lookup_index(postgres_url_factory):
     db_url = postgres_url_factory("prv-market")
     store = AccountStateStore(AccountStreamConfig(db_url=db_url))
@@ -1639,8 +2037,8 @@ def test_private_schema_adds_raw_event_latest_lookup_index(postgres_url_factory)
 def test_main_handles_ctrl_c_as_clean_stop(postgres_url_factory, monkeypatch, capsys):
     db_url = postgres_url_factory("prv-market")
     critical_db_url = postgres_url_factory("critical")
-    monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_KEY", "key")
-    monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_SECRET", "secret")
+    monkeypatch.setenv("KRKF_DEMO_API_KEY", "key")
+    monkeypatch.setenv("KRKF_DEMO_API_SECRET", "secret")
 
     class InterruptingStream:
         def __init__(self, *args, **kwargs):
@@ -1675,6 +2073,51 @@ def test_main_handles_ctrl_c_as_clean_stop(postgres_url_factory, monkeypatch, ca
     )
     status = store.latest_status("private_ws")
     assert status["status"] == "stopped"
+
+
+def test_threaded_private_group_runs_successful_rest_reconcile(monkeypatch):
+    thread_errors: list[BaseException] = []
+
+    def record_thread_error(args):
+        thread_errors.append(args.exc_value)
+
+    monkeypatch.setattr(threading, "excepthook", record_thread_error)
+
+    class ShortStream:
+        logger = logging.getLogger("kola")
+        profile = SimpleNamespace(name="unit")
+
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def run(self) -> None:
+            await asyncio.sleep(0.08)
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    class SuccessfulReconciler:
+        config = AccountStreamConfig(environment="demo")
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def reconcile_once(self) -> dict[str, int]:
+            self.calls += 1
+            return {"orders": 0, "positions": 0, "balances": 0}
+
+    stream = ShortStream()
+    reconciler = SuccessfulReconciler()
+
+    account_module.run_private_stream_group_threaded(
+        (cast(KrakenFuturesPrivateStream, stream),),
+        rest_reconciler=reconciler,
+        rest_reconcile_seconds=0.01,
+    )
+
+    assert reconciler.calls >= 1
+    assert stream.stopped is True
+    assert thread_errors == []
 
 
 def test_account_parser_uses_critical_db_url_only() -> None:
@@ -1716,6 +2159,35 @@ def test_account_parser_can_explicitly_allow_critical_forensic_prune() -> None:
 
     config = account_module.config_from_args(args)
     assert config.forensic_shield_critical is False
+
+
+def test_kraken_private_defaults_use_route_code_credentials(monkeypatch) -> None:
+    for name in (
+        "KRKF_DEMO_API_KEY",
+        "KRKF_DEMO_API_SECRET",
+        "KRKS_DEMO_API_KEY",
+        "KRKS_DEMO_API_SECRET",
+        "KRKM_DEMO_API_KEY",
+        "KRKM_DEMO_API_SECRET",
+        "KRAKEN_FUTURE_DEMO_API_KEY",
+        "KRAKEN_FUTURE_DEMO_API_SECRET",
+        "KRAKEN_SPOT_DEMO_API_KEY",
+        "KRAKEN_SPOT_DEMO_API_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    assert account_module.kraken_private_defaults("demo", "futures")["api_key_env"] == "KRKF_DEMO_API_KEY"
+    assert account_module.kraken_private_defaults("demo", "spot")["api_key_env"] == "KRKS_DEMO_API_KEY"
+    assert account_module.kraken_private_defaults("demo", "margin")["api_key_env"] == "KRKM_DEMO_API_KEY"
+
+
+def test_kraken_private_defaults_accept_legacy_credentials(monkeypatch) -> None:
+    monkeypatch.delenv("KRKF_DEMO_API_KEY", raising=False)
+    monkeypatch.setenv("KRAKEN_FUTURE_DEMO_API_KEY", "legacy-key")
+
+    defaults = account_module.kraken_private_defaults("demo", "futures")
+
+    assert defaults["api_key_env"] == "KRAKEN_FUTURE_DEMO_API_KEY"
 
 
 def test_map_balances_and_positions_are_persisted(postgres_url_factory):

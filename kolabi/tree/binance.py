@@ -35,7 +35,7 @@ from kolabi.tree.kraken import (
 
 @dataclass(frozen=True)
 class BinanceConfig(KrakenConfig):
-    """Configuration for the Binance USD-M Futures public feed."""
+    """Configuration for the Binance public feed."""
 
     pair: str = "BTCUSDT"
     ws_url: str = "wss://stream.binancefuture.com/stream"
@@ -109,6 +109,19 @@ class BinanceTree(KrakenTree):
         return self.ingest_payload(parsed, datetime.now(timezone.utc))
 
     def _fetch_ticker_prices(self) -> TickerPrices:
+        if not _is_futures_market(self.config.market_type):
+            ticker_response = self._rest_session.get(
+                f"{self.config.rest_url.rstrip('/')}/api/v3/ticker/24hr",
+                params={"symbol": self.config.pair},
+                timeout=max(0.2, self.config.ticker_timeout_seconds),
+            )
+            ticker_response.raise_for_status()
+            ticker_payload = ticker_response.json()
+            return TickerPrices(
+                last_price=optional_float(ticker_payload.get("lastPrice")),
+                mark_price=None,
+                index_price=None,
+            )
         mark_response = self._rest_session.get(
             f"{self.config.rest_url.rstrip('/')}/fapi/v1/premiumIndex",
             params={"symbol": self.config.pair},
@@ -132,7 +145,7 @@ class BinanceTree(KrakenTree):
     def _refresh_instrument_rules(self) -> None:
         try:
             payload = self._rest_session.get(
-                f"{self.config.rest_url.rstrip('/')}/fapi/v1/exchangeInfo",
+                f"{self.config.rest_url.rstrip('/')}/{_exchange_info_path(self.config.market_type)}",
                 params={"symbol": self.config.pair},
                 timeout=3,
             )
@@ -209,13 +222,11 @@ class BinanceTree(KrakenTree):
 
 def public_stream_url(config: BinanceConfig) -> str:
     symbol = config.pair.lower()
-    streams = "/".join(
-        (
-            f"{symbol}@depth{max(5, min(config.depth, 20))}@500ms",
-            f"{symbol}@markPrice@1s",
-            f"{symbol}@ticker",
-        )
-    )
+    parts = [f"{symbol}@depth{max(5, min(config.depth, 20))}@500ms"]
+    if _is_futures_market(config.market_type):
+        parts.append(f"{symbol}@markPrice@1s")
+    parts.append(f"{symbol}@ticker")
+    streams = "/".join(parts)
     base = config.ws_url.rstrip("/")
     if base.endswith("/stream"):
         return f"{base}?streams={streams}"
@@ -306,13 +317,13 @@ def parse_binance_time(value: object) -> datetime | None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m kolabi.tree.binance",
-        description="Public market-data service CLI for Binance USD-M Futures.",
+        description="Public market-data service CLI for Binance.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("run", "probe", "status"):
         cmd = subparsers.add_parser(command, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-        cmd.add_argument("--pair", default=BinanceConfig.pair, help="Binance Futures symbol.")
+        cmd.add_argument("--pair", default=BinanceConfig.pair, help="Binance symbol.")
         cmd.add_argument("--depth", type=int, default=BinanceConfig.depth, help="Orderbook depth to keep.")
         cmd.add_argument("--environment", choices=("demo", "live"), default=BinanceConfig.environment)
         cmd.add_argument("--ws-url", help="Override public websocket base URL.")
@@ -338,14 +349,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> BinanceConfig:
-    env_cfg = binance_futures_environment(args.environment)
+    defaults = binance_public_defaults(args.environment, args.market_type)
     return BinanceConfig(
         pair=args.pair,
         depth=args.depth,
-        ws_url=args.ws_url or env_cfg.public_ws_url,
-        rest_url=args.rest_url or env_cfg.rest_url,
+        ws_url=args.ws_url or defaults["ws_url"],
+        rest_url=args.rest_url or defaults["rest_url"],
         db_url=args.db_url or binance_futures_public_db_url(args.environment, args.pair),
-        private_db_url=args.private_db_url or env_cfg.private_db_url,
+        private_db_url=args.private_db_url or str(defaults["private_db_url"]),
         exchange=args.exchange,
         environment=args.environment,
         market_type=args.market_type,
@@ -362,6 +373,35 @@ def config_from_args(args: argparse.Namespace) -> BinanceConfig:
         trace_ws_format=args.trace_ws_format,
         trace_ws_max_lines=args.trace_ws_max_lines,
     )
+
+
+def binance_public_defaults(environment: str, market_type: str) -> dict[str, str]:
+    if _is_futures_market(market_type):
+        env_cfg = binance_futures_environment(environment)
+        return {
+            "ws_url": env_cfg.public_ws_url,
+            "rest_url": env_cfg.rest_url,
+            "private_db_url": env_cfg.private_db_url,
+        }
+    if environment == "demo":
+        return {
+            "ws_url": "wss://stream.testnet.binance.vision/stream",
+            "rest_url": "https://testnet.binance.vision",
+            "private_db_url": "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
+        }
+    return {
+        "ws_url": "wss://stream.binance.com:9443/stream",
+        "rest_url": "https://api.binance.com",
+        "private_db_url": "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account",
+    }
+
+
+def _is_futures_market(market_type: str) -> bool:
+    return (market_type or "futures").strip().lower() == "futures"
+
+
+def _exchange_info_path(market_type: str) -> str:
+    return "fapi/v1/exchangeInfo" if _is_futures_market(market_type) else "api/v3/exchangeInfo"
 
 
 def print_status(tree: BinanceTree, pair: str) -> None:

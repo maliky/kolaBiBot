@@ -20,9 +20,13 @@ from uuid import uuid4
 
 import requests
 import websockets
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
+from kolabi.shared.config import (
+    exchange_credential_env_names,
+    first_configured_env_name,
+)
 from kolabi.shared.kraken_futures import kraken_futures_environment
 from kolabi.shared.logging import setup_logging
 from kolabi.shared.persistence import (
@@ -47,14 +51,18 @@ _REST_RECONCILE_LOG_SECONDS = 300.0
 _REST_RECONCILE_HEADER_EVERY = 50
 
 
-def format_rest_reconcile_header() -> str:
+def format_rest_reconcile_header(*, exchange: str = "kraken") -> str:
     """Return the compact private REST reconcile status header."""
 
-    return "kraken_reconcile\tenv\torders\tpositions\tbalances\tinterval\tok\tfail\tlast_error"
+    return (
+        f"{exchange}_reconcile"
+        "\tenv\torders\tpositions\tbalances\tinterval\tok\tfail\tlast_error"
+    )
 
 
 def format_rest_reconcile_status(
     *,
+    exchange: str = "kraken",
     environment: str,
     stats: Mapping[str, int],
     interval_seconds: float,
@@ -65,7 +73,7 @@ def format_rest_reconcile_status(
     """Return one compact private REST reconcile status row."""
 
     return (
-        f"kraken_reconcile\t{environment}\t{stats.get('orders', 0)}\t"
+        f"{exchange}_reconcile\t{environment}\t{stats.get('orders', 0)}\t"
         f"{stats.get('positions', 0)}\t{stats.get('balances', 0)}\t"
         f"{interval_seconds:.1f}s\t{ok_count}\t{fail_count}\t{last_error or '-'}"
     )
@@ -73,17 +81,22 @@ def format_rest_reconcile_status(
 
 def format_rest_reconcile_failure(
     *,
+    exchange: str = "kraken",
     environment: str,
     interval_seconds: float,
     error: str,
 ) -> str:
     """Return one compact private REST reconcile failure row."""
 
-    return f"kraken_reconcile_failed\t{environment}\t{interval_seconds:.1f}s\t{error}"
+    return (
+        f"{exchange}_reconcile_failed"
+        f"\t{environment}\t{interval_seconds:.1f}s\t{error}"
+    )
 
 
 @dataclass
 class _RestReconcileLogState:
+    exchange: str
     environment: str
     interval_seconds: float
     summary_seconds: float = _REST_RECONCILE_LOG_SECONDS
@@ -97,7 +110,7 @@ class _RestReconcileLogState:
     def log_start(self, logger: logging.Logger) -> None:
         if self.header_logged:
             return
-        logger.info(format_rest_reconcile_header())
+        logger.info(format_rest_reconcile_header(exchange=self.exchange))
         self.header_logged = True
 
     def log_success(
@@ -122,6 +135,7 @@ class _RestReconcileLogState:
         logger.warning(
             "%s",
             format_rest_reconcile_failure(
+                exchange=self.exchange,
                 environment=self.environment,
                 interval_seconds=self.interval_seconds,
                 error=self.last_error,
@@ -138,11 +152,12 @@ class _RestReconcileLogState:
             not self.header_logged
             or (self.rows_logged > 0 and self.rows_logged % _REST_RECONCILE_HEADER_EVERY == 0)
         ):
-            logger.info(format_rest_reconcile_header())
+            logger.info(format_rest_reconcile_header(exchange=self.exchange))
             self.header_logged = True
         logger.info(
             "%s",
             format_rest_reconcile_status(
+                exchange=self.exchange,
                 environment=self.environment,
                 stats=stats,
                 interval_seconds=self.interval_seconds,
@@ -167,8 +182,8 @@ class AccountStreamConfig:
     account_scope: str = "default"
     ws_url: str = "wss://demo-futures.kraken.com/ws/v1"
     rest_url: str = "https://demo-futures.kraken.com/derivatives/api/v3"
-    api_key_env: str = "KRAKEN_FUTURE_DEMO_API_KEY"
-    api_secret_env: str = "KRAKEN_FUTURE_DEMO_API_SECRET"
+    api_key_env: str = "KRKF_DEMO_API_KEY"
+    api_secret_env: str = "KRKF_DEMO_API_SECRET"
     feeds: tuple[str, ...] = (
         "open_orders",
         "fills",
@@ -408,6 +423,7 @@ class AccountStateStore:
         self.config = config
         self.engine = build_engine(config.db_url)
         Base.metadata.create_all(self.engine)
+        _ensure_connection_account_scope_column(self.engine)
         self.sessionmaker = sessionmaker(
             bind=self.engine,
             expire_on_commit=False,
@@ -730,17 +746,23 @@ class AccountStateStore:
         self,
         session: Session,
         client_order_id: str | None,
+        *,
+        symbol: str | None = None,
     ) -> ExchangeOrder | None:
         if not client_order_id:
             return None
+        predicates = [
+            ExchangeOrder.exchange == self.config.exchange,
+            ExchangeOrder.environment == self.config.environment,
+            ExchangeOrder.market_type == self.config.market_type,
+            ExchangeOrder.account_scope == self.config.account_scope,
+            ExchangeOrder.client_order_id == client_order_id,
+        ]
+        if symbol:
+            predicates.append(ExchangeOrder.symbol == symbol)
         stmt = (
             select(ExchangeOrder)
-            .where(
-                ExchangeOrder.exchange == self.config.exchange,
-                ExchangeOrder.environment == self.config.environment,
-                ExchangeOrder.market_type == self.config.market_type,
-                ExchangeOrder.client_order_id == client_order_id,
-            )
+            .where(*predicates)
             .order_by(ExchangeOrder.local_timestamp.desc(), ExchangeOrder.id.desc())
         )
         return session.execute(stmt).scalars().first()
@@ -754,7 +776,11 @@ class AccountStateStore:
     ) -> ExchangeOrder:
         row = find_order(session, self.config, order.exchange_order_id)
         if row is None and order.client_order_id is not None:
-            row = self._find_order_by_client_id_in_session(session, order.client_order_id)
+            row = self._find_order_by_client_id_in_session(
+                session,
+                order.client_order_id,
+                symbol=order.symbol,
+            )
         if row is None:
             row = ExchangeOrder(
                 local_uuid=str(uuid4()),
@@ -1152,6 +1178,8 @@ class AccountStateStore:
                 .where(
                     RawExchangeEvent.exchange == self.config.exchange,
                     RawExchangeEvent.environment == self.config.environment,
+                    RawExchangeEvent.market_type == self.config.market_type,
+                    RawExchangeEvent.account_scope == self.config.account_scope,
                     RawExchangeEvent.stream_kind == stream_kind,
                     RawExchangeEvent.event_type == event_type,
                 )
@@ -1261,6 +1289,7 @@ class AccountStateStore:
                     exchange=self.config.exchange,
                     environment=self.config.environment,
                     market_type=self.config.market_type,
+                    account_scope=self.config.account_scope,
                     stream_kind=stream_kind,
                     status=status,
                     last_heartbeat_at=heartbeat_time,
@@ -1448,6 +1477,7 @@ class AccountStateStore:
                 {
                     "exchange": self.config.exchange,
                     "market_type": self.config.market_type,
+                    "account_scope": self.config.account_scope,
                     "status": "empty",
                     "stream_kind": stream_kind,
                 }
@@ -2036,8 +2066,10 @@ def _rest_reconcile_log_state(
     interval_seconds: float,
 ) -> _RestReconcileLogState:
     config = getattr(rest_reconciler, "config", None)
+    exchange = str(getattr(config, "exchange", "kraken") or "kraken")
     environment = str(getattr(config, "environment", "-") or "-")
     return _RestReconcileLogState(
+        exchange=exchange,
         environment=environment,
         interval_seconds=float(interval_seconds),
     )
@@ -2182,6 +2214,25 @@ def run_private_stream_group_threaded(
             reconcile_thread.join(timeout=3.0)
 
 
+def run_rest_reconciler_forever(
+    rest_reconciler: Any,
+    *,
+    rest_reconcile_seconds: float,
+    logger: logging.Logger,
+) -> None:
+    interval = max(0.05, float(rest_reconcile_seconds))
+    reconcile_log = _rest_reconcile_log_state(rest_reconciler, interval)
+    reconcile_log.log_start(logger)
+    while True:
+        try:
+            stats = cast(dict[str, int], rest_reconciler.reconcile_once())
+            reconcile_log.log_success(logger, stats, now=time.monotonic())
+        except Exception as exc:
+            _record_reconciler_error_status(rest_reconciler, exc, logger)
+            reconcile_log.log_failure(logger, _compact_exception_text(exc))
+        time.sleep(interval)
+
+
 class KrakenFuturesRestReconciler:
     """REST reconcileur explicite et rate-limit aware par construction."""
 
@@ -2266,6 +2317,124 @@ class KrakenFuturesRestReconciler:
         return payload
 
 
+class KrakenSpotRestReconciler:
+    """REST reconcileur Kraken Spot/Margin pour les lanes non-futures."""
+
+    def __init__(
+        self,
+        config: AccountStreamConfig,
+        store: AccountStateStore,
+        credentials: KrakenFuturesCredentials,
+        session: requests.Session | None = None,
+        critical_store: AccountStateStore | None = None,
+    ) -> None:
+        self.config = config
+        self.store = store
+        self.credentials = credentials
+        self.session = session or requests.Session()
+        self.critical_store = critical_store
+
+    def reconcile_once(self) -> dict[str, int]:
+        stats = {"orders": 0, "positions": 0, "balances": 0}
+        open_orders_payload = self.get_json("/0/private/OpenOrders")
+        open_orders = [
+            map_spot_rest_order(order_id, order)
+            for order_id, order in _spot_open_order_items(open_orders_payload)
+        ]
+        snapshot_payload = {"feed": "open_orders_snapshot", **open_orders_payload}
+        self.store.record_order_snapshot(open_orders, raw_payload=snapshot_payload)
+        if self.critical_store is not None:
+            self.critical_store.record_order_snapshot(
+                open_orders,
+                raw_payload=snapshot_payload,
+            )
+        stats["orders"] += len(open_orders)
+
+        if self.config.market_type == "margin":
+            positions_payload = self.get_json("/0/private/OpenPositions")
+            position_rows = self.store.record_position_snapshot(
+                [
+                    map_spot_rest_position(position)
+                    for position in _spot_result_dict_values(positions_payload)
+                ],
+                raw_payload={"feed": "open_positions_snapshot", **positions_payload},
+            )
+            stats["positions"] += len(position_rows)
+        else:
+            self.store.record_position_snapshot(
+                [],
+                raw_payload={"feed": "open_positions_snapshot", "result": {}},
+            )
+
+        balances_payload = self.get_json("/0/private/Balance")
+        for balance in map_spot_rest_balances(balances_payload):
+            self.store.record_balance(balance)
+            stats["balances"] += 1
+        self.store.record_connection_status("rest_reconciler", "healthy")
+        self.store.record_connection_status("private_ws_account", "healthy")
+        if self.critical_store is not None:
+            self.critical_store.record_connection_status("private_ws", "healthy")
+            self.critical_store.record_connection_status(
+                "private_ws_critical",
+                "healthy",
+            )
+        return stats
+
+    def get_json(
+        self,
+        endpoint_path: str,
+        params: Mapping[str, Any] | None = None,
+    ) -> JsonDictT:
+        nonce = str(int(time.time() * 1000))
+        payload: dict[str, Any] = dict(params or {})
+        payload["nonce"] = nonce
+        post_data = urlencode(payload)
+        response = self.session.post(
+            url=f"{self.config.rest_url.rstrip('/')}{endpoint_path}",
+            data=payload,
+            headers={
+                "API-Key": self.credentials.api_key,
+                "API-Sign": sign_spot_rest_auth(
+                    endpoint_path=endpoint_path,
+                    post_data=post_data,
+                    nonce=nonce,
+                    api_secret=self.credentials.api_secret,
+                ),
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict):
+            raise RuntimeError(f"unexpected Spot REST payload: {type(result)!r}")
+        errors = result.get("error")
+        if isinstance(errors, list) and errors:
+            raise RuntimeError(result)
+        return result
+
+
+def rest_reconciler_for_config(
+    config: AccountStreamConfig,
+    store: AccountStateStore,
+    credentials: KrakenFuturesCredentials,
+    *,
+    critical_store: AccountStateStore | None = None,
+) -> KrakenFuturesRestReconciler | KrakenSpotRestReconciler:
+    if config.market_type == "futures":
+        return KrakenFuturesRestReconciler(
+            config,
+            store,
+            credentials,
+            critical_store=critical_store,
+        )
+    return KrakenSpotRestReconciler(
+        config,
+        store,
+        credentials,
+        critical_store=critical_store,
+    )
+
+
 def credentials_from_env(config: AccountStreamConfig) -> KrakenFuturesCredentials:
     """Lit les credentials futures sans jamais les logger."""
     api_key = os.environ.get(config.api_key_env)
@@ -2294,6 +2463,24 @@ def sign_rest_auth(
     message_hash = hashlib.sha256(encoded).digest()
     secret = base64.b64decode(api_secret)
     digest = hmac.new(secret, message_hash, hashlib.sha512).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def sign_spot_rest_auth(
+    *,
+    endpoint_path: str,
+    post_data: str,
+    nonce: str,
+    api_secret: str,
+) -> str:
+    """Signe une requete REST Spot selon la documentation Kraken."""
+    message_hash = hashlib.sha256((nonce + post_data).encode("utf-8")).digest()
+    secret = base64.b64decode(api_secret)
+    digest = hmac.new(
+        secret,
+        endpoint_path.encode("utf-8") + message_hash,
+        hashlib.sha512,
+    ).digest()
     return base64.b64encode(digest).decode("ascii")
 
 
@@ -2384,6 +2571,85 @@ def map_order(payload: JsonMapT) -> OrderWrite:
             or payload.get("time")
         ),
     )
+
+
+def map_spot_rest_order(order_id: object, payload: JsonMapT) -> OrderWrite:
+    descr = payload.get("descr") if isinstance(payload.get("descr"), Mapping) else {}
+    quantity = as_float(payload.get("vol"))
+    filled = as_float(payload.get("vol_exec"))
+    return OrderWrite(
+        symbol=str(descr.get("pair") or payload.get("pair") or "unknown"),
+        side=str(descr.get("type") or payload.get("type") or "unknown").lower(),
+        order_type=str(
+            descr.get("ordertype") or payload.get("ordertype") or "unknown"
+        ),
+        status=str(payload.get("status") or "open"),
+        quantity=quantity,
+        exchange_order_id=optional_str(order_id),
+        client_order_id=optional_str(payload.get("cl_ord_id")),
+        price=first_float(
+            cast(JsonMapT, descr),
+            "price",
+            "price2",
+        )
+        or first_float(payload, "price", "stopprice"),
+        filled_quantity=filled,
+        reduce_only=False,
+        raw_payload=dict(payload),
+        source_timestamp=parse_unix_seconds(payload.get("opentm")),
+    )
+
+
+def map_spot_rest_position(payload: JsonMapT) -> PositionWrite:
+    size = as_float(payload.get("vol") or payload.get("volume"))
+    side = str(payload.get("type") or payload.get("side") or "long").lower()
+    return PositionWrite(
+        symbol=str(payload.get("pair") or payload.get("symbol") or "unknown"),
+        side=side,
+        size=size,
+        entry_price=first_float(payload, "cost"),
+        leverage=first_float(payload, "leverage"),
+        raw_payload=dict(payload),
+        source_timestamp=parse_unix_seconds(payload.get("time")),
+    )
+
+
+def map_spot_rest_balances(payload: JsonMapT) -> list[BalanceWrite]:
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        return []
+    rows: list[BalanceWrite] = []
+    for asset, amount in result.items():
+        total = as_float(amount)
+        rows.append(
+            BalanceWrite(
+                asset=_normalise_asset(asset),
+                available=total,
+                locked=0.0,
+                total=total,
+                raw_payload={"asset": asset, "amount": amount},
+            )
+        )
+    return rows
+
+
+def _spot_open_order_items(payload: JsonMapT) -> list[tuple[str, JsonMapT]]:
+    result = payload.get("result")
+    open_orders = result.get("open") if isinstance(result, Mapping) else None
+    if not isinstance(open_orders, Mapping):
+        return []
+    return [
+        (str(order_id), cast(JsonMapT, order))
+        for order_id, order in open_orders.items()
+        if isinstance(order, Mapping)
+    ]
+
+
+def _spot_result_dict_values(payload: JsonMapT) -> list[JsonMapT]:
+    result = payload.get("result")
+    if not isinstance(result, Mapping):
+        return []
+    return [cast(JsonMapT, item) for item in result.values() if isinstance(item, Mapping)]
 
 
 def map_fill_event(payload: JsonMapT) -> FillEvent:
@@ -2666,11 +2932,53 @@ def latest_connection(
             ExchangeConnection.exchange == config.exchange,
             ExchangeConnection.environment == config.environment,
             ExchangeConnection.market_type == config.market_type,
+            ExchangeConnection.account_scope == config.account_scope,
             ExchangeConnection.stream_kind == stream_kind,
         )
         .order_by(ExchangeConnection.updated_at.desc(), ExchangeConnection.id.desc())
     )
     return session.execute(stmt).scalars().first()
+
+
+def _ensure_connection_account_scope_column(engine: Any) -> None:
+    """Backfill scoped connection health identity for already-created DBs."""
+    try:
+        columns = {
+            column["name"]
+            for column in inspect(engine).get_columns("exchange_connections")
+        }
+    except Exception:
+        return
+    if "account_scope" in columns:
+        return
+    try:
+        with engine.begin() as connection:
+            if engine.dialect.name == "postgresql":
+                connection.execute(
+                    text(
+                        "ALTER TABLE exchange_connections "
+                        "ADD COLUMN IF NOT EXISTS account_scope "
+                        "VARCHAR(64) NOT NULL DEFAULT 'default'"
+                    )
+                )
+            else:
+                connection.execute(
+                    text(
+                        "ALTER TABLE exchange_connections "
+                        "ADD COLUMN account_scope VARCHAR(64) DEFAULT 'default'"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "UPDATE exchange_connections SET account_scope = 'default' "
+                        "WHERE account_scope IS NULL"
+                    )
+                )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "exchange connection account_scope schema update skipped error=%s",
+            _compact_exception_text(exc),
+        )
 
 
 def find_order(
@@ -2685,6 +2993,9 @@ def find_order(
         select(ExchangeOrder)
         .where(
             ExchangeOrder.exchange == config.exchange,
+            ExchangeOrder.environment == config.environment,
+            ExchangeOrder.market_type == config.market_type,
+            ExchangeOrder.account_scope == config.account_scope,
             ExchangeOrder.exchange_order_id == exchange_order_id,
         )
         .order_by(ExchangeOrder.local_timestamp.desc(), ExchangeOrder.id.desc())
@@ -2702,9 +3013,14 @@ def find_fill(
         return None
     stmt = (
         select(ExchangeFill)
+        .join(ExchangeOrder, ExchangeFill.order_id == ExchangeOrder.id)
         .where(
             ExchangeFill.exchange == config.exchange,
             ExchangeFill.exchange_fill_id == exchange_fill_id,
+            ExchangeOrder.exchange == config.exchange,
+            ExchangeOrder.environment == config.environment,
+            ExchangeOrder.market_type == config.market_type,
+            ExchangeOrder.account_scope == config.account_scope,
         )
         .order_by(ExchangeFill.local_timestamp.desc(), ExchangeFill.id.desc())
     )
@@ -2724,6 +3040,8 @@ def prune_raw_events(
     base_filters = (
         RawExchangeEvent.exchange == config.exchange,
         RawExchangeEvent.environment == config.environment,
+        RawExchangeEvent.market_type == config.market_type,
+        RawExchangeEvent.account_scope == config.account_scope,
         RawExchangeEvent.stream_kind == stream_kind,
     )
     if retention_minutes > 0:
@@ -2807,6 +3125,7 @@ def connection_to_status(connection: ExchangeConnection) -> dict[str, object]:
             else None
         ),
         "market_type": connection.market_type,
+        "account_scope": connection.account_scope,
         "status": connection.status,
         "stream_kind": connection.stream_kind,
         "updated_at": connection.updated_at.isoformat(),
@@ -2835,6 +3154,14 @@ def parse_kraken_time(value: object) -> datetime | None:
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return None
+    return None
+
+
+def parse_unix_seconds(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float, str)):
+        return datetime.fromtimestamp(float(value), timezone.utc)
     return None
 
 
@@ -3302,18 +3629,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
     """Convertit les arguments CLI en configuration."""
-    env_cfg = kraken_futures_environment(args.environment)
+    defaults = kraken_private_defaults(args.environment, args.market_type)
     return AccountStreamConfig(
-        db_url=args.db_url or env_cfg.private_db_url,
-        critical_db_url=args.critical_db_url or env_cfg.critical_private_db_url,
+        db_url=args.db_url or defaults["private_db_url"],
+        critical_db_url=args.critical_db_url or defaults["critical_private_db_url"],
         exchange=args.exchange,
         environment=args.environment,
         market_type=args.market_type,
         account_scope=args.account_scope,
-        ws_url=args.ws_url or env_cfg.private_ws_url,
-        rest_url=args.rest_url or env_cfg.rest_url,
-        api_key_env=args.api_key_env or env_cfg.api_key_env,
-        api_secret_env=args.api_secret_env or env_cfg.api_secret_env,
+        ws_url=args.ws_url or defaults["ws_url"],
+        rest_url=args.rest_url or defaults["rest_url"],
+        api_key_env=args.api_key_env or defaults["api_key_env"],
+        api_secret_env=args.api_secret_env or defaults["api_secret_env"],
         ingest_profile=args.ingest_profile,
         health_write_seconds=args.health_write_seconds,
         rest_reconcile_seconds=max(0.0, args.rest_reconcile_seconds),
@@ -3336,6 +3663,59 @@ def config_from_args(args: argparse.Namespace) -> AccountStreamConfig:
     )
 
 
+def kraken_private_defaults(environment: str, market_type: str) -> dict[str, str]:
+    if market_type == "futures":
+        env_cfg = kraken_futures_environment(environment)
+        key_names = exchange_credential_env_names("kraken", "futures", environment)
+        secret_names = exchange_credential_env_names(
+            "kraken",
+            "futures",
+            environment,
+            secret=True,
+        )
+        return {
+            "private_db_url": env_cfg.private_db_url,
+            "critical_private_db_url": env_cfg.critical_private_db_url,
+            "ws_url": env_cfg.private_ws_url,
+            "rest_url": env_cfg.rest_url,
+            "api_key_env": first_configured_env_name(key_names),
+            "api_secret_env": first_configured_env_name(secret_names),
+        }
+    db_url = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_account"
+    critical_url = "postgresql+psycopg://kolabi:kolabi@127.0.0.1:15433/kolabi_critical"
+    if environment == "demo":
+        key_names = exchange_credential_env_names("kraken", market_type, "demo")
+        secret_names = exchange_credential_env_names(
+            "kraken",
+            market_type,
+            "demo",
+            secret=True,
+        )
+        return {
+            "private_db_url": db_url,
+            "critical_private_db_url": critical_url,
+            "ws_url": "",
+            "rest_url": os.environ.get("KRAKEN_SPOT_TEST_BASE_URL", ""),
+            "api_key_env": first_configured_env_name(key_names),
+            "api_secret_env": first_configured_env_name(secret_names),
+        }
+    key_names = exchange_credential_env_names("kraken", market_type, "live")
+    secret_names = exchange_credential_env_names(
+        "kraken",
+        market_type,
+        "live",
+        secret=True,
+    )
+    return {
+        "private_db_url": db_url,
+        "critical_private_db_url": critical_url,
+        "ws_url": "",
+        "rest_url": "https://api.kraken.com",
+        "api_key_env": first_configured_env_name(key_names),
+        "api_secret_env": first_configured_env_name(secret_names),
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Point d'entree CLI pour inspecter ou lancer la memoire privee."""
     parser = build_parser()
@@ -3352,15 +3732,47 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(status_store.latest_status(args.stream_kind), sort_keys=True))
         return 0
+    if config.market_type != "futures" and not config.rest_url:
+        raise RuntimeError(
+            "Kraken spot/margin private state requires --rest-url or "
+            "KRAKEN_SPOT_TEST_BASE_URL for demo environments"
+        )
     credentials = credentials_from_env(config)
     if args.command == "reconcile":
-        stats = KrakenFuturesRestReconciler(
+        stats = rest_reconciler_for_config(
             config,
             account_store,
             credentials,
             critical_store=critical_store,
         ).reconcile_once()
         print(json.dumps(stats, sort_keys=True))
+        return 0
+    if config.market_type != "futures":
+        reconciler = rest_reconciler_for_config(
+            config,
+            account_store,
+            credentials,
+            critical_store=critical_store,
+        )
+        try:
+            run_rest_reconciler_forever(
+                reconciler,
+                rest_reconcile_seconds=config.rest_reconcile_seconds,
+                logger=setup_logging(config.log_level),
+            )
+        except KeyboardInterrupt:
+            account_store.record_connection_status(
+                "rest_reconciler",
+                "stopped",
+                last_error="stopped by operator",
+            )
+            critical_store.record_connection_status(
+                "private_ws",
+                "stopped",
+                last_error="stopped by operator",
+            )
+            print("private account stream stopped by operator")
+            return 0
         return 0
     profiles = stream_profiles_from_config(config)
     streams = []
@@ -3377,7 +3789,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     streams_tuple = tuple(streams)
     reconciler = (
-        KrakenFuturesRestReconciler(
+        rest_reconciler_for_config(
             config,
             account_store,
             credentials,

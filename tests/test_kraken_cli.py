@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
-from kolabi.bargain.cli import build_adapter, build_parser, main
+from kolabi.bargain.cli import (
+    _close_position,
+    build_adapter,
+    build_parser,
+    main,
+    permission_status_payload,
+    route_matrix_payload,
+)
 from kolabi.shared.core.models import OrderAck, Position
 
 
@@ -109,6 +117,20 @@ class DummyAdapter:
         return list(self._recent_trades)
 
 
+class DirectCloseAdapter:
+    def __init__(self, qty: float) -> None:
+        self._position = Position(symbol="PI_XBTUSD", qty=qty, entry_price=1.0)
+        self.placed_orders: list[dict[str, Any]] = []
+
+    def get_position(self) -> Position:
+        return self._position
+
+    def place_order(self, side: str, orderQty: float, **params: Any) -> OrderAck:
+        self.placed_orders.append({"side": side, "orderQty": orderQty, **params})
+        self._position = Position(symbol="PI_XBTUSD", qty=0.0, entry_price=None)
+        return OrderAck(order_id="OID-CLOSE", status="New", side=side, orig_qty=orderQty)
+
+
 class DummyBotService:
     def __init__(
         self,
@@ -164,9 +186,10 @@ def test_balance_command_prints_available_margin(monkeypatch, capsys):
 
 
 def test_limit_command_prints_order_ack(monkeypatch, capsys):
+    adapter = DummyAdapter()
     monkeypatch.setattr(
         "kolabi.bargain.cli.build_adapter",
-        lambda exchange, symbol, environment, **kwargs: DummyAdapter(),
+        lambda exchange, symbol, environment, **kwargs: adapter,
     )
 
     exit_code = main(
@@ -188,7 +211,9 @@ def test_limit_command_prints_order_ack(monkeypatch, capsys):
     assert exit_code == 0
     output = capsys.readouterr().out
     assert '"order_id": "OID-1"' in output
+    assert '"client_order_id": "H1smclilimit-' in output
     assert '"price": 80000.0' in output
+    assert str(adapter.placed_orders[-1]["clOrdID"]).startswith("H1smclilimit-")
 
 
 def test_market_command_exits_nonzero_when_fill_not_observed(monkeypatch, capsys):
@@ -368,6 +393,36 @@ def test_trigger_orders_command_prints_live_trigger_orders(monkeypatch, capsys):
     assert '"stop_price": 75000.0' in output
 
 
+def test_direct_close_position_uses_reduce_only_for_futures() -> None:
+    adapter = DirectCloseAdapter(qty=2.0)
+
+    result = _close_position(adapter, market_type="futures")
+
+    assert result is not None
+    assert result["closed"] is True
+    assert len(adapter.placed_orders) == 1
+    assert adapter.placed_orders[0]["side"] == "sell"
+    assert adapter.placed_orders[0]["orderQty"] == 2.0
+    assert adapter.placed_orders[0]["type_"] == "MARKET"
+    assert adapter.placed_orders[0]["reduceOnly"] is True
+    assert str(adapter.placed_orders[0]["clOrdID"]).startswith("H1smcliclose-")
+
+
+def test_direct_close_position_omits_reduce_only_for_margin() -> None:
+    adapter = DirectCloseAdapter(qty=-3.0)
+
+    result = _close_position(adapter, market_type="margin")
+
+    assert result is not None
+    assert result["closed"] is True
+    assert len(adapter.placed_orders) == 1
+    assert adapter.placed_orders[0]["side"] == "buy"
+    assert adapter.placed_orders[0]["orderQty"] == 3.0
+    assert adapter.placed_orders[0]["type_"] == "MARKET"
+    assert str(adapter.placed_orders[0]["clOrdID"]).startswith("H1smcliclose-")
+    assert "reduceOnly" not in adapter.placed_orders[0]
+
+
 def test_close_all_command_cancels_orders_and_closes_long_position(monkeypatch, capsys):
     monkeypatch.setattr("kolabi.bargain.cli.build_adapter", lambda exchange, symbol, environment, **kwargs: DummyAdapter())
     monkeypatch.setattr(
@@ -492,20 +547,83 @@ def test_close_all_survives_cancel_fetch_503_and_still_closes_position(monkeypat
 def test_bargain_runtime_account_flags_parse_before_subcommand() -> None:
     args = build_parser().parse_args(
         [
+            "--market-type",
+            "spot",
             "--account-scope",
             "advers",
             "--api-key-env",
-            "KRAKEN_FUTURE_DEMO2_API_KEY",
+            "KRKF_DEMO2_API_KEY",
             "--api-secret-env",
-            "KRAKEN_FUTURE_DEMO2_API_SECRET",
+            "KRKF_DEMO2_API_SECRET",
             "close-all",
         ]
     )
 
+    assert args.market_type == "spot"
     assert args.account_scope == "advers"
-    assert args.api_key_env == "KRAKEN_FUTURE_DEMO2_API_KEY"
-    assert args.api_secret_env == "KRAKEN_FUTURE_DEMO2_API_SECRET"
+    assert args.api_key_env == "KRKF_DEMO2_API_KEY"
+    assert args.api_secret_env == "KRKF_DEMO2_API_SECRET"
     assert args.command == "close-all"
+
+
+@pytest.mark.parametrize(
+    ("exchange", "market_type", "expected_symbol"),
+    [
+        ("kraken", "futures", "PI_XBTUSD"),
+        ("kraken", "spot", "XBT/USD"),
+        ("binance", "spot", "BTCUSDT"),
+        ("binance", "isolated_margin", "BTCUSDT"),
+        ("bitmex", "futures", "XBTUSD"),
+        ("bitmex", "spot", "XBT_USDT"),
+    ],
+)
+def test_direct_cli_defaults_symbol_from_exchange_market_route(
+    monkeypatch,
+    capsys,
+    exchange: str,
+    market_type: str,
+    expected_symbol: str,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def _build_adapter(
+        exchange_name: str,
+        symbol: str,
+        environment: str,
+        **kwargs: object,
+    ) -> DummyAdapter:
+        observed["exchange"] = exchange_name
+        observed["symbol"] = symbol
+        observed["environment"] = environment
+        observed["kwargs"] = kwargs
+        return DummyAdapter()
+
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", _build_adapter)
+
+    exit_code = main(
+        [
+            "--exchange",
+            exchange,
+            "--market-type",
+            market_type,
+            "--environment",
+            "demo",
+            "check-symbol",
+        ]
+    )
+
+    assert exit_code == 0
+    assert observed["exchange"] == exchange
+    assert observed["symbol"] == expected_symbol
+    assert observed["environment"] == "demo"
+    assert observed["kwargs"] == {
+        "market_type": market_type,
+        "account_scope": "default",
+        "api_key_env": None,
+        "api_secret_env": None,
+        "base_url": None,
+    }
+    assert f'"symbol": "{expected_symbol}"' in capsys.readouterr().out
 
 
 def test_close_all_forwards_account_scope_and_key_envs_to_service(monkeypatch, capsys):
@@ -530,6 +648,8 @@ def test_close_all_forwards_account_scope_and_key_envs_to_service(monkeypatch, c
 
     exit_code = main(
         [
+            "--market-type",
+            "spot",
             "--symbol",
             "PI_XBTUSD",
             "--environment",
@@ -537,9 +657,9 @@ def test_close_all_forwards_account_scope_and_key_envs_to_service(monkeypatch, c
             "--account-scope",
             "advers",
             "--api-key-env",
-            "KRAKEN_FUTURE_DEMO2_API_KEY",
+            "KRKF_DEMO2_API_KEY",
             "--api-secret-env",
-            "KRAKEN_FUTURE_DEMO2_API_SECRET",
+            "KRKF_DEMO2_API_SECRET",
             "close-all",
         ]
     )
@@ -550,13 +670,15 @@ def test_close_all_forwards_account_scope_and_key_envs_to_service(monkeypatch, c
         "symbol": "PI_XBTUSD",
         "environment": "demo",
         "kwargs": {
+            "market_type": "spot",
             "account_scope": "advers",
-            "api_key_env": "KRAKEN_FUTURE_DEMO2_API_KEY",
-            "api_secret_env": "KRAKEN_FUTURE_DEMO2_API_SECRET",
+            "api_key_env": "KRKF_DEMO2_API_KEY",
+            "api_secret_env": "KRKF_DEMO2_API_SECRET",
         },
     }
     output = capsys.readouterr().out
     assert '"account_scope": "advers"' in output
+    assert '"market_type": "spot"' in output
     assert '"order_id": "OID-ADV"' in output
 
 
@@ -567,22 +689,31 @@ def test_build_adapter_uses_scoped_kraken_credentials_and_db_lanes(monkeypatch):
         def __init__(self, **kwargs) -> None:
             built.update(kwargs)
 
-    monkeypatch.setenv("KRAKEN_FUTURE_DEMO2_API_KEY", "adv-key")
-    monkeypatch.setenv("KRAKEN_FUTURE_DEMO2_API_SECRET", "adv-secret")
+    monkeypatch.setenv("KRKF_DEMO2_API_KEY", "adv-key")
+    monkeypatch.setenv("KRKF_DEMO2_API_SECRET", "adv-secret")
     monkeypatch.setenv("KOLABI_MARKET_DB_URL", "postgresql://market")
     monkeypatch.setenv("KOLABI_ADVERS_ACCOUNT_DB_URL", "postgresql://account-advers")
     monkeypatch.setenv("KOLABI_ADVERS_AUDIT_DB_URL", "postgresql://audit-advers")
-    monkeypatch.setattr("kolabi.bargain.cli.get_adapter", lambda exchange: CapturingAdapter)
+    observed_loader: dict[str, str] = {}
+
+    def _get_adapter(exchange: str, market_type: str):
+        observed_loader["exchange"] = exchange
+        observed_loader["market_type"] = market_type
+        return CapturingAdapter
+
+    monkeypatch.setattr("kolabi.bargain.cli.get_adapter", _get_adapter)
 
     build_adapter(
         "kraken",
         "PI_XBTUSD",
         "demo",
+        market_type="futures",
         account_scope="advers",
-        api_key_env="KRAKEN_FUTURE_DEMO2_API_KEY",
-        api_secret_env="KRAKEN_FUTURE_DEMO2_API_SECRET",
+        api_key_env="KRKF_DEMO2_API_KEY",
+        api_secret_env="KRKF_DEMO2_API_SECRET",
     )
 
+    assert observed_loader == {"exchange": "kraken", "market_type": "futures"}
     assert built["api_key"] == "adv-key"
     assert built["api_secret"] == "adv-secret"
     assert built["account_scope"] == "advers"
@@ -596,6 +727,8 @@ def test_top_level_help_lists_subcommand_descriptions():
     assert "Show available margin." in help_text
     assert "Submit one limit order." in help_text
     assert "Cancel one order." in help_text
+    assert "Check API key order-write permission." in help_text
+    assert "List supported route codes." in help_text
 
 
 def test_subcommand_help_shows_description(capsys):
@@ -605,13 +738,300 @@ def test_subcommand_help_shows_description(capsys):
     assert "Show available margin for the selected exchange account." in output
 
 
-def test_exchange_option_is_forwarded_to_build_adapter(monkeypatch):
+def test_routes_command_prints_route_matrix_without_building_adapter(
+    monkeypatch,
+    capsys,
+) -> None:
+    for name in (
+        "BINS_DEMO_API_KEY",
+        "BINS_DEMO_API_SECRET",
+        "BINANCE_SPOT_DEMO_API_KEY",
+        "BINANCE_SPOT_DEMO_API_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def _fail_build_adapter(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("routes command must not build an exchange adapter")
+
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", _fail_build_adapter)
+
+    exit_code = main(["--environment", "demo", "routes"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    routes = {
+        (row["exchange"], row["market_type"]): row
+        for row in payload["routes"]
+    }
+    assert payload["environment"] == "demo"
+    assert routes[("binance", "spot")]["codes"] == ["BINS"]
+    assert routes[("binance", "spot")]["api_key_env"] == [
+        "BINS_DEMO_API_KEY",
+        "BINANCE_SPOT_DEMO_API_KEY",
+    ]
+    assert routes[("binance", "spot")]["api_key_present"] is False
+    assert routes[("binance", "spot")]["api_secret_present"] is False
+    assert routes[("binance", "spot")]["credentials_present"] is False
+    assert routes[("binance", "spot")]["api_key_source"] is None
+    assert routes[("binance", "spot")]["api_secret_source"] is None
+    assert routes[("binance", "spot")]["permission_probe"] == "test_order"
+    assert routes[("binance", "spot")]["order_write_probe"] is True
+    assert routes[("binance", "spot")]["demo_requires_base_url_override"] is False
+    assert routes[("binance", "margin")]["permission_probe"] == "not_supported"
+    assert routes[("binance", "margin")]["order_write_probe"] is False
+    assert routes[("binance", "margin")]["demo_requires_base_url_override"] is True
+    assert routes[("kraken", "margin")]["codes"] == ["KRKM"]
+    assert routes[("kraken", "margin")]["permission_probe"] == "not_supported"
+    assert routes[("kraken", "margin")]["demo_requires_base_url_override"] is True
+    assert routes[("bitmex", "futures")]["codes"] == ["BMX", "BMXF", "BTX", "BTXF"]
+    assert routes[("bitmex", "futures")]["permission_probe"] == "apiKey"
+    assert routes[("bitmex", "futures")]["order_write_probe"] is True
+    assert routes[("bitmex", "spot")]["default_symbol"] == "XBT_USDT"
+    assert routes[("bitmex", "spot")]["api_secret_env"] == [
+        "BTX_DEMO_API_SECRET",
+        "BITMEX_TEST_SECRET",
+    ]
+
+
+def test_route_matrix_payload_uses_live_env_names() -> None:
+    routes = {
+        (row["exchange"], row["market_type"]): row
+        for row in route_matrix_payload("live", env={})["routes"]
+    }
+
+    assert routes[("kraken", "futures")]["api_key_env"] == [
+        "KRKF_API_KEY",
+        "KRAKEN_FUTURE_API_KEY",
+    ]
+    assert routes[("binance", "isolated_margin")]["api_secret_env"] == [
+        "BINI_API_SECRET",
+        "BINM_API_SECRET",
+        "BINANCE_MARGIN_API_SECRET",
+    ]
+
+
+def test_route_matrix_payload_marks_present_credentials_without_values() -> None:
+    payload = route_matrix_payload(
+        "demo",
+        env={
+            "BINS_DEMO_API_KEY": "spot-key",
+            "BINS_DEMO_API_SECRET": "spot-secret",
+            "BTX_DEMO_API_KEY": "cancel-key",
+        },
+    )
+    routes = {
+        (row["exchange"], row["market_type"]): row
+        for row in payload["routes"]
+    }
+
+    binance_spot = routes[("binance", "spot")]
+    assert binance_spot["api_key_present"] is True
+    assert binance_spot["api_secret_present"] is True
+    assert binance_spot["credentials_present"] is True
+    assert binance_spot["api_key_source"] == "BINS_DEMO_API_KEY"
+    assert binance_spot["api_secret_source"] == "BINS_DEMO_API_SECRET"
+    assert "spot-key" not in str(payload)
+    assert "spot-secret" not in str(payload)
+
+    bitmex_futures = routes[("bitmex", "futures")]
+    assert bitmex_futures["api_key_present"] is True
+    assert bitmex_futures["api_secret_present"] is False
+    assert bitmex_futures["credentials_present"] is False
+    assert bitmex_futures["api_key_source"] == "BTX_DEMO_API_KEY"
+    assert bitmex_futures["api_secret_source"] is None
+
+
+def test_check_symbol_command_prints_adapter_metadata(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.build_adapter",
+        lambda exchange, symbol, environment, **kwargs: DummyAdapter(),
+    )
+
+    exit_code = main(["--symbol", "PI_XBTUSD", "--environment", "demo", "check-symbol"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"symbol": "PI_XBTUSD"' in output
+    assert '"tradeable": true' in output
+
+
+def test_permissions_command_prints_supported_adapter_status(
+    monkeypatch,
+    capsys,
+) -> None:
+    class PermissionAdapter:
+        def permission_status(self) -> dict[str, object]:
+            return {
+                "exchange": "bitmex",
+                "market_type": "futures",
+                "symbol": "XBTUSD",
+                "permission_probe": "apiKey",
+                "can_place_orders": False,
+                "permissions": ["orderCancel"],
+                "reason": "missing_order_write_permission",
+            }
+
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.build_adapter",
+        lambda exchange, symbol, environment, **kwargs: PermissionAdapter(),
+    )
+
+    exit_code = main(
+        [
+            "--exchange",
+            "bitmex",
+            "--market-type",
+            "futures",
+            "--environment",
+            "demo",
+            "permissions",
+        ]
+    )
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert '"can_place_orders": false' in output
+    assert '"permissions": ["orderCancel"]' in output
+    assert '"environment": "demo"' in output
+
+
+def test_permissions_command_returns_zero_when_probe_allows_orders(
+    monkeypatch,
+    capsys,
+) -> None:
+    class PermissionAdapter:
+        def permission_status(self) -> dict[str, object]:
+            return {
+                "exchange": "binance",
+                "market_type": "spot",
+                "symbol": "BTCUSDT",
+                "permission_probe": "test_order",
+                "can_place_orders": True,
+                "reason": "ok",
+            }
+
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.build_adapter",
+        lambda exchange, symbol, environment, **kwargs: PermissionAdapter(),
+    )
+
+    exit_code = main(
+        [
+            "--exchange",
+            "binance",
+            "--market-type",
+            "spot",
+            "--environment",
+            "demo",
+            "permissions",
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert '"can_place_orders": true' in output
+    assert '"permission_probe": "test_order"' in output
+
+
+@pytest.mark.parametrize(
+    ("exchange", "market_type", "symbol"),
+    [
+        ("kraken", "futures", "PI_XBTUSD"),
+        ("kraken", "spot", "XBT/USD"),
+        ("binance", "margin", "BTCUSDT"),
+        ("binance", "isolated_margin", "BTCUSDT"),
+    ],
+)
+def test_permissions_command_reports_unsupported_route_without_building_adapter(
+    monkeypatch,
+    capsys,
+    exchange: str,
+    market_type: str,
+    symbol: str,
+) -> None:
+    def _fail_build_adapter(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("unsupported permissions probe must not build an adapter")
+
+    monkeypatch.setattr("kolabi.bargain.cli.build_adapter", _fail_build_adapter)
+
+    exit_code = main(
+        [
+            "--exchange",
+            exchange,
+            "--market-type",
+            market_type,
+            "--environment",
+            "demo",
+            "permissions",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "exchange": exchange,
+        "market_type": market_type,
+        "symbol": symbol,
+        "permission_probe": "not_supported",
+        "can_place_orders": None,
+        "reason": "adapter does not expose a no-order permission probe",
+        "environment": "demo",
+    }
+
+
+def test_permission_status_payload_reports_unsupported_probe() -> None:
+    payload = permission_status_payload(
+        DummyAdapter(),
+        exchange="kraken",
+        market_type="futures",
+        symbol="PI_XBTUSD",
+        environment="demo",
+    )
+
+    assert payload == {
+        "exchange": "kraken",
+        "market_type": "futures",
+        "symbol": "PI_XBTUSD",
+        "permission_probe": "not_supported",
+        "can_place_orders": None,
+        "reason": "adapter does not expose a no-order permission probe",
+        "environment": "demo",
+    }
+
+
+def test_instruments_command_prints_filtered_adapter_symbols(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.build_adapter",
+        lambda exchange, symbol, environment, **kwargs: DummyAdapter(),
+    )
+
+    exit_code = main(
+        [
+            "--symbol",
+            "PI_XBTUSD",
+            "--environment",
+            "demo",
+            "instruments",
+            "--contains",
+            "ADA",
+        ]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "PI_ADAUSD" in output
+    assert "PI_XBTUSD" not in output
+
+
+def test_exchange_and_market_type_options_are_forwarded_to_build_adapter(monkeypatch):
     observed: dict[str, str] = {}
 
     def _build_adapter(exchange: str, symbol: str, environment: str, **kwargs):
         observed["exchange"] = exchange
         observed["symbol"] = symbol
         observed["environment"] = environment
+        observed["market_type"] = str(kwargs.get("market_type"))
+        observed["base_url"] = str(kwargs.get("base_url"))
         return DummyAdapter()
 
     monkeypatch.setattr("kolabi.bargain.cli.build_adapter", _build_adapter)
@@ -619,12 +1039,138 @@ def test_exchange_option_is_forwarded_to_build_adapter(monkeypatch):
         [
             "--exchange",
             "binance",
+            "--market-type",
+            "spot",
             "--symbol",
             "BTCUSDT",
             "--environment",
             "demo",
+            "--base-url",
+            "https://spot-demo.example.test",
             "balance",
         ]
     )
     assert exit_code == 0
-    assert observed == {"exchange": "binance", "symbol": "BTCUSDT", "environment": "demo"}
+    assert observed == {
+        "exchange": "binance",
+        "symbol": "BTCUSDT",
+        "environment": "demo",
+        "market_type": "spot",
+        "base_url": "https://spot-demo.example.test",
+    }
+
+
+def test_bargain_market_type_reaches_adapter_loader(monkeypatch) -> None:
+    built: dict[str, object] = {}
+    observed_loader: dict[str, str] = {}
+
+    class CapturingAdapter:
+        def __init__(self, **kwargs) -> None:
+            built.update(kwargs)
+
+    def _get_adapter(exchange: str, market_type: str):
+        observed_loader["exchange"] = exchange
+        observed_loader["market_type"] = market_type
+        return CapturingAdapter
+
+    monkeypatch.setenv("BINS_DEMO_API_KEY", "spot-key")
+    monkeypatch.setenv("BINS_DEMO_API_SECRET", "spot-secret")
+    monkeypatch.setattr("kolabi.bargain.cli.get_adapter", _get_adapter)
+
+    build_adapter("binance", "BTCUSDT", "demo", market_type="spot")
+
+    assert observed_loader == {"exchange": "binance", "market_type": "spot"}
+    assert built["api_key"] == "spot-key"
+    assert built["api_secret"] == "spot-secret"
+    assert built["symbol"] == "BTCUSDT"
+    assert built["market_type"] == "spot"
+
+
+def test_build_adapter_accepts_base_url_override_for_binance_margin_demo(
+    monkeypatch,
+) -> None:
+    built: dict[str, object] = {}
+
+    class CapturingAdapter:
+        def __init__(self, **kwargs) -> None:
+            built.update(kwargs)
+
+    monkeypatch.setenv("BINM_DEMO_API_KEY", "margin-key")
+    monkeypatch.setenv("BINM_DEMO_API_SECRET", "margin-secret")
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.get_adapter",
+        lambda _exchange, _market_type: CapturingAdapter,
+    )
+
+    build_adapter(
+        "binance",
+        "BTCUSDT",
+        "demo",
+        market_type="margin",
+        base_url="https://margin-demo.example.test",
+    )
+
+    assert built["api_key"] == "margin-key"
+    assert built["api_secret"] == "margin-secret"
+    assert built["base_url"] == "https://margin-demo.example.test"
+    assert built["market_type"] == "margin"
+
+
+@pytest.mark.parametrize(
+    ("exchange", "market_type", "symbol", "key_env", "secret_env"),
+    [
+        (
+            "binance",
+            "spot",
+            "BTCUSDT",
+            "BINS_DEMO_API_KEY",
+            "BINS_DEMO_API_SECRET",
+        ),
+        (
+            "bitmex",
+            "futures",
+            "XBTUSD",
+            "BTX_DEMO_API_KEY",
+            "BTX_DEMO_API_SECRET",
+        ),
+    ],
+)
+def test_build_adapter_decorates_non_kraken_db_lanes(
+    monkeypatch,
+    exchange: str,
+    market_type: str,
+    symbol: str,
+    key_env: str,
+    secret_env: str,
+) -> None:
+    built: dict[str, object] = {}
+
+    class CapturingAdapter:
+        def __init__(self, **kwargs) -> None:
+            built.update(kwargs)
+
+    monkeypatch.setenv(key_env, "api-key")
+    monkeypatch.setenv(secret_env, "api-secret")
+    monkeypatch.setenv("KOLABI_MARKET_DB_URL", "postgresql://market")
+    monkeypatch.setenv("KOLABI_ADVERS_ACCOUNT_DB_URL", "postgresql://account-advers")
+    monkeypatch.setenv("KOLABI_ADVERS_AUDIT_DB_URL", "postgresql://audit-advers")
+    monkeypatch.setattr(
+        "kolabi.bargain.cli.get_adapter",
+        lambda _exchange, _market_type: CapturingAdapter,
+    )
+
+    build_adapter(
+        exchange,
+        symbol,
+        "demo",
+        market_type=market_type,
+        account_scope="advers",
+    )
+
+    assert built["api_key"] == "api-key"
+    assert built["api_secret"] == "api-secret"
+    assert built["symbol"] == symbol
+    assert built["account_scope"] == "advers"
+    assert built["public_db_url"] == "postgresql://market"
+    assert built["account_db_url"] == "postgresql://account-advers"
+    assert built["audit_db_url"] == "postgresql://audit-advers"
