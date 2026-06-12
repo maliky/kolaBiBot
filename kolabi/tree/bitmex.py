@@ -17,6 +17,7 @@ from kolabi.shared.bitmex_futures import (
     bitmex_futures_public_db_url,
 )
 from kolabi.shared.persistence import ExchangeInstrument
+from kolabi.shared.redaction import redact_url
 from kolabi.tree.kraken import (
     BookPayload,
     KrakenConfig,
@@ -103,7 +104,7 @@ class BitmexTree(KrakenTree):
                 self.config.pair,
                 self.config.depth,
                 self.config.environment,
-                self.config.db_url,
+                redact_url(self.config.db_url),
                 url,
             )
             while self._running:

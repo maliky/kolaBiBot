@@ -17,6 +17,7 @@ from kolabi.shared.binance_futures import (
     binance_futures_public_db_url,
 )
 from kolabi.shared.persistence import ExchangeInstrument
+from kolabi.shared.redaction import redact_url
 from kolabi.tree.kraken import (
     BookPayload,
     KrakenConfig,
@@ -76,7 +77,7 @@ class BinanceTree(KrakenTree):
                 self.config.pair,
                 self.config.depth,
                 self.config.environment,
-                self.config.db_url,
+                redact_url(self.config.db_url),
                 url,
             )
             while self._running:

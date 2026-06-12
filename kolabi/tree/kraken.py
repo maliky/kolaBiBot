@@ -49,6 +49,7 @@ from kolabi.shared.persistence import (
     MarketSnapshot,
     RawExchangeEvent,
 )
+from kolabi.shared.redaction import redact_url
 
 BookLevelT = tuple[float, float]
 BookSignatureT = tuple[tuple[BookLevelT, ...], tuple[BookLevelT, ...]]
@@ -212,7 +213,7 @@ class KrakenTree:
                 self.config.pair,
                 self.config.depth,
                 self.config.environment,
-                self.config.db_url,
+                redact_url(self.config.db_url),
                 self.config.ws_url,
             )
             while self._running:

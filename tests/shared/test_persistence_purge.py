@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from kolabi.shared.persistence.purge import database_lanes_from_env, redact_url
+from kolabi.shared.persistence.purge import database_lanes_from_env
+from kolabi.shared.redaction import redact_url
 
 
 def test_database_lanes_from_env_collects_only_runtime_db_urls() -> None:
@@ -28,3 +29,8 @@ def test_redact_url_hides_password() -> None:
 
     assert "secret" not in safe
     assert "***" in safe
+
+
+def test_redact_url_handles_empty_and_invalid_values() -> None:
+    assert redact_url(None) == "-"
+    assert redact_url("not a url") == "<invalid url>"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -860,6 +861,56 @@ def test_preflight_reports_runtime_state_db_error_as_not_ready(monkeypatch) -> N
     assert payload["error"] == "db down"
     assert "kraken-key" not in str(payload)
     assert "kraken-secret" not in str(payload)
+
+
+def test_runtime_preflight_log_redacts_db_passwords(caplog) -> None:
+    service = BotService(
+        BotConfig(
+            symbol="PI_XBTUSD",
+            exchange="kraken",
+            market_db_url=(
+                "postgresql+psycopg://kolabi:marketpass@127.0.0.1:15433/kolabi_market"
+            ),
+            account_db_url=(
+                "postgresql+psycopg://kolabi:accountpass@127.0.0.1:15433/kolabi_account"
+            ),
+            critical_account_db_url=(
+                "postgresql+psycopg://kolabi:criticalpass@127.0.0.1:15433/kolabi_critical"
+            ),
+        ),
+        indicators=DummyIndicatorClient({"ma": 42}),
+    )
+
+    class ReadyRuntimeState:
+        def wait_until_ready(self, **kwargs):
+            return _ready_runtime_state(
+                symbol=kwargs["symbol"],
+                exchange=kwargs["exchange"],
+                market_type=kwargs["market_type"],
+            )
+
+    service.runtime_state = ReadyRuntimeState()
+    service._cleanup_startup_orphans = lambda _routes: None
+    caplog.set_level(logging.INFO, logger="kola")
+
+    service._wait_until_ready()
+
+    text = caplog.text
+    assert "marketpass" not in text
+    assert "accountpass" not in text
+    assert "criticalpass" not in text
+    assert (
+        "market_db=postgresql+psycopg://kolabi:***@127.0.0.1:15433/kolabi_market"
+        in text
+    )
+    assert (
+        "account_db=postgresql+psycopg://kolabi:***@127.0.0.1:15433/kolabi_account"
+        in text
+    )
+    assert (
+        "critical_account_db=postgresql+psycopg://kolabi:***@127.0.0.1:15433/kolabi_critical"
+        in text
+    )
 
 
 def test_bot_service_requires_shared_market_db_for_active_multi_symbol_strategy(

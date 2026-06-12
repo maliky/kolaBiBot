@@ -43,6 +43,7 @@ from kolabi.shared.persistence import (
     prune_private_ingest_audits,
 )
 from kolabi.shared.pruning import DEFAULT_PRUNING
+from kolabi.shared.redaction import redact_url
 from kolabi.tree.kraken import build_engine
 
 JsonMapT = Mapping[str, Any]
@@ -1543,7 +1544,7 @@ class KrakenFuturesPrivateStream:
         self.logger.info(
             "kraken_account starting env=%s db=%s ws=%s rest=%s profile=%s feeds=%s",
             self.config.environment,
-            self.config.db_url,
+            redact_url(self.config.db_url),
             self.config.ws_url,
             self.config.rest_url,
             self.profile.name,
@@ -1637,7 +1638,7 @@ class KrakenFuturesPrivateStream:
                         self.logger.info(
                             "kraken_account heartbeat env=%s db=%s stream=%s",
                             self.config.environment,
-                            self.config.db_url,
+                            redact_url(self.config.db_url),
                             self.profile.stream_kind,
                         )
                         last_heartbeat_log = now_monotonic

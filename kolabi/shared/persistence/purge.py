@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence, TextIO
 
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 
 from kolabi.shared.persistence.db import create_persistence_engine
 from kolabi.shared.persistence.models import Base
+from kolabi.shared.redaction import redact_url
 
 _DB_ENV_RE = re.compile(
     r"^KOLABI(?:_[A-Z0-9]+)*_(?:MARKET|ACCOUNT|CRITICAL|AUDIT|TELEMETRY)_DB_URL$"
@@ -28,15 +28,6 @@ class DatabaseLane:
     @property
     def label(self) -> str:
         return "/".join(self.names)
-
-
-def redact_url(raw_url: str) -> str:
-    """Return an operator-safe database URL."""
-
-    try:
-        return make_url(raw_url).render_as_string(hide_password=True)
-    except Exception:
-        return "<invalid database url>"
 
 
 def database_lanes_from_env(env: Mapping[str, str]) -> tuple[DatabaseLane, ...]:

@@ -27,6 +27,7 @@ from kolabi.shared.config import (
     first_configured_env_name,
 )
 from kolabi.shared.logging import setup_logging
+from kolabi.shared.redaction import redact_url
 from kolabi.tree.account import (
     AccountStateStore,
     AccountStreamConfig,
@@ -88,8 +89,8 @@ class BinancePrivateStream:
         self.logger.info(
             "binance_account starting env=%s account_db=%s critical_db=%s ws=%s rest=%s",
             self.config.environment,
-            self.config.db_url,
-            self.config.critical_db_url,
+            redact_url(self.config.db_url),
+            redact_url(self.config.critical_db_url),
             self.config.ws_url,
             self.config.rest_url,
         )
@@ -134,7 +135,7 @@ class BinancePrivateStream:
                         self.logger.info(
                             "binance_account heartbeat env=%s db=%s stream=private_ws_critical",
                             self.config.environment,
-                            self.config.critical_db_url,
+                            redact_url(self.config.critical_db_url),
                         )
                         self._record_status("private_ws", "healthy", critical=True)
                         self._record_status("private_ws_critical", "healthy", critical=True)

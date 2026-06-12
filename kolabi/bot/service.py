@@ -89,6 +89,7 @@ from kolabi.shared.kraken_futures import (
 )
 from kolabi.shared.logging import setup_logging
 from kolabi.shared.pruning import DEFAULT_PRUNING, TimeCountPruning
+from kolabi.shared.redaction import redact_url
 from kolabi.shared.runtime_state import KrakenRuntimeStateClient, StrategyRuntimeState
 
 _LOGGER = logging.getLogger("kola")
@@ -730,9 +731,9 @@ class BotService:
             self.default_exchange,
             ",".join(route.label for route in self._required_routes),
             self.config.environment,
-            self._market_db_url,
-            self._account_db_url,
-            self._critical_account_db_url or self._account_db_url,
+            redact_url(self._market_db_url),
+            redact_url(self._account_db_url),
+            redact_url(self._critical_account_db_url or self._account_db_url),
         )
         states = tuple(
             self.runtime_state.wait_until_ready(
