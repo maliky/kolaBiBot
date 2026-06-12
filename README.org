@@ -103,6 +103,16 @@ scripts/kolabidb public logs --environment demo --pair PI_XBTUSD
 scripts/kolabidb private logs --environment demo --account-scope default
 #+end_src
 
+Reset a local runtime before a fresh live or demo test with =scripts/kolabi-fresh-run=. The helper stops Kolabi feeder PID files that still belong to =kolabi.tree= processes, starts PostgreSQL, purges configured Kolabi runtime DB lanes, restarts the route feeders needed by the strategy, and prints the bot command unless =--start-bot= is passed. It does not cancel platform orders or close positions.
+
+#+begin_src bash
+scripts/kolabi-fresh-run --dry-run --strategy orders/bmm_ada.tsv --environment live
+scripts/kolabi-fresh-run --strategy orders/bmm_ada.tsv --environment live
+scripts/kolabi-fresh-run --strategy orders/demo_cross_exchange_chain.tsv --environment demo --symbol PI_XBTUSD
+#+end_src
+
+Operator logs must not print credential-bearing DB URLs. Runtime preflight and feeder startup logs redact database passwords as =postgresql+psycopg://user:***@host/db=. Historical log files created before this rule may still contain full URLs and should be treated as sensitive.
+
 * Operator Commands
 
 When =--symbol= is omitted in =kolabi.bargain.cli=, =kolabi.bargain.smoke=, or =kolabi.bot=, the route default follows =--exchange= and =--market-type=: Kraken futures =PI_XBTUSD=, Kraken spot/margin =XBT/USD=, Binance lanes =BTCUSDT=, BitMEX futures =XBTUSD=, and BitMEX spot =XBT_USDT=.
