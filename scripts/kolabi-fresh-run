@@ -1,0 +1,397 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+ENV_FILE="${ENV_FILE:-.env.postgres}"
+STRATEGY="${STRATEGY:-orders/bmm_ada.tsv}"
+EXCHANGE="${EXCHANGE:-kraken}"
+MARKET_TYPE="${MARKET_TYPE:-futures}"
+ENVIRONMENT="${ENVIRONMENT:-live}"
+SYMBOL="${SYMBOL:-PF_ADAUSD}"
+ACCOUNT_SCOPE="${ACCOUNT_SCOPE:-default}"
+LOG_LEVEL="${LOG_LEVEL:-INFO}"
+BOT_LOG="${BOT_LOG:-logs/$(basename "${STRATEGY%.tsv}")_${ENVIRONMENT}.log}"
+MAX_ACTIVE_PAIRS="${MAX_ACTIVE_PAIRS:-1}"
+REST_MIN_INTERVAL="${REST_MIN_INTERVAL:-0.1}"
+STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-10}"
+START_FEEDS=1
+START_BOT=0
+PURGE_DBS=1
+DRY_RUN=0
+API_KEY_ENV="${API_KEY_ENV:-}"
+API_SECRET_ENV="${API_SECRET_ENV:-}"
+EXTRA_BOT_ARGS=()
+
+usage() {
+    cat <<'EOF'
+Usage:
+  scripts/kolabi-fresh-run [options] [-- extra python -m kolabi.bot run args]
+
+Purpose:
+  Stop local kolabidb listener processes, purge configured PostgreSQL runtime
+  rows, restart the public/private DB listeners required by a strategy TSV, and
+  print the bot launch command. Add --start-bot to launch the bot.
+
+Options:
+  --strategy PATH              Strategy TSV. Default: orders/bmm_ada.tsv.
+  --exchange NAME              Default exchange for TSV rows without exchg. Default: kraken.
+  --market-type TYPE           Default market type. Default: futures.
+  --environment demo|live      Endpoint family. Default: live.
+  --symbol SYMBOL              Default symbol for TSV rows without symbol. Default: PF_ADAUSD.
+  --account-scope NAME         Account scope for private listeners. Default: default.
+  --env-file PATH              PostgreSQL env file. Default: .env.postgres.
+  --api-key-env NAME           Optional bot default-route API key env override.
+  --api-secret-env NAME        Optional bot default-route API secret env override.
+  --log-level LEVEL            Listener and bot log level. Default: INFO.
+  --bot-log PATH               tee log used with --start-bot.
+  --max-active-pairs N         Bot max active pairs. Default: 1.
+  --rest-min-interval SECONDS  Bot REST pacing. Default: 0.1.
+  --stop-timeout-seconds N     TERM wait before KILL for local listeners. Default: 10.
+  --no-purge                   Restart listeners without truncating DB rows.
+  --no-start-feeds             Stop/purge only; do not restart listeners.
+  --start-bot                  Launch python -m kolabi.bot run after listeners start.
+  --dry-run                    Print safe actions and purge lanes without mutating state.
+  -h, --help                   Show this help.
+
+Examples:
+  scripts/kolabi-fresh-run --strategy orders/bmm_ada.tsv --environment live
+  scripts/kolabi-fresh-run --strategy orders/demo_cross_exchange_chain.tsv --environment demo --symbol PI_XBTUSD
+  scripts/kolabi-fresh-run --dry-run --strategy orders/bmm_ada.tsv --environment live
+EOF
+}
+
+die() {
+    printf 'kolabi-fresh-run: %s\n' "$*" >&2
+    exit 2
+}
+
+info() {
+    printf 'kolabi-fresh-run: %s\n' "$*" >&2
+}
+
+run_cmd() {
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf '+ '
+        printf '%q ' "$@"
+        printf '\n'
+    else
+        "$@"
+    fi
+}
+
+parse_args() {
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --strategy)
+                STRATEGY="${2:-}"
+                shift 2
+                ;;
+            --exchange)
+                EXCHANGE="${2:-}"
+                shift 2
+                ;;
+            --market-type)
+                MARKET_TYPE="${2:-}"
+                shift 2
+                ;;
+            --environment)
+                ENVIRONMENT="${2:-}"
+                shift 2
+                ;;
+            --symbol|--pair)
+                SYMBOL="${2:-}"
+                shift 2
+                ;;
+            --account-scope)
+                ACCOUNT_SCOPE="${2:-}"
+                shift 2
+                ;;
+            --env-file)
+                ENV_FILE="${2:-}"
+                shift 2
+                ;;
+            --api-key-env)
+                API_KEY_ENV="${2:-}"
+                shift 2
+                ;;
+            --api-secret-env)
+                API_SECRET_ENV="${2:-}"
+                shift 2
+                ;;
+            --log-level)
+                LOG_LEVEL="${2:-}"
+                shift 2
+                ;;
+            --bot-log)
+                BOT_LOG="${2:-}"
+                shift 2
+                ;;
+            --max-active-pairs)
+                MAX_ACTIVE_PAIRS="${2:-}"
+                shift 2
+                ;;
+            --rest-min-interval)
+                REST_MIN_INTERVAL="${2:-}"
+                shift 2
+                ;;
+            --stop-timeout-seconds)
+                STOP_TIMEOUT_SECONDS="${2:-}"
+                shift 2
+                ;;
+            --no-purge)
+                PURGE_DBS=0
+                shift
+                ;;
+            --no-start-feeds)
+                START_FEEDS=0
+                shift
+                ;;
+            --start-bot)
+                START_BOT=1
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            --)
+                shift
+                EXTRA_BOT_ARGS=("$@")
+                break
+                ;;
+            *)
+                die "unknown argument '$1'"
+                ;;
+        esac
+    done
+}
+
+resolve_env_file() {
+    if [[ -f "$ENV_FILE" ]]; then
+        printf '%s' "$ENV_FILE"
+    elif [[ -f "$ROOT_DIR/$ENV_FILE" ]]; then
+        printf '%s' "$ROOT_DIR/$ENV_FILE"
+    fi
+}
+
+load_env_file() {
+    local env_path
+    env_path="$(resolve_env_file)"
+    if [[ -n "$env_path" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "$env_path"
+        set +a
+        info "loaded env file $env_path"
+    else
+        info "no env file found at $ENV_FILE; using current process environment"
+    fi
+}
+
+validate_config() {
+    [[ -f "$STRATEGY" ]] || die "strategy file not found: $STRATEGY"
+    [[ "$ENVIRONMENT" == "demo" || "$ENVIRONMENT" == "live" ]] || die "--environment must be demo or live"
+    [[ "$STOP_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || die "--stop-timeout-seconds must be an integer"
+}
+
+stop_pid_file() {
+    local pid_path="$1"
+    local pid
+    local args
+    local waited=0
+
+    pid="$(tr -d '[:space:]' <"$pid_path" 2>/dev/null || true)"
+    if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            printf '+ rm -f %q\n' "$pid_path"
+            info "would remove stale pid file $pid_path"
+        else
+            rm -f "$pid_path"
+            info "removed stale pid file $pid_path"
+        fi
+        return
+    fi
+
+    args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ "$args" != *"kolabi.tree."* ]]; then
+        info "skipping pid=$pid from $pid_path because it is not a kolabidb listener"
+        return
+    fi
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf '+ kill -TERM %q\n' "$pid"
+        printf '+ rm -f %q\n' "$pid_path"
+        return
+    fi
+
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [[ "$waited" -lt "$STOP_TIMEOUT_SECONDS" ]]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$pid_path"
+    info "stopped listener pid=$pid file=$pid_path"
+}
+
+stop_listener_services() {
+    local pid_files=("$ROOT_DIR"/.run/kolabidb/*.pid)
+    if [[ ! -e "${pid_files[0]}" ]]; then
+        info "no kolabidb listener pid files found"
+        return
+    fi
+    for pid_path in "${pid_files[@]}"; do
+        stop_pid_file "$pid_path"
+    done
+}
+
+purge_databases() {
+    if [[ "$PURGE_DBS" -eq 0 ]]; then
+        info "DB purge disabled"
+        return
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        python -m kolabi.shared.persistence.purge --all-from-env --dry-run
+    else
+        python -m kolabi.shared.persistence.purge \
+            --all-from-env \
+            --connect-attempts 15 \
+            --connect-delay-seconds 1
+    fi
+}
+
+route_lines() {
+    python -m kolabi.bot.fresh_run route-lines \
+        --strategy "$STRATEGY" \
+        --exchange "$EXCHANGE" \
+        --market-type "$MARKET_TYPE" \
+        --symbol "$SYMBOL" \
+        --environment "$ENVIRONMENT"
+}
+
+start_postgres() {
+    local cmd=(scripts/kolabidb)
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        cmd+=(--dry-run)
+    fi
+    cmd+=(--env-file "$ENV_FILE" postgres start)
+    run_cmd "${cmd[@]}"
+}
+
+start_feeders() {
+    local line
+    local route_exchange
+    local route_market_type
+    local route_symbol
+    local route_key_env
+    local route_secret_env
+    local common_args=()
+
+    if [[ "$START_FEEDS" -eq 0 ]]; then
+        info "listener restart disabled"
+        return
+    fi
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        common_args+=(--dry-run)
+    fi
+    common_args+=(--env-file "$ENV_FILE")
+
+    while IFS=$'\t' read -r route_exchange route_market_type route_symbol route_key_env route_secret_env; do
+        [[ -n "$route_exchange" ]] || continue
+        info "starting listeners for ${route_exchange}:${route_market_type}:${route_symbol}"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            info "would start public listener exchange=$route_exchange market_type=$route_market_type environment=$ENVIRONMENT pair=$route_symbol"
+            info "would start private listener exchange=$route_exchange market_type=$route_market_type environment=$ENVIRONMENT pair=$route_symbol account_scope=$ACCOUNT_SCOPE api_key_env=${route_key_env:-<none>} api_secret_env=${route_secret_env:-<none>}"
+            continue
+        fi
+        run_cmd scripts/kolabidb "${common_args[@]}" \
+            --exchange "$route_exchange" \
+            --market-type "$route_market_type" \
+            --environment "$ENVIRONMENT" \
+            public start \
+            --pair "$route_symbol" \
+            --log-level "$LOG_LEVEL"
+
+        local private_cmd=(
+            scripts/kolabidb "${common_args[@]}"
+            --exchange "$route_exchange"
+            --market-type "$route_market_type"
+            --environment "$ENVIRONMENT"
+            private start
+            --pair "$route_symbol"
+            --account-scope "$ACCOUNT_SCOPE"
+            --log-level "$LOG_LEVEL"
+        )
+        if [[ -n "$route_key_env" ]]; then
+            private_cmd+=(--api-key-env "$route_key_env")
+        fi
+        if [[ -n "$route_secret_env" ]]; then
+            private_cmd+=(--api-secret-env "$route_secret_env")
+        fi
+        run_cmd "${private_cmd[@]}"
+    done < <(route_lines)
+}
+
+bot_command() {
+    local cmd=(
+        python -m kolabi.bot run
+        --strategy "$STRATEGY"
+        --exchange "$EXCHANGE"
+        --market-type "$MARKET_TYPE"
+        --symbol "$SYMBOL"
+        --environment "$ENVIRONMENT"
+        --account-scope "$ACCOUNT_SCOPE"
+        --max-active-pairs "$MAX_ACTIVE_PAIRS"
+        --rest-min-interval "$REST_MIN_INTERVAL"
+        --log-level "$LOG_LEVEL"
+    )
+    if [[ -n "$API_KEY_ENV" ]]; then
+        cmd+=(--api-key-env "$API_KEY_ENV")
+    fi
+    if [[ -n "$API_SECRET_ENV" ]]; then
+        cmd+=(--api-secret-env "$API_SECRET_ENV")
+    fi
+    if [[ "${#EXTRA_BOT_ARGS[@]}" -gt 0 ]]; then
+        cmd+=("${EXTRA_BOT_ARGS[@]}")
+    fi
+    printf '%q ' "${cmd[@]}"
+}
+
+print_or_start_bot() {
+    local command_text
+    command_text="$(bot_command)"
+    if [[ "$START_BOT" -eq 0 ]]; then
+        info "bot launch command:"
+        printf '%s\n' "$command_text"
+        return
+    fi
+    mkdir -p "$(dirname "$BOT_LOG")"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf '+ %s 2>&1 | tee %q\n' "$command_text" "$BOT_LOG"
+        return
+    fi
+    bash -lc "$command_text" 2>&1 | tee "$BOT_LOG"
+}
+
+main() {
+    parse_args "$@"
+    validate_config
+    load_env_file
+    info "fresh setup strategy=$STRATEGY environment=$ENVIRONMENT default_route=${EXCHANGE}:${MARKET_TYPE}:${SYMBOL} account_scope=$ACCOUNT_SCOPE"
+    stop_listener_services
+    start_postgres
+    purge_databases
+    start_feeders
+    print_or_start_bot
+}
+
+main "$@"
