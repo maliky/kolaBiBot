@@ -17,8 +17,8 @@ from kolabi.bot.domain import (
     HeadSpec,
     HeadState,
     OrderIdentity,
-    OrderRole,
     OrderPairSpec,
+    OrderRole,
     PairCycleState,
     Side,
     StrategyState,
@@ -616,6 +616,115 @@ def test_chronos_repeats_not_played_canceled_head_with_fresh_attempt_key() -> No
     assert repeated.attempt_index == 2
     assert repeated.head_state == HeadState.LATENT
     assert repeated.head_trigger_reference_price is None
+
+
+def test_chronos_star_attempts_repeat_until_pair_window_closes() -> None:
+    pair = replace(
+        sample_pair("pair-r"),
+        try_num=None,
+        dr_pause=0.0,
+        head_price=(5.0, 50.0),
+        head_price_type="pD",
+        amount_type="qAtDpD",
+    )
+    state = StrategyState(
+        launched_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
+        strategy_id="strategy-star-repeat",
+        pairs={
+            "pair-r": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.CLOSED,
+                tail_mode=TailMode.FLYING,
+                played_quantity=Decimal("1"),
+                attempt_index=244,
+            ),
+        },
+    )
+    chronos = Chronos(state=state)
+    occurred_at = datetime(2026, 5, 21, 12, 6, tzinfo=timezone.utc)
+
+    commands = chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=occurred_at,
+            symbol="PI_XBTUSD",
+            pair_name="pair-r",
+            event_id="evt-star-repeat",
+            is_private=True,
+        ),
+        now=occurred_at,
+    )
+
+    assert commands == ()
+    repeated = chronos.state.pairs["pair-r"]
+    assert repeated.attempt_index == 245
+    assert repeated.head_state == HeadState.LATENT
+    assert repeated.head_trigger_reference_price is None
+
+    chronos.state = replace(
+        chronos.state,
+        pairs={
+            "pair-r": replace(
+                repeated,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.CLOSED,
+                tail_mode=TailMode.FLYING,
+                played_quantity=Decimal("1"),
+            )
+        },
+    )
+    after_window = datetime(2026, 5, 21, 12, 11, tzinfo=timezone.utc)
+    chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=after_window,
+            symbol="PI_XBTUSD",
+            pair_name="pair-r",
+            event_id="evt-star-after-window",
+            is_private=True,
+        ),
+        now=after_window,
+    )
+
+    assert chronos.pending_repeats == {}
+    assert chronos.state.pairs["pair-r"].attempt_index == 245
+
+
+def test_chronos_star_attempt_pause_must_still_fit_pair_window() -> None:
+    pair = replace(sample_pair("pair-r"), try_num=None, dr_pause=1.0)
+    state = StrategyState(
+        launched_at=datetime(2026, 5, 21, 12, 0, tzinfo=timezone.utc),
+        strategy_id="strategy-star-repeat-pause",
+        pairs={
+            "pair-r": PairCycleState(
+                pair=pair,
+                head_state=HeadState.CLOSED,
+                tail_state=TailState.CLOSED,
+                tail_mode=TailMode.FLYING,
+                played_quantity=Decimal("1"),
+                attempt_index=244,
+            ),
+        },
+    )
+    chronos = Chronos(state=state)
+    occurred_at = datetime(2026, 5, 21, 12, 9, 30, tzinfo=timezone.utc)
+
+    commands = chronos.process_event(
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            occurred_at=occurred_at,
+            symbol="PI_XBTUSD",
+            pair_name="pair-r",
+            event_id="evt-star-pause-after-window",
+            is_private=True,
+        ),
+        now=occurred_at,
+    )
+
+    assert commands == ()
+    assert chronos.pending_repeats == {}
+    assert chronos.state.pairs["pair-r"].attempt_index == 244
 
 
 def test_chronos_delays_repeat_until_pause_has_elapsed() -> None:

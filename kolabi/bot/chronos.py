@@ -335,7 +335,8 @@ class Chronos:
         if pair_state is None or not _pair_terminal_for_repeat(pair_state):
             return ()
         next_attempt = pair_state.attempt_index + 1
-        if next_attempt > max(pair_state.pair.attempts, 1):
+        attempts = pair_state.pair.attempts
+        if attempts is not None and next_attempt > max(attempts, 1):
             return ()
         if pair_name in self.pending_repeats:
             return ()
@@ -564,7 +565,6 @@ def hook_target_satisfied(
         return _is_private_head_filled(event, origin_state)
     if target.kind == HookTargetKind.PAIR_CLOSED:
         return _is_private_terminal(event) and _pair_closed_successfully(origin_state)
-    return False
 
 
 def _pair_closed_successfully(pair_state: PairCycleState) -> bool:

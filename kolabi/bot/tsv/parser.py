@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TypedDict
 
 import pandas as pd
 
@@ -22,6 +22,25 @@ NumberPair = tuple[float, float]
 PERCENT_OPEN_BOUND = 90.0
 DIFFERENTIAL_OPEN_BOUND = 1_000_000.0
 ABSOLUTE_PRICE_OPEN_MAX = 1_000_000_000.0
+
+
+class _LegacyRow(TypedDict):
+    tps_run: NumberPair
+    essais: int | str | None
+    dr_pause: float | None
+    timeout: float | None
+    side: str
+    prix: NumberPair
+    q: int | None
+    tp: float | None
+    atype: str
+    oType: str
+    oDelta: float | None
+    tDelta: float | None
+    tType: str
+    hook: str
+    symbol: str | None
+    exchange: str | None
 
 
 def read_strategy_file(path: str | Path) -> StrategySpec:
@@ -52,7 +71,7 @@ def order_pair_from_legacy_values(
     *,
     name: str,
     tps_run: NumberPair,
-    essais: int | None,
+    essais: int | str | None,
     dr_pause: float | None,
     timeout: float | None,
     side: str,
@@ -73,6 +92,15 @@ def order_pair_from_legacy_values(
     head_delta_type = extract_head_delta_type(atype)
     normalized_side = normalize_side(side)
     exchange_name, market_type = parse_exchange_code(exchange)
+    window = TimeWindow(start_minutes=float(tps_run[0]), end_minutes=float(tps_run[1]))
+    attempts = _validate_attempts(essais, name=name)
+    timeout_minutes = _resolve_timeout_minutes(
+        timeout=timeout,
+        attempts=attempts,
+        window=window,
+        pause_minutes=dr_pause,
+        name=name,
+    )
     validate_order_code(oType, role="head")
     validate_order_code(tType, role="tail")
     validate_price_interval(prix)
@@ -80,10 +108,10 @@ def order_pair_from_legacy_values(
 
     return OrderPairSpec(
         name=name,
-        window=TimeWindow(start_minutes=float(tps_run[0]), end_minutes=float(tps_run[1])),
-        try_num=1 if essais is None else essais,
+        window=window,
+        try_num=attempts,
         dr_pause=dr_pause,
-        timeout=timeout,
+        timeout=timeout_minutes,
         head=HeadSpec(
             side=normalized_side,
             order_type=oType.strip(),
@@ -161,7 +189,7 @@ def strategy_to_pretty_dict(strategy: StrategySpec) -> dict[str, object]:
     return payload
 
 
-def normalize_legacy_row(row: pd.Series) -> dict[str, object]:
+def normalize_legacy_row(row: pd.Series) -> _LegacyRow:
     """Convertit une ligne TSV legacy en champs intermediaires stables."""
     atype = _optional_text(_row_value(row, "atype"))
     if atype:
@@ -169,16 +197,16 @@ def normalize_legacy_row(row: pd.Series) -> dict[str, object]:
     return _normalize_typed_field_row(row)
 
 
-def _normalize_compact_atype_row(row: pd.Series, atype: str) -> dict[str, object]:
+def _normalize_compact_atype_row(row: pd.Series, atype: str) -> _LegacyRow:
     """Normalise the old compact-atype row grammar."""
     return {
         "tps_run": _parse_legacy_interval(str(row.tps_run)),
-        "essais": _coerce_to("int", _row_value(row, "essais")),
+        "essais": _parse_essais(_row_value(row, "essais")),
         "dr_pause": _coerce_to("float", _row_value(row, "pause")),
         "timeout": _coerce_to("float", _row_value(row, "tOut")),
         "side": str(row.side).strip(),
         "prix": _parse_legacy_interval(str(row.prix), atype),
-        "q": _coerce_to("int", _row_value(row, "qty", "quantity", "q")),
+        "q": _coerce_int(_row_value(row, "qty", "quantity", "q")),
         "tp": _coerce_to("float", _row_value(row, "tp")),
         "atype": atype,
         "oType": str(row.oType).strip(),
@@ -191,15 +219,17 @@ def _normalize_compact_atype_row(row: pd.Series, atype: str) -> dict[str, object
     }
 
 
-def _normalize_typed_field_row(row: pd.Series) -> dict[str, object]:
+def _normalize_typed_field_row(row: pd.Series) -> _LegacyRow:
     """Normalise the explicit typed-field TSV grammar."""
-    q, quantity_type = _parse_required_typed_number(
+    raw_q, quantity_type = _parse_required_typed_number(
         _row_value(row, "qty", "quantity", "q"),
         field="qty",
         token_prefix="q",
         allowed_suffixes={"A", "%"},
         as_int=True,
     )
+    if not isinstance(raw_q, int):
+        raise ValueError("Invalid qty value; expected an integer payload.")
     tp, tail_price_type = _parse_optional_typed_number(
         _row_value(row, "tp"),
         field="tp",
@@ -226,12 +256,12 @@ def _normalize_typed_field_row(row: pd.Series) -> dict[str, object]:
 
     return {
         "tps_run": _parse_legacy_interval(str(row.tps_run)),
-        "essais": _coerce_to("int", _row_value(row, "essais")),
+        "essais": _parse_essais(_row_value(row, "essais")),
         "dr_pause": _coerce_to("float", _row_value(row, "pause")),
         "timeout": _coerce_to("float", _row_value(row, "tOut")),
         "side": str(row.side).strip(),
         "prix": prix,
-        "q": q,
+        "q": raw_q,
         "tp": tp,
         "atype": atype,
         "oType": str(row.oType).strip(),
@@ -276,13 +306,67 @@ def _optional_text(value: object) -> str | None:
 
 
 def _coerce_to(kind: str, value: object) -> int | float | None:
-    if pd.isna(value):
+    text = _optional_text(value)
+    if text is None:
         return None
     if kind == "int":
-        return int(value)
+        return int(text)
     if kind == "float":
-        return float(value)
+        return float(text)
     raise ValueError(f"Unsupported coercion kind '{kind}'")
+
+
+def _coerce_int(value: object) -> int | None:
+    text = _optional_text(value)
+    if text is None:
+        return None
+    return int(text)
+
+
+def _parse_essais(value: object) -> int | str | None:
+    text = _optional_text(value)
+    if text is None:
+        return None
+    if text == "*":
+        return text
+    return int(text)
+
+
+def _validate_attempts(essais: int | str | None, *, name: str) -> int | None:
+    if essais is None:
+        return 1
+    if essais == "*":
+        return None
+    attempts = int(essais)
+    if attempts < 1:
+        raise ValueError(f"Invalid essais for pair '{name}'; expected a positive integer or '*'.")
+    return attempts
+
+
+def _resolve_timeout_minutes(
+    *,
+    timeout: float | None,
+    attempts: int | None,
+    window: TimeWindow,
+    pause_minutes: float | None,
+    name: str,
+) -> float | None:
+    if timeout is not None:
+        if timeout <= 0:
+            raise ValueError(f"Invalid tOut for pair '{name}'; expected a positive number.")
+        return timeout
+    if attempts is None:
+        raise ValueError(
+            f"Missing tOut for pair '{name}'; essais='*' requires an explicit per-attempt tOut."
+        )
+    span_minutes = window.end_minutes - window.start_minutes
+    pause_total = (pause_minutes or 0.0) * attempts
+    computed = (span_minutes - pause_total) / attempts
+    if computed <= 0:
+        raise ValueError(
+            f"Invalid automatic tOut for pair '{name}'; tps_run span minus pauses must be positive."
+        )
+    return computed
 
 
 def _parse_legacy_interval(raw: str, atype: str | None = None) -> NumberPair:

@@ -201,6 +201,63 @@ def test_fractional_timeout_and_extra_interval_spaces_parse(tmp_path: Path) -> N
     assert strategy.pairs[0].head_price == (-1_000_000.0, 1_000_000.0)
 
 
+def test_missing_timeout_defaults_from_window_attempts_and_pause(tmp_path: Path) -> None:
+    strategy = read_strategy_file(
+        _write_strategy(
+            tmp_path / "auto_timeout.tsv",
+            ["AUTO\t0 60\t4\t\t6\tbuy\tL\t\tS-\t\tqAtDpD\t3\t8\t- +\t"],
+        )
+    )
+
+    assert strategy.pairs[0].timeout == 9.0
+
+
+def test_explicit_timeout_wins_over_automatic_default(tmp_path: Path) -> None:
+    strategy = read_strategy_file(
+        _write_strategy(
+            tmp_path / "explicit_timeout.tsv",
+            ["EXPLICIT\t0 60\t4\t3\t6\tbuy\tL\t\tS-\t\tqAtDpD\t3\t8\t- +\t"],
+        )
+    )
+
+    assert strategy.pairs[0].timeout == 3.0
+
+
+def test_star_essais_repeats_until_window_with_explicit_timeout(tmp_path: Path) -> None:
+    strategy = read_strategy_file(
+        _write_strategy(
+            tmp_path / "repeat_until_window.tsv",
+            ["STAR\t0 60\t*\t6\t1\tbuy\tL\t\tS-\t\tqAtDpD\t3\t8\t- +\t"],
+        )
+    )
+
+    pair = strategy.pairs[0]
+    assert pair.try_num is None
+    assert pair.attempts is None
+    assert pair.repeats_until_window is True
+    assert pair.timeout == 6.0
+
+
+def test_star_essais_requires_explicit_timeout(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="essais='\\*' requires an explicit"):
+        read_strategy_file(
+            _write_strategy(
+                tmp_path / "missing_star_timeout.tsv",
+                ["STAR\t0 60\t*\t\t1\tbuy\tL\t\tS-\t\tqAtDpD\t3\t8\t- +\t"],
+            )
+        )
+
+
+def test_automatic_timeout_must_be_positive(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Invalid automatic tOut"):
+        read_strategy_file(
+            _write_strategy(
+                tmp_path / "bad_auto_timeout.tsv",
+                ["BAD\t0 60\t4\t\t15\tbuy\tL\t\tS-\t\tqAtDpD\t3\t8\t- +\t"],
+            )
+        )
+
+
 def test_optional_symbol_column_is_parsed(tmp_path: Path) -> None:
     strategy = read_strategy_file(
         _write_strategy(

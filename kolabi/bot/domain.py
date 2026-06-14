@@ -176,7 +176,7 @@ class TailSpec:
 class OrderPairSpec:
     name: str
     window: TimeWindow
-    try_num: int
+    try_num: int | None
     dr_pause: float | None
     timeout: float | None
     head: HeadSpec
@@ -194,8 +194,12 @@ class OrderPairSpec:
     market_type: str | None = None
 
     @property
-    def attempts(self) -> int:
+    def attempts(self) -> int | None:
         return self.try_num
+
+    @property
+    def repeats_until_window(self) -> bool:
+        return self.try_num is None
 
     @property
     def pause_minutes(self) -> float | None:
