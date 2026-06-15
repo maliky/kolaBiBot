@@ -13,7 +13,7 @@ SYMBOL="${SYMBOL:-PF_ADAUSD}"
 ACCOUNT_SCOPE="${ACCOUNT_SCOPE:-default}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 BOT_LOG="${BOT_LOG:-logs/$(basename "${STRATEGY%.tsv}")_${ENVIRONMENT}.log}"
-MAX_ACTIVE_PAIRS="${MAX_ACTIVE_PAIRS:-1}"
+MAX_ACTIVE_PAIRS="${MAX_ACTIVE_PAIRS:-}"
 REST_MIN_INTERVAL="${REST_MIN_INTERVAL:-0.1}"
 STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-10}"
 START_FEEDS=1
@@ -46,7 +46,7 @@ Options:
   --api-secret-env NAME        Optional bot default-route API secret env override.
   --log-level LEVEL            Listener and bot log level. Default: INFO.
   --bot-log PATH               tee log used with --start-bot.
-  --max-active-pairs N         Bot max active pairs. Default: 1.
+  --max-active-pairs N         Bot max active pairs. Default: strategy pair count.
   --rest-min-interval SECONDS  Bot REST pacing. Default: 0.1.
   --stop-timeout-seconds N     TERM wait before KILL for local listeners. Default: 10.
   --no-purge                   Restart listeners without truncating DB rows.
@@ -277,6 +277,18 @@ route_lines() {
         --environment "$ENVIRONMENT"
 }
 
+strategy_pair_count() {
+    python -m kolabi.bot.fresh_run pair-count --strategy "$STRATEGY"
+}
+
+resolved_max_active_pairs() {
+    if [[ -n "$MAX_ACTIVE_PAIRS" ]]; then
+        printf '%s\n' "$MAX_ACTIVE_PAIRS"
+        return
+    fi
+    strategy_pair_count
+}
+
 start_postgres() {
     local cmd=(scripts/kolabidb)
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -342,6 +354,8 @@ start_feeders() {
 }
 
 bot_command() {
+    local max_active_pairs
+    max_active_pairs="$(resolved_max_active_pairs)"
     local cmd=(
         python -m kolabi.bot run
         --strategy "$STRATEGY"
@@ -350,7 +364,7 @@ bot_command() {
         --symbol "$SYMBOL"
         --environment "$ENVIRONMENT"
         --account-scope "$ACCOUNT_SCOPE"
-        --max-active-pairs "$MAX_ACTIVE_PAIRS"
+        --max-active-pairs "$max_active_pairs"
         --rest-min-interval "$REST_MIN_INTERVAL"
         --log-level "$LOG_LEVEL"
     )

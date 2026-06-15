@@ -41,6 +41,11 @@ def resolve_strategy_routes(
     return tuple(sorted(routes))
 
 
+def strategy_pair_count(strategy_path: str | Path) -> int:
+    strategy = read_strategy_file(strategy_path)
+    return len(strategy.pairs)
+
+
 def feeder_plan_for_routes(
     routes: Sequence[ExchangeRoute],
     *,
@@ -120,6 +125,8 @@ def _parser() -> argparse.ArgumentParser:
     routes.add_argument("--market-type", default="futures")
     routes.add_argument("--symbol")
     routes.add_argument("--environment", choices=("demo", "live"), default="demo")
+    pair_count = subparsers.add_parser("pair-count")
+    pair_count.add_argument("--strategy", required=True)
     return parser
 
 
@@ -146,6 +153,9 @@ def main(argv: Sequence[str] | None = None, *, stdout: TextIO | None = None) -> 
             )
         ):
             print(line, file=out)
+        return 0
+    if args.command == "pair-count":
+        print(strategy_pair_count(args.strategy), file=out)
         return 0
     raise ValueError(f"unsupported command {args.command!r}")
 

@@ -79,6 +79,9 @@ from kolabi.shared.core.runtime_types import (
 
 _LOGGER = logging.getLogger("kola")
 _DEFAULT_HEAD_FILL_REFERENCE_GRACE_SECONDS = 20.0
+_DEFAULT_PRIVATE_PENDING_RECORD_TTL_SECONDS = 120.0
+_DEFAULT_PRIVATE_PENDING_RECORD_LIMIT = 512
+_DEFAULT_PRIVATE_SUPPRESSED_EVENT_ID_LIMIT = 2048
 _LEGEND_GAP = "    "
 
 
@@ -261,6 +264,7 @@ class _LatentHeadDeadline:
 
 
 _LEASE_PENDING_PLACE = "PENDING_PLACE"
+_LEASE_ACKED = "ACKED"
 _LEASE_LIVE = "LIVE"
 _LEASE_CANCEL_REQUESTED = "CANCEL_REQUESTED"
 _LEASE_CLOSED = "CLOSED"
@@ -282,6 +286,7 @@ class _OrderLease:
     created_at: datetime
     last_seen_at: datetime | None = None
     cancel_sent_at: datetime | None = None
+    visibility_warned_at: datetime | None = None
     exchange: str | None = None
     market_type: str | None = None
 
@@ -412,15 +417,22 @@ class KrakenPrivateOrderPollingSource:
         *,
         poll_seconds: float = 0.25,
         head_fill_reference_grace_seconds: float = _DEFAULT_HEAD_FILL_REFERENCE_GRACE_SECONDS,
+        pending_record_ttl_seconds: float = _DEFAULT_PRIVATE_PENDING_RECORD_TTL_SECONDS,
+        max_pending_records: int = _DEFAULT_PRIVATE_PENDING_RECORD_LIMIT,
+        max_suppressed_event_ids: int = _DEFAULT_PRIVATE_SUPPRESSED_EVENT_ID_LIMIT,
     ) -> None:
         self.client = client
         self.poll_seconds = poll_seconds
         self.head_fill_reference_grace_seconds = max(
             0.0, head_fill_reference_grace_seconds
         )
+        self.pending_record_ttl_seconds = max(1.0, pending_record_ttl_seconds)
+        self.max_pending_records = max(1, max_pending_records)
+        self.max_suppressed_event_ids = max(1, max_suppressed_event_ids)
         self._cursors: dict[str, _PrivateCursor] = {}
         self._pending_records: list[_PendingPrivateRecord] = []
-        self._suppressed_event_ids: set[str] = set()
+        self._suppressed_event_ids: deque[str] = deque()
+        self._suppressed_event_id_set: set[str] = set()
 
     async def pump(self, runtime: RuntimeQueueLike) -> None:
         while runtime.running:
@@ -487,11 +499,16 @@ class KrakenPrivateOrderPollingSource:
                     for record in fill_records
                 )
                 self._advance_cursor(cursor, records, fill_records)
+            candidates, pruned_duplicate = self._dedupe_pending_candidates(candidates)
+            pruned_expired = 0
             for pending_record in candidates:
                 record = pending_record.record
                 resolved = runtime.pair_state_for_record(record)
                 if resolved is None:
-                    self._pending_records.append(pending_record)
+                    if self._pending_record_still_fresh(pending_record, now):
+                        self._pending_records.append(pending_record)
+                    else:
+                        pruned_expired += 1
                     continue
                 pair_state, role = resolved
                 fact = private_order_fact_from_record(
@@ -507,10 +524,10 @@ class KrakenPrivateOrderPollingSource:
                     )
                 )
                 if _is_mechanical_tail_amend_cancel(runtime, pair_state, role, move):
-                    if event_id is not None and event_id in self._suppressed_event_ids:
+                    if event_id is not None and event_id in self._suppressed_event_id_set:
                         continue
                     if event_id is not None:
-                        self._suppressed_event_ids.add(event_id)
+                        self._remember_suppressed_event_id(event_id)
                     _LOGGER.info(
                         "AMEND_REPLACE_CANCEL_SUPPRESSED (%s#%s): %s",
                         pair_state.pair.name,
@@ -543,6 +560,21 @@ class KrakenPrivateOrderPollingSource:
                             f"orderID={order_id} grace_seconds={self.head_fill_reference_grace_seconds:g}"
                         )
                 await runtime.enqueue(replace(move, event_id=event_id))
+            pruned_limit = self._trim_pending_records()
+            pruned_total = pruned_duplicate + pruned_expired + pruned_limit
+            if pruned_total:
+                oldest = min(
+                    (item.first_seen_at for item in self._pending_records),
+                    default=None,
+                )
+                _LOGGER.info(
+                    "PRIVATE_PENDING_PRUNED %s",
+                    _runtime_fields(
+                        pruned_total,
+                        len(self._pending_records),
+                        "-" if oldest is None else oldest.isoformat(),
+                    ),
+                )
             if _runtime_sources_should_stop(runtime):
                 return
             await asyncio.sleep(self.poll_seconds)
@@ -621,6 +653,71 @@ class KrakenPrivateOrderPollingSource:
             )
             merged[key] = record
         return tuple(merged.values())
+
+    def _dedupe_pending_candidates(
+        self,
+        candidates: tuple[_PendingPrivateRecord, ...],
+    ) -> tuple[tuple[_PendingPrivateRecord, ...], int]:
+        seen: set[str] = set()
+        kept: list[_PendingPrivateRecord] = []
+        pruned = 0
+        for pending_record in candidates:
+            key = self._pending_record_key(pending_record)
+            if key in seen:
+                pruned += 1
+                continue
+            seen.add(key)
+            kept.append(pending_record)
+        return tuple(kept), pruned
+
+    def _pending_record_key(self, pending_record: _PendingPrivateRecord) -> str:
+        event_id = self._private_record_event_id(
+            pending_record.record,
+            is_fill=pending_record.is_fill,
+        )
+        if event_id is not None:
+            return event_id
+        record = pending_record.record
+        prefix = "fill" if pending_record.is_fill else "order"
+        return ":".join(
+            (
+                prefix,
+                _event_atom(record.exchange),
+                _event_atom(record.market_type),
+                _event_atom(record.symbol),
+                _event_atom(record.exchange_order_id),
+                _event_atom(record.client_order_id),
+                _event_atom(record.local_timestamp),
+                _event_atom(record.status),
+            )
+        )
+
+    def _pending_record_still_fresh(
+        self,
+        pending_record: _PendingPrivateRecord,
+        now: datetime,
+    ) -> bool:
+        elapsed = (now - _as_utc_aware(pending_record.first_seen_at)).total_seconds()
+        return elapsed <= self.pending_record_ttl_seconds
+
+    def _trim_pending_records(self) -> int:
+        overflow = len(self._pending_records) - self.max_pending_records
+        if overflow <= 0:
+            return 0
+        self._pending_records = sorted(
+            self._pending_records,
+            key=lambda item: item.first_seen_at,
+        )[overflow:]
+        return overflow
+
+    def _remember_suppressed_event_id(self, event_id: str) -> None:
+        if event_id in self._suppressed_event_id_set:
+            return
+        self._suppressed_event_ids.append(event_id)
+        self._suppressed_event_id_set.add(event_id)
+        while len(self._suppressed_event_ids) > self.max_suppressed_event_ids:
+            stale = self._suppressed_event_ids.popleft()
+            self._suppressed_event_id_set.discard(stale)
 
     @staticmethod
     def _private_record_event_id(
@@ -733,7 +830,7 @@ class StrategyRuntime:
         environment: str = "demo",
         market_type: str = "futures",
         account_scope: str = "default",
-        tail_visibility_timeout_seconds: float = 20.0,
+        tail_visibility_timeout_seconds: float = 30.0,
         max_active_pairs: int = 4,
         simulate: bool = False,
     ) -> None:
@@ -1857,10 +1954,56 @@ class StrategyRuntime:
         lease = self._order_leases.get(slot)
         if lease is None:
             return
-        self._order_leases[slot] = replace(
+        next_status = lease.status
+        if lease.status == _LEASE_PENDING_PLACE and not _ack_is_rejected(ack):
+            next_status = _LEASE_ACKED
+        updated = replace(
             lease,
             client_order_id=ack.client_order_id or lease.client_order_id,
             exchange_order_id=str(ack.order_id) if ack.order_id else lease.exchange_order_id,
+            status=next_status,
+            last_seen_at=datetime.now(timezone.utc),
+        )
+        self._order_leases[slot] = updated
+        if role == "head" and isinstance(command, PlaceHeadCommand):
+            self._arm_head_fill_deadline_from_ack(slot, command, ack, updated)
+
+    def _arm_head_fill_deadline_from_ack(
+        self,
+        slot: _CommandSlot,
+        command: PlaceHeadCommand,
+        ack: OrderAck,
+        lease: _OrderLease,
+    ) -> None:
+        pair_state = self.state.pairs.get(command.pair_name)
+        if pair_state is None or pair_state.attempt_index != slot.attempt_index:
+            return
+        timeout_minutes = pair_state.pair.timeout_minutes
+        if timeout_minutes is None or timeout_minutes <= 0:
+            return
+        if slot in self._head_fill_deadlines:
+            return
+        if _ack_is_rejected(ack):
+            return
+        started_at = _as_utc_aware(lease.last_seen_at or datetime.now(timezone.utc))
+        deadline = _HeadFillDeadline(
+            pair_name=command.pair_name,
+            attempt_index=slot.attempt_index,
+            client_order_id=lease.client_order_id or command.request.clOrdID,
+            exchange_order_id=lease.exchange_order_id,
+            started_at=started_at,
+            deadline_at=started_at + timedelta(minutes=float(timeout_minutes)),
+        )
+        self._head_fill_deadlines[slot] = deadline
+        _LOGGER.info(
+            "HEAD_ACK (%s#%s): %s",
+            command.pair_name,
+            slot.attempt_index,
+            _runtime_fields(
+                deadline.client_order_id or "-",
+                deadline.exchange_order_id or "-",
+                deadline.deadline_at.isoformat(),
+            ),
         )
 
     def _mark_cancel_requested_from_command(self, command: CancelCommand) -> None:
@@ -1910,10 +2053,57 @@ class StrategyRuntime:
             if lease.role == "head" and lease.status == _LEASE_PENDING_PLACE:
                 waited = (now - lease.created_at).total_seconds()
                 if waited >= self.tail_visibility_timeout_seconds:
-                    self._dispatch_lease_cancel(
-                        lease,
-                        reason="head_visibility_timeout",
-                        now=now,
+                    if lease.visibility_warned_at is None:
+                        _LOGGER.warning(
+                            "HEAD_VISIBILITY_PENDING (%s#%s): %s",
+                            lease.pair_name,
+                            lease.attempt_index,
+                            _runtime_fields(
+                                lease.role,
+                                lease.client_order_id or "-",
+                                lease.exchange_order_id or "-",
+                                f"{waited:.1f}s",
+                                f"{self.tail_visibility_timeout_seconds:.1f}s",
+                            ),
+                        )
+                        slot = _CommandSlot(
+                            pair_name=lease.pair_name,
+                            attempt_index=lease.attempt_index,
+                            role=lease.role,
+                        )
+                        current = self._order_leases.get(slot, lease)
+                        self._order_leases[slot] = replace(
+                            current,
+                            visibility_warned_at=now,
+                        )
+                    continue
+            if lease.role == "head" and lease.status == _LEASE_ACKED:
+                waited = (now - lease.created_at).total_seconds()
+                if (
+                    waited >= self.tail_visibility_timeout_seconds
+                    and lease.visibility_warned_at is None
+                ):
+                    _LOGGER.warning(
+                        "HEAD_VISIBILITY_PENDING (%s#%s): %s",
+                        lease.pair_name,
+                        lease.attempt_index,
+                        _runtime_fields(
+                            lease.role,
+                            lease.client_order_id or "-",
+                            lease.exchange_order_id or "-",
+                            f"{waited:.1f}s",
+                            f"{self.tail_visibility_timeout_seconds:.1f}s",
+                        ),
+                    )
+                    slot = _CommandSlot(
+                        pair_name=lease.pair_name,
+                        attempt_index=lease.attempt_index,
+                        role=lease.role,
+                    )
+                    current = self._order_leases.get(slot, lease)
+                    self._order_leases[slot] = replace(
+                        current,
+                        visibility_warned_at=now,
                     )
                     continue
             if lease.status != _LEASE_CANCEL_REQUESTED:
@@ -2383,7 +2573,12 @@ class StrategyRuntime:
         if pair_state.head_state in {HeadState.CLOSED, HeadState.FAILED}:
             self._head_fill_deadlines.pop(slot, None)
             return
-        if pair_state.head_state not in {HeadState.NEW, HeadState.LIVING}:
+        if pair_state.head_state not in {
+            HeadState.HOOKED,
+            HeadState.SUBMITTED,
+            HeadState.NEW,
+            HeadState.LIVING,
+        }:
             return
         timeout_minutes = pair_state.pair.timeout_minutes
         if timeout_minutes is None or timeout_minutes <= 0:
@@ -2425,7 +2620,12 @@ class StrategyRuntime:
             if pair_state.head_state in {HeadState.CLOSED, HeadState.FAILED}:
                 stale_slots.append(slot)
                 continue
-            if pair_state.head_state not in {HeadState.NEW, HeadState.LIVING}:
+            if pair_state.head_state not in {
+                HeadState.HOOKED,
+                HeadState.SUBMITTED,
+                HeadState.NEW,
+                HeadState.LIVING,
+            }:
                 continue
             if _as_utc_aware(now) < deadline.deadline_at:
                 continue

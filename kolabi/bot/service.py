@@ -393,7 +393,7 @@ class BotConfig:
     max_reconcile_age_seconds: float = 300.0
     tail_verify_timeout_seconds: float = 11.0
     tail_verify_poll_seconds: float = 0.5
-    tail_visibility_timeout_seconds: float = 20.0
+    tail_visibility_timeout_seconds: float = 30.0
     max_active_pairs: int = 4
     rest_min_interval_seconds: float = 0.1
     rest_max_inflight: int = 2

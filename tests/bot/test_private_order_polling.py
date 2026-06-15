@@ -20,6 +20,7 @@ from kolabi.bot.domain import (
 from kolabi.bot.strategy_runtime import (
     KrakenPrivateOrderPollingSource,
     _CommandSlot,
+    _PendingPrivateRecord,
     _TailAmendPending,
 )
 from kolabi.shared.core.runtime_types import PrivateOrderRecord
@@ -404,6 +405,71 @@ def test_private_order_poller_retries_fresh_unmatched_head_fill() -> None:
     assert client.calls == 2
     assert len(emitted) == 1
     assert emitted[0].kind.value == "played_and_canceled"
+
+
+def test_private_order_poller_prunes_stale_unmatched_records(caplog) -> None:
+    now = datetime.now(timezone.utc)
+    stale_record = PrivateOrderRecord(
+        symbol="PI_XBTUSD",
+        status="open",
+        exchange_order_id="OID-STALE",
+        client_order_id="CID-STALE",
+        local_id=8,
+        local_timestamp=(now - timedelta(minutes=5)).isoformat(),
+    )
+
+    class _Client:
+        def fetch_private_orders_since(self, **_kwargs):
+            return ()
+
+        def fetch_private_fills_since(self, **_kwargs):
+            return ()
+
+    class _Runtime:
+        def __init__(self) -> None:
+            self.symbol = "PI_XBTUSD"
+            self.running = True
+            self.state = StrategyState(
+                launched_at=now,
+                strategy_id="demo",
+                pairs={
+                    "pair-a": PairCycleState(
+                        pair=sample_pair("pair-a"),
+                    )
+                },
+            )
+
+        @property
+        def all_pairs_terminal(self) -> bool:
+            return True
+
+        @property
+        def should_keep_sources_alive(self) -> bool:
+            return False
+
+        async def enqueue(self, event) -> None:
+            raise AssertionError(f"unexpected event {event!r}")
+
+        def pair_state_for_record(self, record) -> tuple[PairCycleState, OrderRole] | None:
+            return None
+
+    source = KrakenPrivateOrderPollingSource(
+        _Client(),
+        poll_seconds=0.0,
+        pending_record_ttl_seconds=60.0,
+    )
+    source._pending_records.append(
+        _PendingPrivateRecord(
+            record=stale_record,
+            first_seen_at=now - timedelta(minutes=5),
+        )
+    )
+
+    with caplog.at_level("INFO", logger="kola"):
+        asyncio.run(source.pump(_Runtime()))
+
+    assert source._pending_records == []
+    assert "PRIVATE_PENDING_PRUNED" in caplog.text
 
 
 def test_private_order_poller_matches_tail_identity_as_tail_role() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from kolabi.bot.fresh_run import feeder_plan_for_strategy, route_lines
+from kolabi.bot.fresh_run import feeder_plan_for_strategy, route_lines, strategy_pair_count
 
 SCRIPT = Path("scripts/kolabi-fresh-run")
 
@@ -33,6 +33,10 @@ def test_cross_exchange_strategy_resolves_feed_routes() -> None:
     )
 
 
+def test_strategy_pair_count_reads_all_strategy_pairs() -> None:
+    assert strategy_pair_count("orders/demo_cross_exchange_chain.tsv") == 3
+
+
 def test_fresh_run_dry_run_restarts_all_strategy_feed_routes() -> None:
     result = run_script(
         "--dry-run",
@@ -58,3 +62,23 @@ def test_fresh_run_dry_run_restarts_all_strategy_feed_routes() -> None:
     assert "exchange=kraken market_type=futures" in output
     assert "api_key_env=KRKF_DEMO_API_KEY" in output
     assert "python -m kolabi.bot run" in result.stdout
+    assert "--max-active-pairs 3" in result.stdout
+
+
+def test_fresh_run_max_active_pairs_override_wins() -> None:
+    result = run_script(
+        "--dry-run",
+        "--env-file",
+        "docker/postgres/kolabi-postgres.env.example",
+        "--strategy",
+        "orders/demo_cross_exchange_chain.tsv",
+        "--environment",
+        "demo",
+        "--symbol",
+        "PI_XBTUSD",
+        "--max-active-pairs",
+        "1",
+    )
+
+    assert result.returncode == 0
+    assert "--max-active-pairs 1" in result.stdout

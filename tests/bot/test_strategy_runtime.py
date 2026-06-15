@@ -665,6 +665,132 @@ def test_head_timeout_private_db_cancel_terminates_unfilled_head(
     assert pair_state.played_quantity == Decimal("0.0")
 
 
+def test_unacked_head_visibility_timeout_warns_without_cancel(caplog) -> None:
+    pair = sample_strategy()[0]
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="visibility", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+        tail_visibility_timeout_seconds=0.1,
+    )
+    command = PlaceHeadCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="buy",
+            ordType="Limit",
+            orderQty=Decimal("1"),
+            price=Decimal("100"),
+            clOrdID="CID-H",
+        ),
+    )
+    slot = _CommandSlot("pair-a", 1, "head")
+    identity = runtime._command_identity_from_command(command)
+
+    with caplog.at_level("WARNING", logger="kola"):
+        runtime._on_command_dispatched(slot, command, identity)
+        lease = runtime._order_leases[slot]
+        runtime._check_order_lease_deadlines(
+            lease.created_at + timedelta(seconds=0.2)
+        )
+
+    assert not any(isinstance(command, CancelCommand) for command in runtime.commands)
+    assert "HEAD_VISIBILITY_PENDING (pair-a#1):" in caplog.text
+    assert "head_visibility_timeout" not in caplog.text
+
+
+def test_rest_acked_head_visibility_timeout_warns_without_cancel(caplog) -> None:
+    pair = sample_strategy()[0]
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="visibility", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+        tail_visibility_timeout_seconds=0.1,
+    )
+    command = PlaceHeadCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="buy",
+            ordType="Limit",
+            orderQty=Decimal("1"),
+            price=Decimal("100"),
+            clOrdID="CID-H",
+        ),
+    )
+    slot = _CommandSlot("pair-a", 1, "head")
+    identity = runtime._command_identity_from_command(command)
+
+    with caplog.at_level("WARNING", logger="kola"):
+        runtime._on_command_dispatched(slot, command, identity)
+        runtime._enrich_order_lease_from_ack(
+            command,
+            OrderAck(order_id="OID-H", status="New"),
+        )
+        lease = runtime._order_leases[slot]
+        runtime._check_order_lease_deadlines(
+            lease.created_at + timedelta(seconds=0.2)
+        )
+
+    assert not any(isinstance(command, CancelCommand) for command in runtime.commands)
+    assert runtime._head_fill_deadlines[slot].exchange_order_id == "OID-H"
+    assert "HEAD_VISIBILITY_PENDING (pair-a#1):" in caplog.text
+    assert "head_visibility_timeout" not in caplog.text
+
+
+def test_rest_acked_head_still_times_out_without_private_visibility() -> None:
+    pair = replace(sample_strategy()[0], timeout=0.001)
+    runtime = StrategyRuntime(
+        strategy=StrategySpec(name="visibility", pairs=(pair,)),
+        symbol="PI_XBTUSD",
+        simulate=False,
+        tail_visibility_timeout_seconds=0.1,
+    )
+    runtime.state = replace(
+        runtime.state,
+        pairs={
+            "pair-a": replace(
+                runtime.state.pairs["pair-a"],
+                head_state=HeadState.HOOKED,
+            )
+        },
+    )
+    command = PlaceHeadCommand(
+        kind=RuntimeCommandKind.PLACE,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=PlaceOrderCommandRequest(
+            pair_name="pair-a",
+            side="buy",
+            ordType="Limit",
+            orderQty=Decimal("1"),
+            price=Decimal("100"),
+            clOrdID="CID-H",
+        ),
+    )
+    slot = _CommandSlot("pair-a", 1, "head")
+    identity = runtime._command_identity_from_command(command)
+
+    runtime._on_command_dispatched(slot, command, identity)
+    runtime._enrich_order_lease_from_ack(
+        command,
+        OrderAck(order_id="OID-H", status="New"),
+    )
+    deadline = runtime._head_fill_deadlines[slot]
+    runtime._check_head_fill_deadlines(deadline.deadline_at + timedelta(seconds=0.01))
+
+    cancel_commands = [
+        command for command in runtime.commands if isinstance(command, CancelCommand)
+    ]
+    assert len(cancel_commands) == 1
+    assert cancel_commands[0].request.clOrdID == "OID-H"
+    assert cancel_commands[0].reason == "head_timeout"
+
+
 def test_head_timeout_notfound_without_cumqty_does_not_terminate_head(
     postgres_url_factory,
     caplog,
