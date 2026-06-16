@@ -1,0 +1,18 @@
+exchg	symbol	name	tps_run	essais	tOut	pause	side	oType	oDelta	qty	tType	tDelta	prix	tp	hook
+
+# KRKF multi-symbol scenario.
+# All rows use the typed multi-exchange grammar:
+# exchg symbol name tps_run essais tOut pause side oType oDelta qty tType tDelta prix tp hook
+# Use KRKF for Kraken Futures and explicit symbols per row.
+
+# ADA rebound after upward move: RB_SELL waits for UP_BUY tail close.
+KRKF	PF_ADAUSD	RB_SELL	0 1440	*	6	0	sell	LTm		A10	SLm		D- +	%1.6	UP_BUY-tail-closed
+KRKF	PF_ADAUSD	UP_BUY	0 1440	*	6	1	buy	Sm	%1.6	A12	Sm		D- +	%1.4	
+
+# BTC lead then ADA follow: ADA starts only after the BTC head fills.
+KRKF	PI_XBTUSD	BUY_LEAD	0 1440	*	10	0	buy	Sm	%1	A1	SLm-!		D- +	%1.4	
+KRKF	PF_ADAUSD	BUY_FOLLOW	0 1440	*	10	0	buy	Lm		A8	Sm-		D- +	%1.4	BUY_LEAD-head-filled
+
+# ADA down move and rebound: RB_BUY waits for DW_SELL tail close.
+KRKF	PF_ADAUSD	DW_SELL	0 1440	*	6	1	sell	Sm	%1.7	A11	Sm		D- +	%1.5	
+KRKF	PF_ADAUSD	RB_BUY	0 1440	*	6	0	buy	LTm		A9	SLm		D- +	%1.7	DW_SELL-tail-closed

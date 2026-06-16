@@ -932,6 +932,17 @@ PGPASSWORD="$KOLABI_POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$KOLABI_POSTGRES_PO
   "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments WHERE symbol = 'PI_XBTUSD';"
 #+END_SRC
 
+** TODO Make =cancel-all= source-aware and live-first
+
+Current =python -m kolabi.bargain.cli ... cancel-all= returns cancel ACKs, not a pre-cancel book snapshot. The command currently gathers candidates from =live_open_orders=, =live_trigger_orders=, =open_orders=, and =live_trigger_orders_db=. On Kraken futures, =open_orders()= prefers local DB rows when any exist, and =live_trigger_orders_db()= can add stale DB trigger candidates. This means =cancel-all= can report =Canceled= ACKs for ids that are no longer visible in the platform UI/book, without showing which source selected the id.
+
+Fix direction:
+- Use live REST open/trigger sources first.
+- Use DB fallback only when live REST lookup fails, not merely when it returns an empty list.
+- Include candidate source in the output for each cancelled id.
+- Include cancel errors in the JSON instead of silently dropping them.
+- Add tests covering empty live book plus stale DB rows, live REST failure plus DB fallback, and source-labelled output.
+
 * Useful Kraken Commands
 
 #+begin_src bash

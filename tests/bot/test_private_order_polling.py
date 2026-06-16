@@ -407,7 +407,7 @@ def test_private_order_poller_retries_fresh_unmatched_head_fill() -> None:
     assert emitted[0].kind.value == "played_and_canceled"
 
 
-def test_private_order_poller_prunes_stale_unmatched_records(caplog) -> None:
+def test_private_order_poller_prunes_stale_unmatched_records() -> None:
     now = datetime.now(timezone.utc)
     stale_record = PrivateOrderRecord(
         symbol="PI_XBTUSD",
@@ -465,11 +465,9 @@ def test_private_order_poller_prunes_stale_unmatched_records(caplog) -> None:
         )
     )
 
-    with caplog.at_level("INFO", logger="kola"):
-        asyncio.run(source.pump(_Runtime()))
+    asyncio.run(source.pump(_Runtime()))
 
     assert source._pending_records == []
-    assert "PRIVATE_PENDING_PRUNED" in caplog.text
 
 
 def test_private_order_poller_matches_tail_identity_as_tail_role() -> None:

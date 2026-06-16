@@ -1,0 +1,24 @@
+######  ########### ######### ######## ####### ##### ###### ##### ###### ####### ###### ####### ####### ####### ###### ##########################################
+exchg	symbol	name	tps_run	essais	tOut	pause	side	oType	oDelta	qty	tType	tDelta	prix	tp	hook
+
+# KRKF	PF_ADAUSD	RB_SEL2	0 1440	*	6	0	sell	LTm		A10	SLm		D- +	%1.1	UP_BUY2-tail-closed
+# KRKF	PF_ADAUSD	RB_SEL	0 1440	*	4	0	sell	LTm		A8	SLm		D- +	%.9	UP_BUY-tail-closed
+
+KRKF	PF_ADAUSD	UP_BUY3	0 1440	*	6	1	buy	Sm	%1.4	A16	Sm		D- +	%1.6
+# KRKF	PF_ADAUSD	UP_BUY2	0 1440	*	4	.6	buy	Sm	%1.1	A14	Sm		D- +	%1.4
+KRKF	PF_ADAUSD	UP_BUY	0 1440	*	1	.1	buy	Sm	%1	A12	Sm		D- +	%1.2
+
+###### ########### ######### ######## ####### ##### ###### ##### ###### ####### ###### ####### ####### ####### ###### ######### Market Price #################
+
+KRKF	PF_ADAUSD	DW_SEL	0 1440	*	1	.1	sell	Sm	%1.1	A9	Sm		D- +	%1.3
+# KRKF	PF_ADAUSD	DW_SEL2	0 1440	*	4	.6	sell	Sm	%1.2	A11	Sm		D- +	%1.5
+KRKF	PF_ADAUSD	DW_SEL3	0 1440	*	6	1	sell	Sm	%1.5	A13	Sm		D- +	%1.7
+
+# KRKF	PF_ADAUSD	RB_BUY2	0 1440	*	6	0	buy	LTm		A15	SLm		D- +	%1	DW_SEL2-tail-closed
+# KRKF	PF_ADAUSD	RB_BUY	0 1440	*	4	0	buy	LTm		A17	SLm		D- +	%.8	DW_SEL-tail-closed
+
+
+################
+# sell
+
+# BMM ADA live grammar:

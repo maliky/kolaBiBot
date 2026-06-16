@@ -499,16 +499,13 @@ class KrakenPrivateOrderPollingSource:
                     for record in fill_records
                 )
                 self._advance_cursor(cursor, records, fill_records)
-            candidates, pruned_duplicate = self._dedupe_pending_candidates(candidates)
-            pruned_expired = 0
+            candidates, _ = self._dedupe_pending_candidates(candidates)
             for pending_record in candidates:
                 record = pending_record.record
                 resolved = runtime.pair_state_for_record(record)
                 if resolved is None:
                     if self._pending_record_still_fresh(pending_record, now):
                         self._pending_records.append(pending_record)
-                    else:
-                        pruned_expired += 1
                     continue
                 pair_state, role = resolved
                 fact = private_order_fact_from_record(
@@ -560,21 +557,7 @@ class KrakenPrivateOrderPollingSource:
                             f"orderID={order_id} grace_seconds={self.head_fill_reference_grace_seconds:g}"
                         )
                 await runtime.enqueue(replace(move, event_id=event_id))
-            pruned_limit = self._trim_pending_records()
-            pruned_total = pruned_duplicate + pruned_expired + pruned_limit
-            if pruned_total:
-                oldest = min(
-                    (item.first_seen_at for item in self._pending_records),
-                    default=None,
-                )
-                _LOGGER.info(
-                    "PRIVATE_PENDING_PRUNED %s",
-                    _runtime_fields(
-                        pruned_total,
-                        len(self._pending_records),
-                        "-" if oldest is None else oldest.isoformat(),
-                    ),
-                )
+            self._trim_pending_records()
             if _runtime_sources_should_stop(runtime):
                 return
             await asyncio.sleep(self.poll_seconds)
