@@ -1,5 +1,13 @@
 strategies.org
 bmm_ada.tsv
+orders/*
+!orders/
+!orders/EXAMPLE.org
+!orders/demo_ada.tsv
+!orders/demo_cross_exchange_chain.tsv
+!orders/demo_kraken_xbt.tsv
+!orders/new_parse_grammar.tsv
+!orders/pi_xbtusd_sell_plus1_tail_0p5.tsv
 *log
 logs/*
 *.err
