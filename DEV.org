@@ -1,6 +1,26 @@
 #+TITLE: kolaBiBot
 #+OPTIONS: toc:2 num:nil
 
+* <2026-06y-16 mar. 19:40> market-making adjustment
+In order to have market makers, even in a simple state, we need a way to adjust orders to their fill frequency.
+
+We work with pairs, and a failed market-making attempt is when the tail is filled without having been updated. In that case, we should have a way to reduce the frequency of that failed order type.
+
+The idea is to adjust the pair =tOut=. If a pair fails, then =tOut= and the pause are adjusted.
+For example, if =tOut= is 1 minute and the pause is 1 minute, and the pair fails after waiting x times, then the pause can be adjusted by d with d an asymetric  function of x (ressembly the s shape curve of daniel kaneham in thinking fast and slow) with a range of roughly -1 1 and a x in 0 +.  We do not know when the tail will be failed filled (if ever) so we could bound this considering that any tail filled after time  t adjust tout by a fixe %. This could depend on the factors of xh the time for the head to get filled and tpd the tail price distance..
+the head filled after bout 20% of its living time, and the tail price is set at 
+
+Given our slow bot, the minimum =tOut= should probably be around 30 seconds, so the maximum pause should be 1 minute 30 seconds. Between those bounds, we can have any =tOut= and complementary pause length (kind of liptchisienne)
+
+This adjustment the time delta between the order reaching the market and the time it is filled (failed fill). In that case, it should be an inverse function, meaning that the shorter the time to fill, the longer we should extend the pause.
+
+The adjustment function should have a 0 to 1 domain and a 0 to 1 range, with an S shape similar to the one we use to shrink the tail distance. To make it direct rather than inverse, say that the longer we wait for the fill, with a maximum of 1 minute, the less we remove from =tOut=. In fact, we can centre the S curve at 30 seconds. If we wait less than 30 seconds, =tOut= is reduced. More precisely, if we wait less than half of the run time, we shrink the run time. If we wait more than half of the run time, we increase the run time, with a maximum of 1.5 minutes and a minimum of 30 seconds.
+
+As you can see, this is done independently from the other side, and is autonomous for one pair.
+
+It could be implemented by changing the =tOut= strategy parameter, making it a range, in our case 0.5 to 1.5, plus a standard adjustment function. The check to make is that the pause, or possibly the default pause, should match the amplitude of the configured timeout.
+
+
 * DONE <2026-05-26 Tue 18:08>
   CLOSED: [2026-05-28 Thu 10:05]
 
@@ -79,7 +99,7 @@ for a stop buy:
 for a stop sell:
   t_{n+1} = t_n + f(r) * d'_{n+1}
   
-* <2026-05-20 Wed 16:18> Vocab
+* Vocabulary
  - Hooked order :: ready to submit.
  - Sent order :: produced from hooked order and sent to the exchange; REST reply not yet known.
  - Unadmitted order :: sent order with REST error reply.
@@ -90,6 +110,47 @@ for a stop sell:
  - =Submitted= -> =Unadmitted= on REST error
  - =Submitted= -> =Admitted= on REST ACK
  - =Admitted -> Confirmed= on private DB confirmation
+
+a lease ?
+** Runtime log keywords
+These are runtime/operator log labels, not exchange feed labels. Each entry says when the keyword appears and what it means for the operator.
+
+- Arms a latent timeout :: (LATENT_TIMEOUT_ARMED) Appears when a timeout is started for a latent head that is waiting on a trigger or gate.
+- Blocks an unsafe order action :: (ORDER_SAFETY_BLOCKED) Appears when the runtime or admin cleanup cannot safely act, usually because identity or ownership evidence is missing.
+- Closes a known live order lease :: (LEASE_CLOSED) Appears when private exchange evidence marks a tracked lease closed, cancelled, or filled.
+- Confirms a head closure :: (HEAD_CANCELLED) Appears on the private confirmation that the head closed or cancelled; played quantity is recorded for tail decisions.
+- Confirms an orphan closed :: (ORPHAN_CLOSED) Appears when startup cleanup observes that an orphan order is no longer open.
+- Confirms tail visibility :: (TAIL_VISIBLE) Appears after a previously pending tail becomes visible in private exchange state.
+- Evaluates a price gate :: (GATE_WAIT-2) Appears when a latent head is checked against the market price; it can mean the gate is ready, still waiting, outside the trigger, or missing a baseline price.
+- Finds an orphan order :: (ORPHAN_FOUND) Appears at service startup when an exchange order still looks open but is not owned by the fresh runtime state.
+- Ignores a stale head cancel acknowledgement :: (HEAD_CANCEL_ACK_STALE) Appears when an ACK belongs to an older head attempt and must not affect the current attempt.
+- Introduces the field order for a runtime label :: (LEGEND--KEYWORD) Appears once near runtime startup; it gives the field names used by later lines with the same keyword.
+- Makes a repeat ready :: (REPEAT_READY) Appears when the repeat pause has elapsed and the repeated pair is back at its gate/launch step.
+- Marks a lease as awaiting cancel confirmation :: (CANCEL_PENDING) Appears after the runtime sends a cancel against a tracked lease and waits for private closure evidence.
+- Receives head admission :: (HEAD_ACK) Appears after the exchange adapter acknowledges the head placement; the runtime can then arm fill and visibility timers.
+- Records a state change :: (UPDATE) Appears when a pair, side, status, quantity, or stop value changes; it is the broad lifecycle trace.
+- Rejects a tail amend :: (AMEND_REJECTED) Appears when the exchange or adapter rejects the amend; the runtime should keep or restore the confirmed stop value.
+- Releases a chained pair :: (CHAIN_READY) Appears when an upstream close or fill satisfies a dependency and a hooked downstream pair can become active.
+- Reports a command execution failure :: (COMMAND_FAILED) Appears when a runtime command raised inside the executor; it flags exchange or adapter failure around the attempted action.
+- Reports a gate check error :: (GATE_WAIT-ERR) Appears when runtime cannot fetch or interpret market state for a gate check; the head remains latent.
+- Reports tail telemetry :: (METRICS) Appears while a tail is living, submitted, or hooked; it records values used to judge trailing and amend behaviour.
+- Retries a cancel :: (CANCEL_RETRY) Appears when a lease stayed open beyond the cancel retry window; the runtime sends another cancel request.
+- Schedules a repeat :: (REPEAT_WAIT) Appears after a completed pair is scheduled to restart after its pause.
+- Sends a cancel command :: (CANCEL_SENT) Appears when a cancel is sent for a reason other than the direct head-timeout path.
+- Sends a head order :: (HEAD_SENT) Appears when the runtime dispatches the head placement command to the exchange adapter.
+- Sends a head timeout cancel :: (HEAD_CANCEL_SENT) Appears when the runtime sends the cancel caused by =HEAD_TIMEOUT=.
+- Sends a tail amend :: (AMEND_SENT) Appears when the runtime sends a stop/price amend for a live tail; it records the current and desired values.
+- Sends an orphan cancel :: (ORPHAN_CANCEL_SENT) Appears when startup cleanup sends a cancel for an orphan order.
+- Starts a repeat :: (REPEAT_START) Appears when the repeated pair emits its next commands.
+- Suppresses a replace-cancel side effect :: (AMEND_REPLACE_CANCEL_SUPPRESSED) Appears during cancel-replace amend handling when the cancel half should not be treated as a real tail close.
+- Times out a latent head :: (LATENT_TIMEOUT) Appears when a latent head waited too long before becoming placeable; the runtime abandons or advances according to the pair rules.
+- Times out a live head :: (HEAD_TIMEOUT) Appears when a head exceeded its configured =tOut= window; the next expected action is cancellation.
+- Tracks one known live order lease :: (LEASE_OPEN) Appears when the runtime opens or observes a live head or tail order identity; it means the runtime is responsible for tracking and eventually closing that lease.
+- Waits for head capacity :: (HEAD_WAIT) Appears when a head is otherwise ready but the maximum number of active heads is already reached.
+- Waits for tail amend confirmation :: (AMEND_PENDING) Appears when an amend did not confirm by the configured deadline.
+- Waits for tail visibility :: (TAIL_PENDING) Appears when a tail placement was sent but private visibility did not confirm the tail by the deadline.
+- Waits on a latent gate prerequisite :: (GATE_WAIT-1) Appears while a latent head is still blocked by its hook dependency or start-time window.
+- Warns that head visibility is pending :: (HEAD_VISIBILITY_PENDING) Appears when placement was acknowledged but private visibility did not arrive before the visibility timeout.
 
 ** Five-layer lists
 *** Layer 1 — Raw Kraken/order reasons classified
@@ -206,17 +267,6 @@ for a stop sell:
    - not a base order state.
    - sized according to the final confirmed played quantity of the head.
 
-** Answer about the current code
-
- 4. =OrderState = HeadState= is still a compatibility alias, so general order state and head-specific state are still collapsed.
- 5. =Admitted= in the code seems to mean REST ACK, which matches your latest clarification, but the intermediate “sent without REST reply” stage is not represented.
-
- So the next code change is not “create TailMode.” It is more likely:
-
- - add =SENT= and =UNSUBMITTED=;
- - decide whether =PRIMARY= should become =HEAD=;
- - separate =BaseOrderState= from =HeadState= if you want the five-layer model to be enforced cleanly.
-
 * <2026-05-20 mer. 08:52>
 
 | Head outcome                                       | Fill | Tail allowed?                       |
@@ -228,208 +278,6 @@ for a stop sell:
 | ordinary user/admin cancel before play             |    0 | no                                  |
 | exchange technical failure / margin failure        |    0 | no                                  |
 
-* <2026-05-19 mar. 20:33>
-
-
-** DONE 4. Corrected architecture
-   CLOSED: [2026-05-19 mar. 20:47]
-
-#+begin_src text
-TSV
-  -> tsv/parser.py
-     -> StrategySpec / Dragon
-        -> OrderPairSpec / DragonPollen
-
-DB monitors
-  -> PublicFact / PrivateFact
-     -> Chronos
-        owns StrategyState[pair_id -> PairCycleState]
-        routes facts into PairEvent
-        calls step_strategy()
-          calls step_pair()
-          returns RuntimeCommand(s)
-
-Ogun
-  receives RuntimeCommad
-  converts to exchange-specific payload
-  sends REST write command
-  records REST ack
-  waits for / correlates private DB confirmation
-
-Private DB update
-  -> CommandConfirmation / PairEvent
-     -> back to Chronos
-#+end_src
-
-** DONE Multi-instrument TSV support on one platform
-   CLOSED: [2026-06-05 ven.]
-
-Goal: allow one TSV file to contain several instruments while keeping one platform per bot run. This was the first route step and is superseded by multi-exchange TSV support below.
-
-Implementation status:
-- =OrderPairSpec= and =OrderIdentity= carry optional =symbol=.
-- TSV files may add an optional final =symbol= column after =hook=; old TSV files stay valid.
-- =BotService= materializes effective symbols, validates duplicate pair names, validates instrument rules per symbol, and requires a shared market DB for active multi-symbol runs.
-- =StrategyRuntime= groups public polling by active symbol, keeps private order/fill cursors per symbol, and rejects wrong-symbol private rows.
-- =SymbolRoutingExchangePort= routes place, amend, and cancel commands to symbol-bound adapters while keeping one platform and account scope per process.
-- Reducer identities preserve symbol once order lifecycle events confirm head or tail identity.
-
-Former state:
-- =kolabi.bot run= receives one global =--exchange=, =--environment=, =--market-type=, and optional =--symbol=.
-- Every TSV row becomes an =OrderPairSpec= without its own symbol.
-- =BotService= validates one instrument and =StrategyRuntime= polls public/private state for one symbol.
-- Commands already carry a symbol, but today that symbol is filled from the global runtime symbol.
-
-Target design:
-- Superseded by multi-exchange TSV routing: one strategy can now carry several =exchange=, =market_type=, and =symbol= routes. =environment= and =account_scope= remain process-wide runtime defaults.
-- Add optional TSV column =symbol= after =hook=.
-- If =symbol= is empty or absent, use the effective CLI symbol for backward compatibility. When CLI =--symbol= is omitted, derive the symbol from =--exchange= and =--market-type= using route defaults.
-- Each pair has an effective symbol before runtime starts.
-- Pair name stays the logical identity and must remain unique across the whole TSV.
-
-** DONE Multi-exchange TSV route support
-   CLOSED: [2026-06-10 mer.]
-
-Goal: allow chained order strategies across supported exchanges using one TSV route column and native exchange symbols.
-
-Implementation status:
-- TSV rows may add optional =exchg= and =symbol= columns. The legacy =exchange= spelling is still accepted as an alias.
-- Route codes are explicit: =KRKF= =KRKS= =KRKM=, =BINF= =BINS= =BINM= =BINI=, =BTX= =BTXF= =BTXS=, with =BMXF= =BMXS= kept as aliases.
-- =ExchangeRoute= is the runtime identity for exchange, market type, and symbol.
-- =SymbolRoutingExchangePort= routes place, amend, and cancel commands by full route, not just symbol.
-- =get_adapter()= rejects unsupported exchange/market lanes before REST calls.
-- Public and private DB rows are scoped by =exchange=, =environment=, =market_type=, =account_scope=, and =symbol= so chained orders cannot consume another route's evidence.
-- Operators start one feeder per active route with =scripts/kolabidb --exchange ... --market-type ... public/private start=.
-
-Pure model changes:
-- Add =symbol: str | None = None= to =OrderPairSpec=.
-- Keep =Chronos=, =Isis=, and =step_pair()= pure and narrow.
-- Do not put exchange routing or DB lookup logic in reducers.
-- Events and commands should carry the pair effective symbol at the runtime boundary.
-
-TSV parser changes:
-- Accept both old and new TSV headers.
-- Legacy compact header:
-  =name tps_run essais tOut pause side oType oDelta tType tDelta atype quantity tp prix hook=
-- Active typed header:
-  =exchg symbol name tps_run essais tOut pause side oType oDelta qty tType tDelta prix tp hook=
-- Blank =symbol= means use the run default.
-- Parser tests must cover old files, new files, and blank symbol fallback.
-
-Runtime changes:
-- =BotService= materializes pair symbols before validation and runtime creation.
-- Startup readiness checks public market freshness for every symbol used in the strategy.
-- Private websocket readiness remains platform-level.
-- Public source groups active pairs by symbol and calls =fetch_market_state(symbol)= once per symbol per poll tick.
-- Market events use the pair symbol.
-- Private polling keeps independent order/fill cursors per symbol so one active symbol cannot advance the cursor past another symbol's rows.
-- Private record matching requires order identity and symbol.
-
-Ogun/exchange boundary:
-- Commands already carry =command.symbol=; this becomes authoritative.
-- Replace the single-symbol adapter port with a one-platform symbol router.
-- =SymbolRoutingExchangePort= caches one existing adapter per symbol using the same credentials, base URL, environment, and DB URLs.
-- Ogun remains unchanged and receives one =ExchangePort=.
-- The router chooses the per-symbol adapter for place, amend, and cancel commands.
-
-Validation:
-- Validate Kraken instrument rules per distinct symbol.
-- Minimum quantity checks use the row symbol.
-- Tick size used by tail tracking and rounding must come from the row symbol.
-- If public DB has no fresh snapshot for a TSV symbol, fail startup with a clear list of missing or stale symbols.
-
-Operational requirement:
-- Public market ingestion must already run for every symbol used in the TSV.
-- This can be one poller per symbol now.
-- A future multi-symbol public poller is useful but not required for this step.
-
-Tests:
-- Old TSV without =symbol= parses unchanged.
-- TSV with =symbol= stores pair-specific symbols.
-- Duplicate pair names are rejected even if symbols differ.
-- Two latent pairs on different symbols trigger two public reads.
-- Commands emitted for each pair carry the pair-specific symbol.
-- Private fills/orders from the wrong symbol do not close or amend a pair.
-- Tail placement and tail amendments use reference prices and tick size from the pair symbol.
-- Symbol router dispatches =PI_XBTUSD= and =PI_ETHUSD= commands to separate symbol-bound adapters.
-
-Non-goals:
-- No cross-platform arbitrage yet.
-- No TSV =exchange= or =environment= columns yet.
-- No cross-symbol price formula yet.
-- No exchange logic inside =Isis= or =step_pair()=.
-** DONE 6. Corrected metaphor table
-   CLOSED: [2026-05-19 mar. 20:51]
-
-| Type                  | Purpose                                | Metaphor       |
-|-----------------------+----------------------------------------+----------------|
-| =StrategySpec=        | One strategy loaded from TSV           | =Dragon=       |
-| =StrategySet=         | Collection of strategies               | =DragonGrove=  |
-| =OrderPairSpec=       | One TSV row: head plan + tail plan     | =DragonPollen= |
-| =PairCycleState=      | Runtime lifecycle of one pair          | =DragonEgg=    |
-| =PairActor=           | Async process for one pair             | =DragonFly=    |
-| =PairEvent=           | Domain event consumed by reducer       |                |
-| =RuntimeCommand=      | Command emitted by reducer             | =OgunBang=     |
-| =CommandAck=          | REST response                          | =OgunAck=      |
-| =CommandConfirmation= | Private DB confirmation                | =Echo=         |
-| =Chronos=             | Strategy supervisor / time coordinator | =Chronos=      |
-| =Ogun=                | Command executor / exchange writer     | =Ogun=         |
-
-** DONE 7. Corrected event table
-   CLOSED: [2026-05-19 mar. 21:00]
-
-| <20>                    | <10>                       | <20>                                        | <90>                                                                                        |
-| Event                   | Source                     | Meaning                                     | Correction                                                                                  |
-|-------------------------+----------------------------+---------------------------------------------+---------------------------------------------------------------------------------------------|
-| =StrategyLoaded=        | TSV parser                 | Strategy loaded                             | OK.                                                                                         |
-| =PairWindowOpened=      | clock / scheduler          | Pair becomes time-eligible                  | OK.                                                                                         |
-| =PriceConditionMet=     | public DB                  | Price rule satisfied                        | OK.                                                                                         |
-| =HookConditionMet=      | public/private DB          | Hook source condition satisfied             | OK.                                                                                         |
-| =HeadHooked=            | Chronos/reducer            | Head locally eligible for submission        | =.                                                                                          |
-| =HeadAdmitted=          | REST ack via Ogun          | REST write accepted                         | OK.                                                                                         |
-| =HeadConfirmedNew=      | private DB                 | Head exists on platform                     | OK.                                                                                         |
-| =HeadPartiallyFilled=   | private DB                 | Head partly filled                          | OK.                                                                                         |
-| =HeadFilled=            | private DB                 | Head fully filled                           | OK.                                                                                         |
-| =HeadCanceledZeroFill=  | private DB                 | No exposure from head                       | Your table says “tail needed”; fix to “tail usually not needed unless explicit chain rule”. |
-| =HeadCanceledAfterFill= | private DB                 | Head ended with exposure/played quantity    | OK, but tail may be for protection or chained entry.                                        |
-| =HeadFailed=            | private DB / command error | Invalid/rejected head                       | Remove duplicate row.                                                                       |
-| =TailMaterialized=      | reducer                    | Tail order details computed after head info | Add this; it solves your TailPlan concern.                                                  |
-| =TailHooked=            | reducer/internal           | Tail locally eligible                       | OK.                                                                                         |
-| =TailAdmitted=          | REST ack via Ogun          | Tail REST write accepted                    | OK.                                                                                         |
-| =TailConfirmed=         | private DB                 | Tail exists on platform                     | OK.                                                                                         |
-| =TailAmendRequested=    | reducer/internal           | Existing tail should be amended             | OK.                                                                                         |
-| =TailAmended=           | private DB                 | Amendment confirmed                         | OK.                                                                                         |
-| =TailClosed=            | private DB                 | Tail terminal                               | OK.                                                                                         |
-| =DuplicateEventIgnored= | reducer/internal           | Idempotency no-op                           | OK.                                                                                         |
-
-** DONE 8. Important correction about tail purpose
-   CLOSED: [2026-05-19 mar. 21:02]
-
-Tail is not only exposure protection.
-
- #+begin_src text
- A tail is a dependent order whose materialization depends on a prior order/event.
- Most tails protect exposure, but some tails are chained-entry or strategy-continuation orders.
- #+end_src
-- tail materializes from played/canceled/filled condition
-- zero-fill cancel creates tail only if chain rule explicitly allows it
-- tail quantity equals the rule-defined quantity, often played quantity
-
-create dataclass for pairevent but call it EggMove
-
-** DONE 10. Immediate design decisions for you
-   CLOSED: [2026-05-19 mar. 21:07]
-
-| Decision                                      | My recommendation                                                                             |
-|-----------------------------------------------+-----------------------------------------------------------------------------------------------|
-| Should =Chronos= be the strategy coordinator? | Yes.                                                                                          |
-| Should =Ogun= execute commands?               | Yes.                                                                                          |
-| Should =DragonFly= mean pair actor?           | Yes, if you use one async task per pair.                                                      |
-| Should =PairCycle= be renamed =DragonFly=?    | No. Keep PairCycle                                                                            |
-| Should =OrderDict= be =DragonEgg=?            | No.                                                                                           |
-| Should tail be fully known from TSV?          | No. TSV defines =TailPlan=. Final =TailOrder= is materialized after head event.               |
-| Should DB monitor fire commands?              | No. DB monitor emits facts; =Chronos= routes events; reducer emits commands; =Ogun= executes. |
-
 * <2026-05-19 mar. 17:38>
 
  #+begin_src text
@@ -437,7 +285,6 @@ create dataclass for pairevent but call it EggMove
  "Call the command interpreter over typed commands/events Ogun"
  #+end_src
 
-** Questions to guide the design
 ** Vocabulary
  Strategysupervisor Chronos
  Executer of RuntimeCommand Ogun
@@ -932,16 +779,6 @@ PGPASSWORD="$KOLABI_POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$KOLABI_POSTGRES_PO
   "SELECT symbol, tick_size, contract_size, min_quantity, instrument_type, tradeable, updated_at FROM exchange_instruments WHERE symbol = 'PI_XBTUSD';"
 #+END_SRC
 
-** TODO Make =cancel-all= source-aware and live-first
-
-Current =python -m kolabi.bargain.cli ... cancel-all= returns cancel ACKs, not a pre-cancel book snapshot. The command currently gathers candidates from =live_open_orders=, =live_trigger_orders=, =open_orders=, and =live_trigger_orders_db=. On Kraken futures, =open_orders()= prefers local DB rows when any exist, and =live_trigger_orders_db()= can add stale DB trigger candidates. This means =cancel-all= can report =Canceled= ACKs for ids that are no longer visible in the platform UI/book, without showing which source selected the id.
-
-Fix direction:
-- Use live REST open/trigger sources first.
-- Use DB fallback only when live REST lookup fails, not merely when it returns an empty list.
-- Include candidate source in the output for each cancelled id.
-- Include cancel errors in the JSON instead of silently dropping them.
-- Add tests covering empty live book plus stale DB rows, live REST failure plus DB fallback, and source-labelled output.
 
 * Useful Kraken Commands
 
