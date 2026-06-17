@@ -10,6 +10,21 @@ from kolabi.bot.tsv import order_pair_from_legacy_values, read_strategy_file
 from pytest_bdd import given, scenario, then, when
 
 
+def _write_equivalent_tsv(tmp_path: Path) -> Path:
+    path = tmp_path / "one_pair.tsv"
+    path.write_text(
+        "\n".join(
+            [
+                "name\ttps_run\tessais\ttOut\tpause\tside\toType\toDelta\ttType\ttDelta\tatype\tqty\ttp\tprix\thook",
+                "XSellTail\t0 1440\t1\t60\t\tsell\tL\t\tS-\t\tqAt%pD\t1\t0.5\t1 2\t",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 @scenario("features/strategy_spec_monolith.feature", "TSV row maps to canonical StrategySpec")
 def test_tsv_row_maps_to_canonical_strategy_spec() -> None:
     pass
@@ -39,8 +54,8 @@ def test_lifecycle_vocabulary_contracts() -> None:
 
 
 @given("a valid TSV strategy row payload", target_fixture="payload")
-def given_valid_tsv_payload() -> Path:
-    return Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")
+def given_valid_tsv_payload(tmp_path: Path) -> Path:
+    return _write_equivalent_tsv(tmp_path)
 
 
 @given("a valid run-once argument payload", target_fixture="payload")
@@ -65,9 +80,9 @@ def given_valid_run_once_payload() -> argparse.Namespace:
 
 
 @given("equivalent TSV and run-once payloads", target_fixture="payloads")
-def given_equivalent_payloads() -> tuple[Path, argparse.Namespace]:
+def given_equivalent_payloads(tmp_path: Path) -> tuple[Path, argparse.Namespace]:
     return (
-        Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"),
+        _write_equivalent_tsv(tmp_path),
         argparse.Namespace(
             name="XSellTail",
             tps_run=[0.0, 1440.0],

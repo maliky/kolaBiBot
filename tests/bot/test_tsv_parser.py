@@ -67,9 +67,21 @@ def test_new_typed_field_grammar_parses_and_ignores_empty_columns(tmp_path: Path
     assert strategy.pairs[1].tail_price_spec_type == "t%"
 
 
-def test_new_typed_field_grammar_rejects_untyped_non_empty_values() -> None:
+def test_new_typed_field_grammar_rejects_untyped_non_empty_values(tmp_path: Path) -> None:
+    path = tmp_path / "new_parse_grammar.tsv"
+    path.write_text(
+        "\n".join(
+            [
+                "exchg\tsymbol\tname\ttps_run\tessais\ttOut\tpause\tside\toType\toDelta\tqty\ttType\ttDelta\tprix\ttp\thook",
+                "KRKF\tPI_XBTUSD\tBAD\t0 1440\t1\t6\t\tsell\tL\t6\tA1\tS-\t\tD- +\tD20\t",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     with pytest.raises(ValueError, match="oDelta value '6' must start"):
-        read_strategy_file(Path("orders/new_parse_grammar.tsv"))
+        read_strategy_file(path)
 
 
 def test_new_typed_field_grammar_allows_empty_optional_values(tmp_path: Path) -> None:
@@ -94,6 +106,47 @@ def test_new_typed_field_grammar_allows_empty_optional_values(tmp_path: Path) ->
     assert pair.head_price_type == "pD"
     assert pair.tail_price_spec is None
     assert pair.tail_price_spec_type == "tD"
+    assert pair.tail_unblock_spec is None
+    assert pair.tail_unblock_spec_type == "uD"
+
+
+def test_tublk_typed_field_parses_distance_and_percent(tmp_path: Path) -> None:
+    path = tmp_path / "tublk.tsv"
+    path.write_text(
+        "\n".join(
+            [
+                "exchg\tsymbol\tname\ttps_run\tessais\ttOut\tpause\tside\toType\toDelta\tqty\ttType\ttDelta\tprix\ttp\ttUblk\thook",
+                "KRKF\tPI_XBTUSD\tDIST\t0 1440\t1\t6\t\tsell\tL\tD6\tA1\tS-\t\tD- +\tD20\tD5\t",
+                "KRKF\tPI_ADAUSD\tPCT\t0 1440\t1\t6\t\tbuy\tL\t%0.20\tA1\tS-\t\tD- +\t%0.10\t%0.2\tDIST-tail-closed",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    strategy = read_strategy_file(path)
+
+    assert strategy.pairs[0].tail_unblock_spec == 5.0
+    assert strategy.pairs[0].tail_unblock_spec_type == "uD"
+    assert strategy.pairs[1].tail_unblock_spec == 0.2
+    assert strategy.pairs[1].tail_unblock_spec_type == "u%"
+
+
+def test_tublk_rejects_untyped_non_empty_value(tmp_path: Path) -> None:
+    path = tmp_path / "bad_tublk.tsv"
+    path.write_text(
+        "\n".join(
+            [
+                "name\ttps_run\tessais\ttOut\tpause\tside\toType\toDelta\tqty\ttType\ttDelta\tprix\ttp\ttUblk\thook",
+                "BAD\t0 1440\t1\t6\t\tsell\tL\tD6\tA1\tS-\t\tD- +\tD20\t5\t",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="tUblk value '5' must start"):
+        read_strategy_file(path)
 
 
 def test_head_limit_price_suffix_is_valid(tmp_path: Path) -> None:

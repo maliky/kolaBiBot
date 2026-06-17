@@ -278,6 +278,15 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         help="Difference between trigger price and tail stop price.",
     )
     parser.add_argument(
+        "--tUblk",
+        type=str,
+        default=None,
+        help=(
+            "Tail first-unblock favourable movement. Use D for nominal distance "
+            "or %% for percent of the head-fill reference, for example D5 or %%0.2."
+        ),
+    )
+    parser.add_argument(
         "--nbEssais",
         "-n",
         type=int,

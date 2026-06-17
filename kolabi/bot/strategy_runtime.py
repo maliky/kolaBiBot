@@ -58,6 +58,7 @@ from kolabi.bot.pricing import (
     tail_reference_price,
 )
 from kolabi.bot.telemetry import TailTelemetryRow
+from kolabi.bot.tail_tracking import tail_unblock_requirement
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
@@ -1330,8 +1331,10 @@ class StrategyRuntime:
                 continue
             current_distance = _tail_signed_distance(pair_state, to_decimal(ref), stop)
             spread_guard = pair_state.tail_trail.max_observed_spread
-            unblock_requirement = (
-                Decimal("2") * pair_state.tail_trail.baseline_width + spread_guard
+            unblock_requirement = tail_unblock_requirement(
+                pair_state.pair,
+                pair_state.tail_trail,
+                spread_guard,
             )
             rows.append(
                 TailTelemetryRow(

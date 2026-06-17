@@ -716,7 +716,8 @@ usage: kolabi.bot run-once [-h] [--exchange EXCHANGE] [--symbol SYMBOL]
                            [--tOut TOUT] [--drPause DRPAUSE]
                            [--prix PRIX PRIX] [--quantity QUANTITY]
                            [--tailPrice TAILPRICE] [--oDelta ODELTA]
-                           [--tDelta TDELTA] [--nbEssais NBESSAIS]
+                           [--tDelta TDELTA] [--tUblk TUBLK]
+                           [--nbEssais NBESSAIS]
                            [--oType OTYPE] [--tType TTYPE] [--side SIDE]
                            [--aType ATYPE] [--Hook HOOK]
 
@@ -762,6 +763,8 @@ options:
                         Tail thickness using the compatibility aType semantics. Default interpretation is percent unless aType contains tA or tD.
   --oDelta, -d ODELTA   Difference between trigger price and order price.
   --tDelta, -s TDELTA   Difference between trigger price and tail stop price.
+  --tUblk TUBLK         Tail first-unblock favourable movement. Use D for nominal distance or % for percent of the head-fill reference, for example D5 or %0.2.
+                        Once unblocked, the first managed tail update jumps to the profit side of entry by four ticks plus the observed spread.
   --nbEssais, -n NBESSAIS
                         Number of attempts.
   --oType, -o OTYPE     Main order type in the compatibility vocabulary. Examples: M = Market, L = Limit, S = Stop, SL = StopLimit, MT = MarketIfTouched, LT = LimitIfTouched.

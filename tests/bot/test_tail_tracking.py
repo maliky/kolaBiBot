@@ -11,7 +11,14 @@ from kolabi.bot.tail_tracking import (
 )
 
 
-def sample_pair(*, side: Side, tail: float = 1.0, tail_type: str = "t%") -> OrderPairSpec:
+def sample_pair(
+    *,
+    side: Side,
+    tail: float = 1.0,
+    tail_type: str = "t%",
+    tail_unblock: float | None = None,
+    tail_unblock_type: str = "uD",
+) -> OrderPairSpec:
     return OrderPairSpec(
         name="pair-a",
         window=TimeWindow(start_minutes=-1.0, end_minutes=10.0),
@@ -27,6 +34,8 @@ def sample_pair(*, side: Side, tail: float = 1.0, tail_type: str = "t%") -> Orde
         tail_price_spec=tail,
         tail_price_spec_type=tail_type,
         amount_type=f"qA{tail_type}pD",
+        tail_unblock_spec=tail_unblock,
+        tail_unblock_spec_type=tail_unblock_type,
     )
 
 
@@ -106,6 +115,100 @@ def test_sell_tail_first_unblock_wait_adds_max_observed_spread() -> None:
     assert unblocked.max_observed_spread == Decimal("1")
     assert moved.current_stop_price > trail.current_stop_price
     assert moved.max_observed_spread == Decimal("1")
+
+
+def test_sell_tail_tublk_distance_unblocks_before_default_tail_distance() -> None:
+    now = datetime.now(timezone.utc)
+    default_pair = sample_pair(side=Side.BUY, tail=1.0, tail_type="tD")
+    tublk_pair = sample_pair(
+        side=Side.BUY,
+        tail=1.0,
+        tail_type="tD",
+        tail_unblock=0.5,
+    )
+    default_trail = initial_tail_trail(default_pair, Decimal("100"), now)
+    tublk_trail = initial_tail_trail(tublk_pair, Decimal("100"), now)
+    cfg = TailTrailingConfig(first_unblock_delay_seconds=0)
+
+    default_moved = step_tail_trail(
+        default_pair,
+        default_trail,
+        Decimal("100.6"),
+        now + timedelta(seconds=7),
+        config=cfg,
+    )
+    tublk_moved = step_tail_trail(
+        tublk_pair,
+        tublk_trail,
+        Decimal("100.6"),
+        now + timedelta(seconds=7),
+        config=cfg,
+    )
+
+    assert default_moved.current_stop_price == default_trail.current_stop_price
+    assert tublk_moved.current_stop_price > tublk_trail.current_stop_price
+
+
+def test_sell_tail_tublk_wait_adds_max_observed_spread() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(
+        side=Side.BUY,
+        tail=1.0,
+        tail_type="tD",
+        tail_unblock=0.5,
+    )
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    cfg = TailTrailingConfig(first_unblock_delay_seconds=0)
+
+    blocked = step_tail_trail(
+        pair,
+        trail,
+        Decimal("100.6"),
+        now + timedelta(seconds=7),
+        spread=Decimal("0.2"),
+        config=cfg,
+    )
+    moved = step_tail_trail(
+        pair,
+        blocked,
+        Decimal("100.8"),
+        now + timedelta(seconds=14),
+        spread=Decimal("0.1"),
+        config=cfg,
+    )
+
+    assert blocked.current_stop_price == trail.current_stop_price
+    assert blocked.max_observed_spread == Decimal("0.2")
+    assert moved.current_stop_price > trail.current_stop_price
+    assert moved.max_observed_spread == Decimal("0.2")
+
+
+def test_sell_tail_first_amend_jumps_to_entry_plus_four_ticks_and_spread() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(
+        side=Side.BUY,
+        tail=1.0,
+        tail_type="tD",
+        tail_unblock=0.5,
+    )
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    cfg = TailTrailingConfig(
+        first_unblock_delay_seconds=0,
+        max_factor=Decimal("0"),
+    )
+
+    moved = step_tail_trail(
+        pair,
+        trail,
+        Decimal("100.8"),
+        now + timedelta(seconds=7),
+        tick_size=Decimal("0.1"),
+        spread=Decimal("0.2"),
+        config=cfg,
+    )
+
+    assert moved.current_stop_price == Decimal("100.6")
+    assert moved.last_amended_at is not None
 
 
 def test_sell_tail_respects_six_second_update_gate() -> None:
@@ -243,6 +346,102 @@ def test_buy_tail_first_unblock_wait_adds_max_observed_spread() -> None:
     assert unblocked.max_observed_spread == Decimal("1")
     assert moved.current_stop_price < trail.current_stop_price
     assert moved.max_observed_spread == Decimal("1")
+
+
+def test_buy_tail_tublk_uses_favourable_downward_move() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(
+        side=Side.SELL,
+        tail=1.0,
+        tail_type="tD",
+        tail_unblock=0.5,
+    )
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    cfg = TailTrailingConfig(first_unblock_delay_seconds=0)
+
+    raw_up = step_tail_trail(
+        pair,
+        trail,
+        Decimal("100.6"),
+        now + timedelta(seconds=7),
+        config=cfg,
+    )
+    favourable_down = step_tail_trail(
+        pair,
+        trail,
+        Decimal("99.4"),
+        now + timedelta(seconds=7),
+        config=cfg,
+    )
+
+    assert raw_up.current_stop_price == trail.current_stop_price
+    assert raw_up.first_unblocked_at is None
+    assert favourable_down.current_stop_price < trail.current_stop_price
+    assert favourable_down.last_amended_at is not None
+
+
+def test_buy_tail_first_amend_jumps_to_entry_minus_four_ticks_and_spread() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(
+        side=Side.SELL,
+        tail=1.0,
+        tail_type="tD",
+        tail_unblock=0.5,
+    )
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    cfg = TailTrailingConfig(
+        first_unblock_delay_seconds=0,
+        max_factor=Decimal("0"),
+    )
+
+    moved = step_tail_trail(
+        pair,
+        trail,
+        Decimal("99.2"),
+        now + timedelta(seconds=7),
+        tick_size=Decimal("0.1"),
+        spread=Decimal("0.2"),
+        config=cfg,
+    )
+
+    assert moved.current_stop_price == Decimal("99.4")
+    assert moved.last_amended_at is not None
+
+
+def test_first_jump_applies_only_to_first_tail_amend() -> None:
+    now = datetime.now(timezone.utc)
+    pair = sample_pair(
+        side=Side.SELL,
+        tail=1.0,
+        tail_type="tD",
+        tail_unblock=0.5,
+    )
+    trail = initial_tail_trail(pair, Decimal("100"), now)
+    cfg = TailTrailingConfig(
+        first_unblock_delay_seconds=0,
+        max_factor=Decimal("0.9"),
+    )
+    first = step_tail_trail(
+        pair,
+        trail,
+        Decimal("99.2"),
+        now + timedelta(seconds=7),
+        tick_size=Decimal("0.1"),
+        spread=Decimal("0.2"),
+        config=cfg,
+    )
+    second = step_tail_trail(
+        pair,
+        first,
+        Decimal("98.0"),
+        now + timedelta(seconds=14),
+        tick_size=Decimal("0.1"),
+        spread=Decimal("0.2"),
+        config=cfg,
+    )
+
+    assert first.current_stop_price == Decimal("99.4")
+    assert second.current_stop_price < first.current_stop_price
 
 
 def test_buy_tail_respects_six_second_update_gate() -> None:

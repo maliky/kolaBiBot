@@ -414,6 +414,71 @@ def test_market_tick_with_tail_identity_waits_before_first_amend() -> None:
     assert repeated_intents == ()
 
 
+def test_market_tick_tublk_controls_first_tail_amend_threshold() -> None:
+    pair = replace(sample_pair(), tail_unblock_spec=0.5, tail_unblock_spec_type="uD")
+    played, _ = step_pair(
+        PairCycleState(pair=pair, head_state=HeadState.SUBMITTED),
+        egg_move(EggMoveKind.PLAYED_NOT_CANCELED, played_quantity=2.0),
+    )
+    first_unblocked_at = datetime.now(timezone.utc)
+    assert played.tail_trail is not None
+    identified = replace(
+        played,
+        tail_identity=OrderIdentity(
+            pair_name="pair-a",
+            role="tail",
+            client_order_id="CID-T",
+            exchange_order_id="OID-T",
+        ),
+        tail_trail=replace(
+            played.tail_trail,
+            confirmed_stop_price=played.tail_trail.current_stop_price,
+        ),
+    )
+
+    before_threshold, before_intents = step_pair(
+        identified,
+        EggMove(
+            kind=EggMoveKind.MARKET_TICK,
+            occurred_at=first_unblocked_at,
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            reply={"reference_price": 100.4},
+        ),
+    )
+    armed, armed_intents = step_pair(
+        before_threshold,
+        EggMove(
+            kind=EggMoveKind.MARKET_TICK,
+            occurred_at=first_unblocked_at + timedelta(seconds=7),
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            reply={"reference_price": 100.6},
+        ),
+    )
+    amended, amended_intents = step_pair(
+        armed,
+        EggMove(
+            kind=EggMoveKind.MARKET_TICK,
+            occurred_at=first_unblocked_at + timedelta(seconds=57),
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            reply={"reference_price": 100.7},
+        ),
+    )
+
+    assert before_threshold.tail_trail is not None
+    assert before_threshold.tail_trail.first_unblocked_at is None
+    assert before_intents == ()
+    assert armed.tail_trail is not None
+    assert armed.tail_trail.first_unblocked_at == first_unblocked_at + timedelta(seconds=7)
+    assert armed_intents == ()
+    assert amended.tail_trail is not None
+    assert amended.tail_trail.current_stop_price > armed.tail_trail.current_stop_price
+    assert len(amended_intents) == 1
+    assert amended_intents[0].kind == PairIntentKind.AMEND_TAIL
+
+
 def test_market_tick_before_tail_identity_waits_then_updates_state_without_amend() -> None:
     played, _ = step_pair(
         submitted_state(),

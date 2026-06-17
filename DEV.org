@@ -20,6 +20,12 @@ As you can see, this is done independently from the other side, and is autonomou
 
 It could be implemented by changing the =tOut= strategy parameter, making it a range, in our case 0.5 to 1.5, plus a standard adjustment function. The check to make is that the pause, or possibly the default pause, should match the amplitude of the configured timeout.
 
+** Tail unblock parameter
+- =tUblk= is the favourable move required before the first managed tail update.
+- Empty =tUblk= keeps the current default: the initial tail distance plus observed spread.
+- Once unblocked, the first managed tail update jumps to the profit side of the head-fill entry by four ticks plus the observed spread, then later updates resume the normal trailing curve.
+- Ten ticks must be converted to nominal distance before entry, for example =D5= on a product with tick size =0.5=.
+
 
 * DONE <2026-05-26 Tue 18:08>
   CLOSED: [2026-05-28 Thu 10:05]

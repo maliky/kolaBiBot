@@ -62,6 +62,7 @@ def runtime_command_from_order(
             newPrice=_maybe_float_price(normalized.get("newPrice")),
             newQty=normalized.get("newQty"),
             text=str(normalized.get("text", "")) or None,
+            oDelta=normalized.get("oDelta"),
         )
         role = OrderRole.AMEND
     else:
@@ -147,6 +148,8 @@ def command_payload_for_role(
                 amend_request["newPrice"] = _as_float_price(order["newPrice"])
             if "newQty" in order:
                 amend_request["newQty"] = order["newQty"]
+            if "oDelta" in order:
+                amend_request["oDelta"] = order["oDelta"]
             request = amend_request
         else:
             request = _new_order_request_from(command)
@@ -194,6 +197,8 @@ def _request_dict_from_record(
             payload["newQty"] = request.newQty
         if request.clOrdID is not None:
             payload["clOrdID"] = request.clOrdID
+        if request.oDelta is not None:
+            payload["oDelta"] = request.oDelta
         return payload
     payload = {
         "ordType": request.ordType,

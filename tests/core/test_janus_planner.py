@@ -401,6 +401,7 @@ def test_amend_tail_with_full_identity_translates_to_one_amend_command() -> None
         clOrdID="CID-T",
         newPrice=Decimal("99.0"),
         newQty=Decimal("1"),
+        oDelta=Decimal("0.5"),
     )
 
 

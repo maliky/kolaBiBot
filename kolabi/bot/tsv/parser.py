@@ -37,6 +37,8 @@ class _LegacyRow(TypedDict):
     oType: str
     oDelta: float | None
     tDelta: float | None
+    tUblk: float | None
+    tUblk_type: str
     tType: str
     hook: str
     symbol: str | None
@@ -86,6 +88,8 @@ def order_pair_from_legacy_values(
     hook: str,
     symbol: str | None = None,
     exchange: str | None = None,
+    tUblk: float | None = None,
+    tUblk_type: str = "uD",
 ) -> OrderPairSpec:
     """Normalise une ligne legacy vers une paire canonique."""
     head_quantity_type, tail_price_type, head_price_type = split_amount_type(atype)
@@ -134,6 +138,8 @@ def order_pair_from_legacy_values(
         symbol=None if symbol is None or not symbol.strip() else symbol.strip(),
         exchange=exchange_name,
         market_type=market_type,
+        tail_unblock_spec=tUblk,
+        tail_unblock_spec_type=tUblk_type,
     )
 
 
@@ -144,6 +150,7 @@ def strategy_from_pairs(name: str, pairs: Iterable[OrderPairSpec]) -> StrategySp
 
 def strategy_from_run_once_args(args: object) -> StrategySpec:
     """Construit une StrategySpec canonique depuis les arguments CLI legacy."""
+    tail_unblock = _parse_optional_tail_unblock(getattr(args, "tUblk", None))
     pair = order_pair_from_legacy_values(
         name=str(getattr(args, "name")),
         tps_run=(float(getattr(args, "tps_run")[0]), float(getattr(args, "tps_run")[1])),
@@ -158,6 +165,8 @@ def strategy_from_run_once_args(args: object) -> StrategySpec:
         oType=str(getattr(args, "oType")),
         oDelta=getattr(args, "oDelta"),
         tDelta=getattr(args, "tDelta"),
+        tUblk=tail_unblock[0],
+        tUblk_type=tail_unblock[1],
         tType=str(getattr(args, "tType")),
         hook=str(getattr(args, "Hook")),
         symbol=None,
@@ -199,6 +208,7 @@ def normalize_legacy_row(row: pd.Series) -> _LegacyRow:
 
 def _normalize_compact_atype_row(row: pd.Series, atype: str) -> _LegacyRow:
     """Normalise the old compact-atype row grammar."""
+    tail_unblock = _parse_optional_tail_unblock(_row_value(row, "tUblk"))
     return {
         "tps_run": _parse_legacy_interval(str(row.tps_run)),
         "essais": _parse_essais(_row_value(row, "essais")),
@@ -212,6 +222,8 @@ def _normalize_compact_atype_row(row: pd.Series, atype: str) -> _LegacyRow:
         "oType": str(row.oType).strip(),
         "oDelta": _coerce_to("float", _row_value(row, "oDelta")),
         "tDelta": _coerce_to("float", _row_value(row, "tDelta")),
+        "tUblk": tail_unblock[0],
+        "tUblk_type": tail_unblock[1],
         "tType": str(row.tType).strip(),
         "hook": _optional_text(_row_value(row, "hook")) or "",
         "symbol": _optional_text(_row_value(row, "symbol")),
@@ -252,6 +264,7 @@ def _normalize_typed_field_row(row: pd.Series) -> _LegacyRow:
         default_type="oD",
     )
     t_delta = _parse_optional_tail_delta(_row_value(row, "tDelta"))
+    tail_unblock = _parse_optional_tail_unblock(_row_value(row, "tUblk"))
     atype = f"{quantity_type}{tail_price_type}{head_price_type}{head_delta_type}"
 
     return {
@@ -267,6 +280,8 @@ def _normalize_typed_field_row(row: pd.Series) -> _LegacyRow:
         "oType": str(row.oType).strip(),
         "oDelta": o_delta,
         "tDelta": t_delta,
+        "tUblk": tail_unblock[0],
+        "tUblk_type": tail_unblock[1],
         "tType": str(row.tType).strip(),
         "hook": _optional_text(_row_value(row, "hook")) or "",
         "symbol": _optional_text(_row_value(row, "symbol")),
@@ -477,6 +492,19 @@ def _parse_optional_tail_delta(value: object) -> float | None:
     if not payload:
         raise ValueError(f"Invalid tDelta value '{text}'; missing numeric payload.")
     return float(payload)
+
+
+def _parse_optional_tail_unblock(value: object) -> tuple[float | None, str]:
+    parsed, amount_type = _parse_optional_typed_number(
+        value,
+        field="tUblk",
+        token_prefix="u",
+        allowed_suffixes={"D", "%"},
+        default_type="uD",
+    )
+    if parsed is not None and parsed < 0:
+        raise ValueError("Invalid tUblk value; expected a non-negative distance.")
+    return parsed, amount_type
 
 
 def _split_typed_payload(

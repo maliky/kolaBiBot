@@ -40,6 +40,8 @@ The active TSV grammar puts the type prefix on each non-empty value:
 - =tp= uses =D=, =%=, or =A=, for example =D20= or =%0.10=.
 - =oDelta= uses =D= or =%=, for example =D6= or =%0.20=.
 - =tDelta= uses =D= when present.
+- =tUblk= uses =D= or =%= when present, for example =D5= or =%0.20=. Empty keeps the default first-unblock distance: the initial tail distance plus observed spread.
+- After =tUblk= unblocks the tail, the first managed update protects entry by jumping to the profit side of entry by four ticks plus the observed spread; later updates use the normal trailing curve.
 
 Only empty typed fields receive implicit defaults. A non-empty typed value without its prefix is rejected. The old compact =atype= grammar is still accepted for compatibility files, but new files should not use it.
 
@@ -52,7 +54,7 @@ Strategy files live under =orders/=.
 The active TSV grammar is:
 
 #+begin_example
-exchg  symbol  name  tps_run  essais  tOut  pause  side  oType  oDelta  qty  tType  tDelta  prix  tp  hook
+exchg  symbol  name  tps_run  essais  tOut  pause  side  oType  oDelta  qty  tType  tDelta  prix  tp  tUblk  hook
 #+end_example
 
 The =exchg= and =symbol= columns are optional. When =exchg= is omitted, the CLI =--exchange= and =--market-type= are used. When =symbol= is omitted, the effective CLI symbol is used. If CLI =--symbol= is also omitted, the route default is selected: =PI_XBTUSD= for Kraken futures, =XBT/USD= for Kraken spot/margin, =BTCUSDT= for Binance futures/spot/margin/isolated margin, =XBTUSD= for BitMEX futures, and =XBT_USDT= for BitMEX spot. When present, rows use platform-specific symbols directly, for example =PI_XBTUSD=, =BTCUSDT=, or =XBTUSD=. Empty TSV columns are ignored. A multi-route TSV run requires one shared market DB URL and public/private feeders for every active exchange, market type, account scope, and symbol.

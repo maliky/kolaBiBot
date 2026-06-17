@@ -180,6 +180,7 @@ class AmendOrderRequest(TypedDict, total=False):
     newPrice: LimitPrice | StopPrice | Decimal | float
     newQty: Quantity
     text: str | None
+    oDelta: PriceOffset | Decimal | float
 
 
 class CancelOrderRequest(TypedDict):
@@ -214,6 +215,7 @@ class AmendOrderCommandRequest:
     newPrice: LimitPrice | StopPrice | Decimal | float | None = None
     newQty: Quantity | None = None
     text: str | None = None
+    oDelta: PriceOffset | Decimal | float | None = None
 
 
 @dataclass(frozen=True)

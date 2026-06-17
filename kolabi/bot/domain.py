@@ -192,6 +192,8 @@ class OrderPairSpec:
     symbol: str | None = None
     exchange: str | None = None
     market_type: str | None = None
+    tail_unblock_spec: float | None = None
+    tail_unblock_spec_type: str = "uD"
 
     @property
     def attempts(self) -> int | None:

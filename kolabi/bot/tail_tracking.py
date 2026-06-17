@@ -24,6 +24,7 @@ DEFAULT_MAX_SAMPLES = 40
 class TailTrailingConfig:
     update_interval_seconds: int = 6
     first_unblock_delay_seconds: int = 50
+    first_jump_ticks: int = 4
     unblock_multiplier: Decimal = Decimal("2")
     response_denominator_multiplier: Decimal = Decimal("1.9")
     max_r: Decimal = Decimal("2")
@@ -74,6 +75,38 @@ class SkewLomaxCurve:
 
 
 DEFAULT_TAIL_TRAILING_CONFIG = TailTrailingConfig()
+
+
+def tail_unblock_distance(
+    pair: OrderPairSpec,
+    trail: TailTrailState,
+    *,
+    config: TailTrailingConfig = DEFAULT_TAIL_TRAILING_CONFIG,
+) -> Decimal:
+    spec = pair.tail_unblock_spec
+    if spec is None:
+        multiplier = config.unblock_multiplier - Decimal("1")
+        return Decimal("0") if multiplier <= 0 else multiplier * trail.baseline_width
+    value = to_decimal(spec)
+    if value <= 0:
+        return Decimal("0")
+    unblock_type = (pair.tail_unblock_spec_type or "uD").lower()
+    if "u%" in unblock_type:
+        return trail.entry_reference_price * value / Decimal("100")
+    return value
+
+
+def tail_unblock_requirement(
+    pair: OrderPairSpec,
+    trail: TailTrailState,
+    spread_guard: Decimal | int | float | str | None = None,
+    *,
+    config: TailTrailingConfig = DEFAULT_TAIL_TRAILING_CONFIG,
+) -> Decimal:
+    spread = Decimal("0") if spread_guard is None else to_decimal(spread_guard)
+    if spread < 0:
+        spread = Decimal("0")
+    return trail.baseline_width + tail_unblock_distance(pair, trail, config=config) + spread
 
 
 def initial_tail_trail(
@@ -155,7 +188,7 @@ def step_tail_trail(
     tick = _tick_size_or_none(tick_size)
     min_improvement = _min_improvement(d0, tick, config)
 
-    max_lag = config.unblock_multiplier * d0 + max_spread
+    max_lag = tail_unblock_requirement(pair, trail, max_spread, config=config)
 
     if pair.tail.side == Side.SELL:
         d_raw = reference - current_stop
@@ -179,6 +212,9 @@ def step_tail_trail(
         lag_cap_candidate = reference - max_lag
         if candidate < lag_cap_candidate:
             candidate = lag_cap_candidate
+        first_jump = _first_jump_stop_price(trail, tick, max_spread, config)
+        if first_jump is not None and candidate < first_jump:
+            candidate = first_jump
         if candidate < current_stop + min_improvement:
             return next_state
         rounded_current = _round_to_tick(current_stop, tick)
@@ -214,6 +250,9 @@ def step_tail_trail(
     lag_cap_candidate = reference + max_lag
     if candidate > lag_cap_candidate:
         candidate = lag_cap_candidate
+    first_jump = _first_jump_stop_price(trail, tick, max_spread, config)
+    if first_jump is not None and candidate > first_jump:
+        candidate = first_jump
     if candidate > current_stop - min_improvement:
         return next_state
     rounded_current = _round_to_tick(current_stop, tick)
@@ -313,6 +352,23 @@ def _min_improvement(
     )
     fraction_component = config.min_amend_fraction_of_d0 * d0
     return tick_component if tick_component >= fraction_component else fraction_component
+
+
+def _first_jump_stop_price(
+    trail: TailTrailState,
+    tick_size: Decimal | None,
+    spread: Decimal,
+    config: TailTrailingConfig,
+) -> Decimal | None:
+    if trail.last_amended_at is not None:
+        return None
+    if tick_size is None or tick_size <= 0:
+        return None
+    ticks = max(config.first_jump_ticks, 0)
+    buffer = Decimal(ticks) * tick_size + spread
+    if trail.current_stop_price >= trail.entry_reference_price:
+        return trail.entry_reference_price - buffer
+    return trail.entry_reference_price + buffer
 
 
 def _round_to_tick(value: Decimal, tick_size: Decimal | None) -> Decimal:

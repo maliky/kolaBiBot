@@ -1753,6 +1753,12 @@ class AdapterExchangePort(ExchangePort):
         params: dict[str, Any] = {}
         if request.newPrice is not None:
             params["stopPx"] = request.newPrice
+            if request.oDelta is not None and _order_type_uses_limit_offset(request.ordType):
+                params["price"] = _limit_price_from_stop_offset(
+                    side=request.side,
+                    stop_px=request.newPrice,
+                    offset=request.oDelta,
+                )
         return self._amend_with_params(request, params)
 
     def _amend_with_params(

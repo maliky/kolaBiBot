@@ -12,7 +12,6 @@ from kolabi.bot.__main__ import (
     run_once_command,
 )
 from kolabi.bot.domain import StrategySpec
-from kolabi.bot.tsv import read_strategy_file
 
 
 def test_run_once_parser_accepts_legacy_short_flags() -> None:
@@ -100,6 +99,41 @@ def test_run_once_parser_keeps_percent_tail_percent_head_grammar() -> None:
     assert pair.tail_price_spec_type == "t%"
     assert pair.head_price_type == "p%"
     assert pair.tail_price_spec == 0.5
+
+
+def test_run_once_parser_accepts_tublk_keyword() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "run-once",
+            "-m",
+            "XTublk",
+            "-x",
+            "1",
+            "2",
+            "-q",
+            "1",
+            "-T",
+            "0.5",
+            "--tUblk",
+            "D5",
+            "-o",
+            "L",
+            "-y",
+            "S-",
+            "-c",
+            "sell",
+            "-a",
+            "qAt%pD",
+            "--dry-run",
+        ]
+    )
+
+    pair = build_single_strategy(args).pairs[0]
+
+    assert pair.tail_unblock_spec == 5.0
+    assert pair.tail_unblock_spec_type == "uD"
 
 
 def test_bot_parser_uses_critical_db_url_only() -> None:
@@ -367,10 +401,8 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
             return StrategyRunResult(state=state, commands=(), notices=())
 
     service = RecordingService()
-    strategy = read_strategy_file("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")
 
     monkeypatch.setattr("kolabi.bot.__main__.build_service", lambda _args: service)
-    monkeypatch.setattr("kolabi.bot.__main__.read_strategy_file", lambda _path: strategy)
 
     run_args = argparse.Namespace(
         strategy="orders/demo_ada.tsv",
@@ -398,6 +430,8 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
         sync=True,
         simulate=False,
     )
+    strategy = build_single_strategy(run_once_args)
+    monkeypatch.setattr("kolabi.bot.__main__.read_strategy_file", lambda _path: strategy)
 
     assert run_command(run_args) == 0
     assert run_once_command(run_once_args) == 0

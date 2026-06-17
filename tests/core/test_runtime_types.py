@@ -18,8 +18,11 @@ from kolabi.bot.domain import (
 )
 from kolabi.shared.core.runtime_types import (
     AmendReason,
+    AmendOrderCommandRequest,
+    AmendTailCommand,
     EnvironmentName,
     ExchangeName,
+    OrderRole,
     OrderStatus,
     PlaceHeadCommand,
     PlaceOrderCommandRequest,
@@ -29,6 +32,7 @@ from kolabi.shared.core.runtime_types import (
     Symbol,
     TriggerKind,
 )
+from kolabi.shared.core.runtime_commands import command_payload_for_role
 
 
 def test_head_and_tail_state_follow_canonical_contract() -> None:
@@ -61,6 +65,27 @@ def test_runtime_event_and_command_types_are_typed_values() -> None:
     assert event.kind == RuntimeEventKind.ORDER_REQUESTED
     assert command.kind == RuntimeCommandKind.PLACE
     assert command.reason == "head"
+
+
+def test_tail_amend_payload_preserves_typed_limit_offset() -> None:
+    command = AmendTailCommand(
+        kind=RuntimeCommandKind.AMEND,
+        symbol=Symbol("PI_XBTUSD"),
+        pair_name="pair-a",
+        request=AmendOrderCommandRequest(
+            pair_name="pair-a",
+            side="sell",
+            ordType="SL",
+            orderID="OID-T",
+            clOrdID="CID-T",
+            newPrice=Decimal("100"),
+            oDelta=Decimal("0.5"),
+        ),
+    )
+
+    payload = command_payload_for_role(command, role=OrderRole.TAIL)
+
+    assert payload["request"]["oDelta"] == Decimal("0.5")
 
 
 def test_extended_enums_and_tagged_outcome_state() -> None:

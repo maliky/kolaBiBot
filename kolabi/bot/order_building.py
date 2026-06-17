@@ -213,6 +213,7 @@ def tail_amend_request(state: PairCycleState) -> AmendOrderCommandRequest:
         clOrdID=state.tail_identity.client_order_id,
         newPrice=cast(StopPrice, to_decimal(stop_price)),
         newQty=None if quantity is None else cast(OrderQty, to_decimal(quantity)),
+        oDelta=_tail_exchange_offset(state),
     )
 
 

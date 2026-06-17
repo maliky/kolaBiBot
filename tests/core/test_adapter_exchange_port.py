@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -92,6 +93,72 @@ def test_amend_tail_maps_new_price_to_stop_px(monkeypatch) -> None:
     )
 
     assert _FakeAdapter.last == ("OID-T", {"clOrdID": "CID-T", "stopPx": 101.5})
+
+
+def test_amend_tail_stop_limit_derives_sell_limit_from_offset(monkeypatch) -> None:
+    monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _exchange: _FakeAdapter)
+    port = AdapterExchangePort(exchange="kraken", exchange_config=_config())
+
+    asyncio.run(
+        port.amend_tail(
+            AmendTailCommand(
+                kind=RuntimeCommandKind.AMEND,
+                symbol=Symbol("PI_XBTUSD"),
+                pair_name="pair-a",
+                request=AmendOrderCommandRequest(
+                    pair_name="pair-a",
+                    side="sell",
+                    ordType="SL",
+                    orderID="OID-T",
+                    clOrdID="CID-T",
+                    newPrice=Decimal("100"),
+                    oDelta=Decimal("0.5"),
+                ),
+            )
+        )
+    )
+
+    assert _FakeAdapter.last == (
+        "OID-T",
+        {
+            "clOrdID": "CID-T",
+            "price": Decimal("99.5"),
+            "stopPx": Decimal("100"),
+        },
+    )
+
+
+def test_amend_tail_stop_limit_derives_buy_limit_from_offset(monkeypatch) -> None:
+    monkeypatch.setattr("kolabi.bot.service.get_adapter", lambda _exchange: _FakeAdapter)
+    port = AdapterExchangePort(exchange="kraken", exchange_config=_config())
+
+    asyncio.run(
+        port.amend_tail(
+            AmendTailCommand(
+                kind=RuntimeCommandKind.AMEND,
+                symbol=Symbol("PI_XBTUSD"),
+                pair_name="pair-a",
+                request=AmendOrderCommandRequest(
+                    pair_name="pair-a",
+                    side="buy",
+                    ordType="SL",
+                    orderID="OID-T",
+                    clOrdID="CID-T",
+                    newPrice=Decimal("100"),
+                    oDelta=Decimal("0.5"),
+                ),
+            )
+        )
+    )
+
+    assert _FakeAdapter.last == (
+        "OID-T",
+        {
+            "clOrdID": "CID-T",
+            "price": Decimal("100.5"),
+            "stopPx": Decimal("100"),
+        },
+    )
 
 
 def test_amend_head_keeps_new_price_as_limit_price(monkeypatch) -> None:
