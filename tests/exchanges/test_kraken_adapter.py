@@ -466,8 +466,8 @@ def test_place_maps_limit_order_to_sendorder(postgres_url_factory):
     assert reply["clOrdID"] == "CID-1"
     assert session.calls[0]["url"].endswith("/sendorder")
     sent_payload = dict(session.calls[0]["data"])
-    assert sent_payload["orderType"] == "lmt"
-    assert sent_payload["postOnly"] is True
+    assert sent_payload["orderType"] == "post"
+    assert "postOnly" not in sent_payload
     with Session(adapter._audit_engine) as db_session:
         rows = db_session.execute(select(ExchangeRestCall)).scalars().all()
     assert len(rows) == 1
@@ -970,7 +970,8 @@ def test_place_order_merges_execinst_and_reduceonly_without_duplicate_kwarg(post
 
     assert ack.order_id == "OID-3"
     sent_payload = dict(session.calls[0]["data"])
-    assert sent_payload["postOnly"] is True
+    assert sent_payload["orderType"] == "post"
+    assert "postOnly" not in sent_payload
     assert sent_payload["reduceOnly"] is True
 
 

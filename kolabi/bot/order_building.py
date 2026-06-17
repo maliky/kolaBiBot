@@ -106,13 +106,13 @@ def _head_exchange_offset(pair: OrderPairSpec) -> PriceOffset | None:
         return None
     if pair.head.delta_type.lower() == "o%":
         return None
-    return cast(PriceOffset, to_decimal(pair.head.delta))
+    return _distance_offset(pair.head.delta)
 
 
 def _tail_exchange_offset(state: PairCycleState) -> PriceOffset | None:
     """Return explicit tail offset or one tick for blank stop-limit deltas."""
     if state.pair.tail.delta is not None:
-        return cast(PriceOffset, to_decimal(state.pair.tail.delta))
+        return _distance_offset(state.pair.tail.delta)
     if base_order_type(state.pair.tail.order_type) not in {"SL", "LT"}:
         return None
     tick = state.instrument_tick_size
@@ -122,6 +122,10 @@ def _tail_exchange_offset(state: PairCycleState) -> PriceOffset | None:
             "blank tail tDelta"
         )
     return cast(PriceOffset, tick)
+
+
+def _distance_offset(value: Decimal | float | int | str) -> PriceOffset:
+    return cast(PriceOffset, abs(to_decimal(value)))
 
 
 def resolve_tail_quantity(state: PairCycleState) -> Decimal | int | None:

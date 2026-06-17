@@ -38,7 +38,7 @@ The active TSV grammar puts the type prefix on each non-empty value:
 - =prix= uses =D=, =%=, or =A= before its two bounds, for example =D- +=, =D- -5=, or =%0.20 0.30=.
 - =qty= uses =A= or =%=, for example =A3=.
 - =tp= uses =D=, =%=, or =A=, for example =D20= or =%0.10=.
-- =oDelta= uses =D= or =%=, for example =D6= or =%0.20=.
+- =oDelta= uses =D= or =%=, for example =D6= or =%0.20=; signed =D= values are accepted but materialised as side-aware positive distances.
 - =tDelta= uses =D= when present.
 - =tUblk= uses =D= or =%= when present, for example =D5= or =%0.20=. Empty keeps the default first-unblock distance: the initial tail distance plus observed spread.
 - After =tUblk= unblocks the tail, the first managed update protects entry by jumping to the profit side of entry by four ticks plus the observed spread; later updates use the normal trailing curve.

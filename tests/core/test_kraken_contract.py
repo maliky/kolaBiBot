@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from kolabi.kraken_contract import (
     KrakenFuturesOrderType,
     KrakenFuturesStandardOrder,
@@ -20,7 +22,7 @@ def test_build_send_order_contract_maps_limit_to_lmt():
         fallback_market_price=None,
         cli_ord_id="CID-1",
         reduce_only=False,
-        post_only=True,
+        post_only=False,
         trigger_signal=None,
         trailing_stop_max_deviation=None,
         trailing_stop_deviation_unit=None,
@@ -29,7 +31,50 @@ def test_build_send_order_contract_maps_limit_to_lmt():
 
     assert contract.order_type == KrakenFuturesOrderType.LIMIT
     assert contract.as_params()[0] == ("orderType", "lmt")
-    assert ("postOnly", True) in contract.as_params()
+    assert "postOnly" not in dict(contract.as_params())
+
+
+def test_build_send_order_contract_maps_post_only_limit_to_post():
+    contract = build_send_order_contract(
+        ord_type="Limit",
+        symbol="PI_XBTUSD",
+        side="buy",
+        size=2,
+        price=80000.0,
+        stop_price=None,
+        fallback_market_price=None,
+        cli_ord_id="CID-1",
+        reduce_only=False,
+        post_only=True,
+        trigger_signal=None,
+        trailing_stop_max_deviation=None,
+        trailing_stop_deviation_unit=None,
+        tag="tag-1",
+    )
+
+    assert contract.order_type == KrakenFuturesOrderType.POST_ONLY_LIMIT
+    assert contract.as_params()[0] == ("orderType", "post")
+    assert "postOnly" not in dict(contract.as_params())
+
+
+def test_build_send_order_contract_rejects_post_only_trigger_order():
+    with pytest.raises(ValueError, match="post-only is only supported for limit"):
+        build_send_order_contract(
+            ord_type="StopLossLimit",
+            symbol="PI_XBTUSD",
+            side="buy",
+            size=2,
+            price=80000.0,
+            stop_price=79900.0,
+            fallback_market_price=None,
+            cli_ord_id="CID-1",
+            reduce_only=False,
+            post_only=True,
+            trigger_signal="mark",
+            trailing_stop_max_deviation=None,
+            trailing_stop_deviation_unit=None,
+            tag=None,
+        )
 
 
 def test_build_send_order_contract_uses_native_market_type():

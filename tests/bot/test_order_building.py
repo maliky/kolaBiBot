@@ -64,6 +64,36 @@ def test_tsv_exchange_route_reaches_head_and_tail_commands(tmp_path: Path) -> No
     )
 
 
+def test_head_command_materialises_signed_delta_as_distance(tmp_path: Path) -> None:
+    path = tmp_path / "signed_delta.tsv"
+    path.write_text(
+        "\n".join(
+            [
+                (
+                    "exchg\tsymbol\tname\ttps_run\tessais\ttOut\tpause\tside"
+                    "\toType\toDelta\tqty\ttType\ttDelta\tprix\ttp\thook"
+                ),
+                (
+                    "KRKF\tPF_ADAUSD\tKADA_BUY\t0 60\t1\t4\t\tbuy\tLm!"
+                    "\tD-.0002\tA14\tSLm\t\tD- +\t%1.3\t"
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    strategy = read_strategy_file(path)
+    pair = strategy.pairs[0]
+
+    command = head_command(
+        PairCycleState(pair=pair),
+        symbol=Symbol(pair.symbol or ""),
+        kind=RuntimeCommandKind.PLACE,
+    )
+
+    assert command.request.oDelta == Decimal("0.0002")
+
+
 def test_post_only_zero_distance_limit_tail_materialises_marketable_price(
     tmp_path: Path,
 ) -> None:

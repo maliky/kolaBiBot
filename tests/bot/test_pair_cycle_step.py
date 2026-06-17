@@ -220,6 +220,31 @@ def test_would_not_reduce_position_is_not_treated_as_played() -> None:
     assert intents == ()
 
 
+def test_post_only_would_fill_head_reject_is_not_treated_as_played() -> None:
+    next_state, intents = step_pair(
+        submitted_state(),
+        EggMove(
+            kind=EggMoveKind.PLAYED_AND_CANCELED,
+            role=OrderRole.HEAD,
+            occurred_at=datetime.now(timezone.utc),
+            symbol="PI_XBTUSD",
+            reply={
+                "orderID": "OID-1",
+                "clOrdID": "CID-1",
+                "cumQty": 0.0,
+                "orderQty": 2.0,
+                "execType": OrderReason.POST_ONLY_WOULD_FILL.value,
+                "reference_price": 100.0,
+            },
+        ),
+    )
+
+    assert next_state.head_state == HeadState.FAILED
+    assert next_state.tail_state == TailState.LATENT
+    assert next_state.tail_mode is None
+    assert intents == ()
+
+
 def test_step_pair_canceled_head_after_fill_leaves_flying_tail() -> None:
     next_state, intents = step_pair(
         submitted_state(),

@@ -125,6 +125,9 @@ def step_pair(
         )
         return next_state, ()
 
+    if _is_zero_fill_post_only_head_reject(state, move):
+        move = replace(move, kind=EggMoveKind.NOT_PLAYED_CANCELED)
+
     if move.kind == EggMoveKind.MARKET_TICK:
         if state.tail_trail is None or state.tail_state in {
             None,
@@ -339,6 +342,29 @@ def played_quantity_from_move(state: PairCycleState, move: EggMove) -> Decimal |
             parsed = to_decimal(value)
             return parsed if parsed >= Decimal("0") else Decimal("0")
     return None
+
+
+def _is_zero_fill_post_only_head_reject(
+    state: PairCycleState,
+    move: EggMove,
+) -> bool:
+    if move.role == OrderRole.TAIL:
+        return False
+    if move.kind not in {
+        EggMoveKind.PLAYED_NOT_CANCELED,
+        EggMoveKind.PLAYED_AND_CANCELED,
+    }:
+        return False
+    reply = move.reply or {}
+    raw_reason = reply.get("execType") or reply.get("reason")
+    reason = reason_from_status_or_reason(
+        str(reply.get("ordStatus") or reply.get("status") or ""),
+        str(raw_reason) if raw_reason is not None else None,
+    )
+    if reason != OrderReason.POST_ONLY_WOULD_FILL:
+        return False
+    played_quantity = played_quantity_from_move(state, move)
+    return played_quantity is None or played_quantity <= Decimal("0")
 
 
 def reference_price_from_move(state: PairCycleState, move: EggMove) -> Decimal | None:

@@ -9,6 +9,7 @@ class KrakenFuturesOrderType(StrEnum):
     """Canonical Kraken Futures wire values for orderType."""
 
     LIMIT = "lmt"
+    POST_ONLY_LIMIT = "post"
     MARKET = "mkt"
     IMMEDIATE_OR_CANCEL = "ioc"
     STOP = "stp"
@@ -75,7 +76,6 @@ class SendOrderContract:
             ("stopPrice", self.stop_price),
             ("cliOrdId", self.cli_ord_id),
             ("reduceOnly", self.reduce_only),
-            ("postOnly", self.post_only),
             ("triggerSignal", self.trigger_signal),
             ("trailingStopMaxDeviation", self.trailing_stop_max_deviation),
             (
@@ -113,6 +113,7 @@ def build_send_order_contract(
         price=price,
         stop_price=stop_price,
         fallback_market_price=fallback_market_price,
+        post_only=post_only,
     )
     return SendOrderContract(
         order_type=order_type,
@@ -174,28 +175,52 @@ def map_standard_order_to_wire(
     price: float | None,
     stop_price: float | None,
     fallback_market_price: float | None,
+    post_only: bool = False,
 ) -> tuple[KrakenFuturesOrderType, float | None, float | None]:
     """Map standard-order intents to Kraken Futures wire values."""
     standard_order = normalize_standard_order(ord_type)
     if standard_order == KrakenFuturesStandardOrder.MARKET:
+        _reject_unsupported_post_only(standard_order, post_only)
         del price
         del fallback_market_price
         return KrakenFuturesOrderType.MARKET, None, None
     if standard_order == KrakenFuturesStandardOrder.LIMIT:
-        return KrakenFuturesOrderType.LIMIT, price, None
+        order_type = (
+            KrakenFuturesOrderType.POST_ONLY_LIMIT
+            if post_only
+            else KrakenFuturesOrderType.LIMIT
+        )
+        return order_type, price, None
     if standard_order == KrakenFuturesStandardOrder.STOP_LOSS_MARKET:
+        _reject_unsupported_post_only(standard_order, post_only)
         return KrakenFuturesOrderType.STOP, None, stop_price
     if standard_order == KrakenFuturesStandardOrder.STOP_LOSS_LIMIT:
+        _reject_unsupported_post_only(standard_order, post_only)
         return KrakenFuturesOrderType.STOP, price, stop_price
     if standard_order == KrakenFuturesStandardOrder.TAKE_PROFIT_MARKET:
+        _reject_unsupported_post_only(standard_order, post_only)
         return KrakenFuturesOrderType.TAKE_PROFIT, None, stop_price
     if standard_order == KrakenFuturesStandardOrder.TAKE_PROFIT_LIMIT:
+        _reject_unsupported_post_only(standard_order, post_only)
         return KrakenFuturesOrderType.TAKE_PROFIT, price, stop_price
     if standard_order == KrakenFuturesStandardOrder.TRAILING_STOP_MARKET:
+        _reject_unsupported_post_only(standard_order, post_only)
         return KrakenFuturesOrderType.TRAILING_STOP, None, None
     if standard_order == KrakenFuturesStandardOrder.TRAILING_STOP_LIMIT:
+        _reject_unsupported_post_only(standard_order, post_only)
         return KrakenFuturesOrderType.TRAILING_STOP_LIMIT, price, None
     raise ValueError(f"Unsupported Kraken Futures order type '{ord_type}'")
+
+
+def _reject_unsupported_post_only(
+    standard_order: KrakenFuturesStandardOrder,
+    post_only: bool,
+) -> None:
+    if post_only:
+        raise ValueError(
+            "Kraken Futures post-only is only supported for limit orders; "
+            f"got {standard_order.value}."
+        )
 
 
 def normalize_trailing_deviation_unit(
