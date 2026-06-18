@@ -1,6 +1,6 @@
-"""Pure helpers for legacy order-type suffixes.
+"""Pure helpers for compact order-type suffixes.
 
-The TSV grammar allows compact order codes such as ``Lm`` or ``Sm-``.  This
+The strategy grammar allows compact order codes such as ``Lm`` or ``Sm-``.  This
 module keeps that parsing local and deterministic before exchange adapters see
 ordinary base order types.
 """

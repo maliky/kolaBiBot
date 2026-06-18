@@ -12,11 +12,16 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from kolabi.bot.exchange_routes import ExchangeRoute
 from kolabi.bot.domain import (
+    HeadSpec,
     HeadState,
     OrderIdentity,
+    OrderPairSpec,
     PairCycleState,
+    Side,
     StrategySpec,
+    TailSpec,
     TailState,
+    TimeWindow,
 )
 from kolabi.bot.indicators import DummyIndicatorClient
 from kolabi.bot.service import (
@@ -115,6 +120,33 @@ def _ready_runtime_state(
         ready=True,
         reasons=(),
     )
+
+
+def _xbt_sell_tail_pair() -> OrderPairSpec:
+    """Small local pair replacing the removed XBT sell-tail fixture file."""
+
+    return OrderPairSpec(
+        name="XSellTail",
+        window=TimeWindow(start_minutes=0.0, end_minutes=1440.0),
+        try_num=1,
+        dr_pause=None,
+        timeout=60,
+        head=HeadSpec(side=Side.SELL, order_type="L"),
+        head_price=(1.0, 2.0),
+        head_price_type="pD",
+        head_quantity=1,
+        head_quantity_type="qA",
+        tail=TailSpec(side=Side.BUY, order_type="S-"),
+        tail_price_spec=0.5,
+        tail_price_spec_type="t%",
+        amount_type="qA",
+        head_order_price_spec=1.0,
+        head_order_price_spec_type="hD",
+    )
+
+
+def _xbt_sell_tail_strategy() -> StrategySpec:
+    return StrategySpec(name="xbt-sell-tail", pairs=(_xbt_sell_tail_pair(),))
 
 
 def test_demo_ada_strategy_parsed_and_planned_on_active_runtime() -> None:
@@ -366,7 +398,7 @@ def test_bot_service_uses_scoped_kolabi_db_env_lanes(monkeypatch) -> None:
 
 
 def test_bot_service_dry_run_preserves_pair_symbols() -> None:
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     strategy = StrategySpec(
         name="multi-symbol",
         pairs=(
@@ -389,7 +421,7 @@ def test_bot_service_dry_run_preserves_pair_symbols() -> None:
 
 
 def test_bot_service_dry_run_preserves_pair_exchange_routes() -> None:
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     strategy = StrategySpec(
         name="multi-exchange",
         pairs=(
@@ -418,7 +450,7 @@ def test_bot_service_dry_run_preserves_pair_exchange_routes() -> None:
 
 
 def test_bot_service_default_market_type_applies_to_rows_without_exchange_code() -> None:
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     strategy = StrategySpec(name="default-spot", pairs=(replace(base_pair, symbol=None),))
     service = BotService(
         BotConfig(
@@ -519,7 +551,7 @@ def test_mixed_strategy_missing_route_credentials_names_pair_and_route(
         "BINANCE_SPOT_DEMO_API_SECRET",
     ):
         monkeypatch.delenv(name, raising=False)
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     spot_pair = replace(
         base_pair,
         name="bin_spot",
@@ -554,7 +586,7 @@ def test_preflight_reports_missing_strategy_route_credentials_without_adapter(
         "BINANCE_SPOT_DEMO_API_SECRET",
     ):
         monkeypatch.delenv(name, raising=False)
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     spot_pair = replace(
         base_pair,
         name="bin_spot",
@@ -602,7 +634,7 @@ def test_preflight_marks_present_strategy_route_credentials_without_values(
 ) -> None:
     monkeypatch.setenv("BINS_DEMO_API_KEY", "spot-key")
     monkeypatch.setenv("BINS_DEMO_API_SECRET", "spot-secret")
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     spot_pair = replace(
         base_pair,
         name="bin_spot",
@@ -642,7 +674,7 @@ def test_preflight_honours_default_route_credential_env_overrides(
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CUSTOM_BINS_KEY", "spot-key")
     monkeypatch.setenv("CUSTOM_BINS_SECRET", "spot-secret")
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     spot_pair = replace(
         base_pair,
         name="bin_spot",
@@ -701,7 +733,7 @@ def test_preflight_validates_strategy_route_symbol_when_db_context_present(
         lambda _exchange, _market_type=None: FakeBinanceAdapter,
     )
 
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     spot_pair = replace(
         base_pair,
         name="bin_spot",
@@ -745,7 +777,7 @@ def test_preflight_reports_required_base_url_for_demo_margin_route(
 ) -> None:
     monkeypatch.setenv("BINM_DEMO_API_KEY", "margin-key")
     monkeypatch.setenv("BINM_DEMO_API_SECRET", "margin-secret")
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     margin_pair = replace(
         base_pair,
         name="bin_margin",
@@ -798,7 +830,7 @@ def test_preflight_accepts_default_route_base_url_override(
 ) -> None:
     monkeypatch.setenv("BINM_DEMO_API_KEY", "margin-key")
     monkeypatch.setenv("BINM_DEMO_API_SECRET", "margin-secret")
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     margin_pair = replace(
         base_pair,
         name="bin_margin",
@@ -917,7 +949,7 @@ def test_bot_service_requires_shared_market_db_for_active_multi_symbol_strategy(
     monkeypatch,
 ) -> None:
     monkeypatch.delenv("KOLABI_MARKET_DB_URL", raising=False)
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     strategy = StrategySpec(
         name="multi-symbol",
         pairs=(
@@ -942,7 +974,7 @@ def test_kraken_run_strategy_rejects_too_small_absolute_quantity(monkeypatch) ->
         def instrument_rules(self, symbol: str):
             return {"symbol": symbol, "minQuantity": 30.0}
 
-    strategy = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
+    strategy = _xbt_sell_tail_strategy()
     service = BotService(
         BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False),
         indicators=DummyIndicatorClient({"ma": 42}),
@@ -980,7 +1012,7 @@ def test_non_futures_routes_reject_unsupported_tail_grammar_at_preflight(
     tail_order_type: str,
     expected: str,
 ) -> None:
-    base_pair = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv")).pairs[0]
+    base_pair = _xbt_sell_tail_pair()
     pair = replace(
         base_pair,
         exchange=exchange,
@@ -1584,7 +1616,7 @@ def test_symbol_routing_exchange_port_rejects_cross_lane_without_loader() -> Non
 
 
 def test_interrupt_cleanup_cancels_tail_by_exchange_id_and_reverses_played_qty(monkeypatch) -> None:
-    strategy = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
+    strategy = _xbt_sell_tail_strategy()
     pair = strategy.pairs[0]
     service = BotService(BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False))
     runtime = StrategyRuntime(strategy=strategy, symbol="PI_XBTUSD", simulate=True)
@@ -1714,7 +1746,7 @@ def test_close_all_orders_omits_reduce_only_for_margin(monkeypatch) -> None:
 
 
 def test_interrupt_cleanup_omits_reduce_only_for_margin_route(monkeypatch) -> None:
-    base_strategy = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
+    base_strategy = _xbt_sell_tail_strategy()
     base_pair = base_strategy.pairs[0]
     pair = replace(
         base_pair,
@@ -1812,7 +1844,7 @@ def test_interrupt_cleanup_omits_reduce_only_for_margin_route(monkeypatch) -> No
 
 
 def test_cancel_living_tails_uses_route_adapter(monkeypatch) -> None:
-    strategy = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
+    strategy = _xbt_sell_tail_strategy()
     pair = strategy.pairs[0]
     service = BotService(BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False))
     runtime = StrategyRuntime(strategy=strategy, symbol="PI_XBTUSD", simulate=True)
@@ -1856,7 +1888,7 @@ def test_cancel_living_tails_uses_route_adapter(monkeypatch) -> None:
 
 
 def test_interrupt_cleanup_cancels_active_head_lease(monkeypatch) -> None:
-    strategy = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
+    strategy = _xbt_sell_tail_strategy()
     pair = strategy.pairs[0]
     service = BotService(BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False))
     runtime = StrategyRuntime(strategy=strategy, symbol="PI_XBTUSD", simulate=False)
@@ -1965,7 +1997,7 @@ def test_startup_quarantine_cancels_only_kolabi_orphans(monkeypatch) -> None:
 
 
 def test_interrupt_cleanup_resolves_tail_exchange_id_from_client_id(monkeypatch) -> None:
-    strategy = read_strategy_file(Path("orders/pi_xbtusd_sell_plus1_tail_0p5.tsv"))
+    strategy = _xbt_sell_tail_strategy()
     pair = strategy.pairs[0]
     service = BotService(BotConfig(symbol="PI_XBTUSD", exchange="kraken", require_ready=False))
     runtime = StrategyRuntime(strategy=strategy, symbol="PI_XBTUSD", simulate=True)

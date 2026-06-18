@@ -306,7 +306,7 @@ class KrakenRuntimeStateClient:
         exchange: str | None = None,
         market_type: str | None = None,
     ) -> StrategyRuntimeState:
-        """Load the combined runtime state used by the Kraken TSV route."""
+        """Load the combined runtime state used by a Kraken strategy route."""
         target_symbol = symbol or self.symbol
         target_exchange = exchange or self.exchange
         target_market_type = market_type or self.market_type

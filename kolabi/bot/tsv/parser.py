@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable, TypedDict
-
-import pandas as pd
+from typing import Iterable, Mapping, TypedDict
 
 from kolabi.bot.domain import (
     HeadSpec,
@@ -16,29 +15,37 @@ from kolabi.bot.domain import (
     opposite_side,
 )
 from kolabi.bot.exchange_routes import parse_exchange_code
-from kolabi.bot.order_codes import validate_order_code
+from kolabi.bot.order_codes import parse_order_code, validate_order_code
 
 NumberPair = tuple[float, float]
 PERCENT_OPEN_BOUND = 90.0
 DIFFERENTIAL_OPEN_BOUND = 1_000_000.0
 ABSOLUTE_PRICE_OPEN_MAX = 1_000_000_000.0
+ORG_PLACEHOLDER_RE = re.compile(r"<[^>]+>")
+REQUIRED_ORG_COLUMNS = ("pGate", "hPrice")
 
 
-class _LegacyRow(TypedDict):
+class _TypedStrategyRow(TypedDict):
     tps_run: NumberPair
     essais: int | str | None
     dr_pause: float | None
     timeout: float | None
     side: str
-    prix: NumberPair
-    q: int | None
-    tp: float | None
-    atype: str
+    pGate: NumberPair
+    head_price_type: str
+    hPrice: float | None
+    head_order_price_type: str
+    quantity: int
+    quantity_type: str
+    tPrice: float | None
+    tail_price_type: str
     oType: str
-    oDelta: float | None
+    hDelta: float | None
+    head_delta_type: str
     tDelta: float | None
     tUblk: float | None
     tUblk_type: str
+    wUblk: float
     tType: str
     hook: str
     symbol: str | None
@@ -46,30 +53,22 @@ class _LegacyRow(TypedDict):
 
 
 def read_strategy_file(path: str | Path) -> StrategySpec:
-    """Charge un fichier TSV vers une StrategySpec canonique."""
+    """Charge une table Org de strategie vers une StrategySpec canonique."""
     strategy_path = Path(path)
-    df = pd.read_csv(
-        filepath_or_buffer=strategy_path,
-        sep="\t",
-        comment="#",
-        skip_blank_lines=True,
-    )
-    df = _drop_empty_columns(df)
-    if "name" not in df.columns:
-        raise ValueError("Strategy TSV is missing required column 'name'.")
-    if df["name"].duplicated().any():
-        duplicates = tuple(str(name) for name in df.loc[df["name"].duplicated(), "name"])
-        raise ValueError(f"Duplicate pair name(s) in strategy TSV: {', '.join(duplicates)}")
-    df = df.set_index([df.index, df["name"]]).drop(columns="name")
+    rows = _read_org_strategy_rows(strategy_path)
+    names = [str(row["name"]) for row in rows]
+    duplicates = _duplicate_values(names)
+    if duplicates:
+        raise ValueError(f"Duplicate pair name(s) in strategy table: {', '.join(duplicates)}")
     pairs: list[OrderPairSpec] = []
-    for idx in df.index:
-        pair_name = str(idx[1])
-        row = normalize_legacy_row(df.loc[idx])
-        pairs.append(order_pair_from_legacy_values(name=pair_name, **row))
+    for row in rows:
+        pair_name = str(row["name"])
+        typed_row = normalize_typed_strategy_row(row)
+        pairs.append(order_pair_from_typed_values(name=pair_name, **typed_row))
     return StrategySpec(name=strategy_path.stem, pairs=tuple(pairs))
 
 
-def order_pair_from_legacy_values(
+def order_pair_from_typed_values(
     *,
     name: str,
     tps_run: NumberPair,
@@ -77,12 +76,17 @@ def order_pair_from_legacy_values(
     dr_pause: float | None,
     timeout: float | None,
     side: str,
-    prix: NumberPair,
-    q: int | None,
-    tp: float | None,
-    atype: str,
+    pGate: NumberPair,
+    head_price_type: str,
+    hPrice: float | None,
+    head_order_price_type: str,
+    quantity: int,
+    quantity_type: str,
+    tPrice: float | None,
+    tail_price_type: str,
     oType: str,
-    oDelta: float | None,
+    hDelta: float | None,
+    head_delta_type: str,
     tDelta: float | None,
     tType: str,
     hook: str,
@@ -90,10 +94,9 @@ def order_pair_from_legacy_values(
     exchange: str | None = None,
     tUblk: float | None = None,
     tUblk_type: str = "uD",
+    wUblk: float = 6.0,
 ) -> OrderPairSpec:
-    """Normalise une ligne legacy vers une paire canonique."""
-    head_quantity_type, tail_price_type, head_price_type = split_amount_type(atype)
-    head_delta_type = extract_head_delta_type(atype)
+    """Normalise des valeurs typees vers une paire canonique."""
     normalized_side = normalize_side(side)
     exchange_name, market_type = parse_exchange_code(exchange)
     window = TimeWindow(start_minutes=float(tps_run[0]), end_minutes=float(tps_run[1]))
@@ -107,8 +110,18 @@ def order_pair_from_legacy_values(
     )
     validate_order_code(oType, role="head")
     validate_order_code(tType, role="tail")
-    validate_price_interval(prix)
-    validate_quantity(q)
+    validate_price_interval(pGate)
+    validate_head_price_fields(
+        name=name,
+        o_type=oType,
+        h_delta=hDelta,
+        h_price=hPrice,
+    )
+    validate_quantity(quantity)
+    amount_type = (
+        f"{quantity_type}{tail_price_type}{head_price_type}"
+        f"{head_order_price_type}{head_delta_type}"
+    )
 
     return OrderPairSpec(
         name=name,
@@ -119,27 +132,30 @@ def order_pair_from_legacy_values(
         head=HeadSpec(
             side=normalized_side,
             order_type=oType.strip(),
-            delta=oDelta,
+            delta=hDelta,
             delta_type=head_delta_type,
         ),
-        head_price=prix,
+        head_price=pGate,
         head_price_type=head_price_type,
-        head_quantity=q,
-        head_quantity_type=head_quantity_type,
+        head_quantity=quantity,
+        head_quantity_type=quantity_type,
         tail=TailSpec(
             side=opposite_side(normalized_side),
             order_type=tType.strip(),
             delta=tDelta,
         ),
-        tail_price_spec=tp,
+        tail_price_spec=tPrice,
         tail_price_spec_type=tail_price_type,
-        amount_type=atype.strip(),
+        amount_type=amount_type,
         hook_name=hook.strip() or None,
         symbol=None if symbol is None or not symbol.strip() else symbol.strip(),
         exchange=exchange_name,
         market_type=market_type,
         tail_unblock_spec=tUblk,
         tail_unblock_spec_type=tUblk_type,
+        tail_second_update_wait_seconds=wUblk,
+        head_order_price_spec=hPrice,
+        head_order_price_spec_type=head_order_price_type,
     )
 
 
@@ -149,29 +165,29 @@ def strategy_from_pairs(name: str, pairs: Iterable[OrderPairSpec]) -> StrategySp
 
 
 def strategy_from_run_once_args(args: object) -> StrategySpec:
-    """Construit une StrategySpec canonique depuis les arguments CLI legacy."""
-    tail_unblock = _parse_optional_tail_unblock(getattr(args, "tUblk", None))
-    pair = order_pair_from_legacy_values(
-        name=str(getattr(args, "name")),
-        tps_run=(float(getattr(args, "tps_run")[0]), float(getattr(args, "tps_run")[1])),
-        essais=int(getattr(args, "nbEssais")),
-        dr_pause=getattr(args, "drPause"),
-        timeout=getattr(args, "tOut"),
-        side=str(getattr(args, "side")),
-        prix=(float(getattr(args, "prix")[0]), float(getattr(args, "prix")[1])),
-        q=getattr(args, "quantity"),
-        tp=getattr(args, "tailPrice"),
-        atype=str(getattr(args, "aType")),
-        oType=str(getattr(args, "oType")),
-        oDelta=getattr(args, "oDelta"),
-        tDelta=getattr(args, "tDelta"),
-        tUblk=tail_unblock[0],
-        tUblk_type=tail_unblock[1],
-        tType=str(getattr(args, "tType")),
-        hook=str(getattr(args, "Hook")),
-        symbol=None,
-        exchange=None,
-    )
+    """Construit une StrategySpec canonique depuis les arguments CLI types."""
+    row: dict[str, object] = {
+        "tps_run": " ".join(str(value) for value in getattr(args, "tps_run")),
+        "essais": getattr(args, "essais"),
+        "pause": getattr(args, "pause"),
+        "tOut": getattr(args, "tOut"),
+        "side": getattr(args, "side"),
+        "pGate": getattr(args, "pGate"),
+        "hPrice": getattr(args, "hPrice", None),
+        "qty": getattr(args, "qty"),
+        "tPrice": getattr(args, "tPrice"),
+        "oType": getattr(args, "oType"),
+        "hDelta": getattr(args, "hDelta"),
+        "tDelta": getattr(args, "tDelta"),
+        "tUblk": getattr(args, "tUblk", None),
+        "wUblk": getattr(args, "wUblk", None),
+        "tType": getattr(args, "tType"),
+        "hook": getattr(args, "hook", ""),
+        "symbol": None,
+        "exchg": None,
+    }
+    typed_row = normalize_typed_strategy_row(row)
+    pair = order_pair_from_typed_values(name=str(getattr(args, "name")), **typed_row)
     return StrategySpec(name=pair.name, pairs=(pair,))
 
 
@@ -189,6 +205,10 @@ def strategy_to_pretty_dict(strategy: StrategySpec) -> dict[str, object]:
                 pair["head_price_spec"] = pair["head_price"]
             if "head_price_type" in pair:
                 pair["head_price_spec_type"] = pair["head_price_type"]
+            if "head_order_price_spec" in pair:
+                pair["hPrice_spec"] = pair["head_order_price_spec"]
+            if "head_order_price_spec_type" in pair:
+                pair["hPrice_spec_type"] = pair["head_order_price_spec_type"]
             if "head_quantity" in pair:
                 pair["head_quantity_spec"] = pair["head_quantity"]
             if "head_quantity_type" in pair:
@@ -198,43 +218,11 @@ def strategy_to_pretty_dict(strategy: StrategySpec) -> dict[str, object]:
     return payload
 
 
-def normalize_legacy_row(row: pd.Series) -> _LegacyRow:
-    """Convertit une ligne TSV legacy en champs intermediaires stables."""
-    atype = _optional_text(_row_value(row, "atype"))
-    if atype:
-        return _normalize_compact_atype_row(row, atype)
-    return _normalize_typed_field_row(row)
-
-
-def _normalize_compact_atype_row(row: pd.Series, atype: str) -> _LegacyRow:
-    """Normalise the old compact-atype row grammar."""
-    tail_unblock = _parse_optional_tail_unblock(_row_value(row, "tUblk"))
-    return {
-        "tps_run": _parse_legacy_interval(str(row.tps_run)),
-        "essais": _parse_essais(_row_value(row, "essais")),
-        "dr_pause": _coerce_to("float", _row_value(row, "pause")),
-        "timeout": _coerce_to("float", _row_value(row, "tOut")),
-        "side": str(row.side).strip(),
-        "prix": _parse_legacy_interval(str(row.prix), atype),
-        "q": _coerce_int(_row_value(row, "qty", "quantity", "q")),
-        "tp": _coerce_to("float", _row_value(row, "tp")),
-        "atype": atype,
-        "oType": str(row.oType).strip(),
-        "oDelta": _coerce_to("float", _row_value(row, "oDelta")),
-        "tDelta": _coerce_to("float", _row_value(row, "tDelta")),
-        "tUblk": tail_unblock[0],
-        "tUblk_type": tail_unblock[1],
-        "tType": str(row.tType).strip(),
-        "hook": _optional_text(_row_value(row, "hook")) or "",
-        "symbol": _optional_text(_row_value(row, "symbol")),
-        "exchange": _optional_text(_row_value(row, "exchg", "exchange")),
-    }
-
-
-def _normalize_typed_field_row(row: pd.Series) -> _LegacyRow:
-    """Normalise the explicit typed-field TSV grammar."""
+def normalize_typed_strategy_row(row: Mapping[str, object]) -> _TypedStrategyRow:
+    """Normalise une ligne de table Org en champs intermediaires stables."""
+    _reject_legacy_columns(row)
     raw_q, quantity_type = _parse_required_typed_number(
-        _row_value(row, "qty", "quantity", "q"),
+        _row_value(row, "qty"),
         field="qty",
         token_prefix="q",
         allowed_suffixes={"A", "%"},
@@ -242,79 +230,206 @@ def _normalize_typed_field_row(row: pd.Series) -> _LegacyRow:
     )
     if not isinstance(raw_q, int):
         raise ValueError("Invalid qty value; expected an integer payload.")
-    tp, tail_price_type = _parse_optional_typed_number(
-        _row_value(row, "tp"),
-        field="tp",
+    t_price, tail_price_type = _parse_optional_typed_number(
+        _row_value(row, "tPrice"),
+        field="tPrice",
         token_prefix="t",
         allowed_suffixes={"A", "D", "%"},
         default_type="tD",
     )
-    prix, head_price_type = _parse_optional_typed_interval(
-        _row_value(row, "prix"),
-        field="prix",
+    p_gate, head_price_type = _parse_optional_typed_interval(
+        _row_value(row, "pGate"),
+        field="pGate",
         token_prefix="p",
         allowed_suffixes={"A", "D", "%"},
         default_type="pD",
     )
-    o_delta, head_delta_type = _parse_optional_typed_number(
-        _row_value(row, "oDelta"),
-        field="oDelta",
+    h_price, head_order_price_type = _parse_optional_typed_number(
+        _row_value(row, "hPrice"),
+        field="hPrice",
+        token_prefix="h",
+        allowed_suffixes={"A", "D", "%"},
+        default_type="hD",
+    )
+    h_delta, head_delta_type = _parse_optional_typed_number(
+        _row_value(row, "hDelta"),
+        field="hDelta",
         token_prefix="o",
         allowed_suffixes={"D", "%"},
         default_type="oD",
     )
     t_delta = _parse_optional_tail_delta(_row_value(row, "tDelta"))
     tail_unblock = _parse_optional_tail_unblock(_row_value(row, "tUblk"))
-    atype = f"{quantity_type}{tail_price_type}{head_price_type}{head_delta_type}"
+    tail_wait = _parse_optional_tail_wait(_row_value(row, "wUblk"))
 
     return {
-        "tps_run": _parse_legacy_interval(str(row.tps_run)),
+        "tps_run": _parse_interval(str(_require_row_value(row, "tps_run")), field="tps_run"),
         "essais": _parse_essais(_row_value(row, "essais")),
         "dr_pause": _coerce_to("float", _row_value(row, "pause")),
         "timeout": _coerce_to("float", _row_value(row, "tOut")),
-        "side": str(row.side).strip(),
-        "prix": prix,
-        "q": raw_q,
-        "tp": tp,
-        "atype": atype,
-        "oType": str(row.oType).strip(),
-        "oDelta": o_delta,
+        "side": str(_require_row_value(row, "side")).strip(),
+        "pGate": p_gate,
+        "head_price_type": head_price_type,
+        "hPrice": h_price,
+        "head_order_price_type": head_order_price_type,
+        "quantity": raw_q,
+        "quantity_type": quantity_type,
+        "tPrice": t_price,
+        "tail_price_type": tail_price_type,
+        "oType": str(_require_row_value(row, "oType")).strip(),
+        "hDelta": h_delta,
+        "head_delta_type": head_delta_type,
         "tDelta": t_delta,
         "tUblk": tail_unblock[0],
         "tUblk_type": tail_unblock[1],
-        "tType": str(row.tType).strip(),
+        "wUblk": tail_wait,
+        "tType": str(_require_row_value(row, "tType")).strip(),
         "hook": _optional_text(_row_value(row, "hook")) or "",
         "symbol": _optional_text(_row_value(row, "symbol")),
-        "exchange": _optional_text(_row_value(row, "exchg", "exchange")),
+        "exchange": _optional_text(_row_value(row, "exchg")),
     }
 
 
-def _drop_empty_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop blank TSV columns and normalise header whitespace."""
-    rename: dict[object, str] = {}
-    drop: list[object] = []
-    for column in df.columns:
-        name = str(column).strip()
-        if not name or name.startswith("Unnamed:"):
-            drop.append(column)
+def _read_org_strategy_rows(path: Path) -> list[dict[str, str]]:
+    table = _first_strategy_table(path)
+    if table is None:
+        raise ValueError(
+            "Strategy file must contain an Org table with a 'name' column; "
+            "legacy TSV strategy files are no longer supported."
+        )
+    header, data_rows = table
+    if "name" not in header:
+        raise ValueError("Strategy table is missing required column 'name'.")
+    _reject_legacy_columns({name: "" for name in header})
+    _require_org_columns(header)
+    rows: list[dict[str, str]] = []
+    for line_number, cells in data_rows:
+        if _is_ignored_org_data_row(cells):
             continue
-        rename[column] = name
-    if drop:
-        df = df.drop(columns=drop)
-    if rename:
-        df = df.rename(columns=rename)
-    return df
+        if len(cells) != len(header):
+            raise ValueError(
+                f"Invalid Org strategy table row at line {line_number}; "
+                f"expected {len(header)} cells, saw {len(cells)}."
+            )
+        rows.append(dict(zip(header, cells, strict=True)))
+    return rows
 
 
-def _row_value(row: pd.Series, *names: str) -> object:
+def _first_strategy_table(path: Path) -> tuple[list[str], list[tuple[int, list[str]]]] | None:
+    current: list[tuple[int, list[str]]] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            if current:
+                table = _strategy_table_from_block(current)
+                if table is not None:
+                    return table
+                current = []
+            continue
+        if _is_org_hline(stripped):
+            continue
+        current.append((line_number, _split_org_row(stripped)))
+    if current:
+        return _strategy_table_from_block(current)
+    return None
+
+
+def _strategy_table_from_block(
+    block: list[tuple[int, list[str]]],
+) -> tuple[list[str], list[tuple[int, list[str]]]] | None:
+    if not block:
+        return None
+    header = _normalise_header(block[0][1])
+    if "name" not in header:
+        return None
+    return header, block[1:]
+
+
+def _normalise_header(cells: list[str]) -> list[str]:
+    header: list[str] = []
+    for cell in cells:
+        name = cell.strip()
+        if not name:
+            continue
+        header.append(name)
+    return header
+
+
+def _split_org_row(line: str) -> list[str]:
+    raw = line.strip()
+    if raw.startswith("|"):
+        raw = raw[1:]
+    if raw.endswith("|"):
+        raw = raw[:-1]
+    return [cell.strip() for cell in raw.split("|")]
+
+
+def _is_org_hline(line: str) -> bool:
+    raw = line.strip().strip("|").strip()
+    return bool(raw) and all(char in "-+" for char in raw)
+
+
+def _is_ignored_org_data_row(cells: list[str]) -> bool:
+    return all(not cell.strip() for cell in cells) or any(
+        ORG_PLACEHOLDER_RE.search(cell) for cell in cells
+    )
+
+
+def _duplicate_values(values: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for value in values:
+        if value in seen and value not in duplicates:
+            duplicates.append(value)
+        seen.add(value)
+    return tuple(duplicates)
+
+
+def _reject_legacy_columns(row: Mapping[str, object]) -> None:
+    legacy = {
+        "atype",
+        "exchange",
+        "hprice",
+        "oDelta",
+        "pgate",
+        "prix",
+        "q",
+        "quantity",
+        "tp",
+    }
+    present = sorted(name for name in legacy if name in row)
+    if present:
+        raise ValueError(
+            "Legacy strategy field(s) are no longer supported: "
+            f"{', '.join(present)}. Use typed Org fields such as qty, tPrice, pGate, hPrice, and exchg."
+        )
+
+
+def _require_org_columns(header: list[str]) -> None:
+    missing = [name for name in REQUIRED_ORG_COLUMNS if name not in header]
+    if missing:
+        raise ValueError(
+            "Strategy table is missing required column(s): "
+            f"{', '.join(missing)}."
+        )
+
+
+def _row_value(row: Mapping[str, object], *names: str) -> object:
     for name in names:
         if name in row:
             return row[name]
     return None
 
 
+def _require_row_value(row: Mapping[str, object], name: str) -> object:
+    value = _row_value(row, name)
+    if _optional_text(value) is None:
+        raise ValueError(f"Missing required strategy field '{name}'.")
+    return value
+
+
 def _optional_text(value: object) -> str | None:
-    if pd.isna(value):
+    if value is None:
         return None
     text = str(value).strip()
     return text or None
@@ -329,13 +444,6 @@ def _coerce_to(kind: str, value: object) -> int | float | None:
     if kind == "float":
         return float(text)
     raise ValueError(f"Unsupported coercion kind '{kind}'")
-
-
-def _coerce_int(value: object) -> int | None:
-    text = _optional_text(value)
-    if text is None:
-        return None
-    return int(text)
 
 
 def _parse_essais(value: object) -> int | str | None:
@@ -384,23 +492,13 @@ def _resolve_timeout_minutes(
     return computed
 
 
-def _parse_legacy_interval(raw: str, atype: str | None = None) -> NumberPair:
+def _parse_interval(raw: str, *, field: str) -> NumberPair:
     parts = raw.strip().split()
     if len(parts) != 2:
         raise ValueError(
-            f"Invalid interval '{raw}'; expected exactly two whitespace-separated bounds."
+            f"Invalid {field} interval '{raw}'; expected exactly two whitespace-separated bounds."
         )
     low, high = parts
-    amount_type = atype or ""
-    if "p%" in amount_type:
-        low = str(-PERCENT_OPEN_BOUND) if low == "-" else low
-        high = str(PERCENT_OPEN_BOUND) if high == "+" else high
-    if "pD" in amount_type:
-        low = str(-DIFFERENTIAL_OPEN_BOUND) if low == "-" else low
-        high = str(DIFFERENTIAL_OPEN_BOUND) if high == "+" else high
-    if "pA" in amount_type:
-        low = "0" if low == "-" else low
-        high = str(ABSOLUTE_PRICE_OPEN_MAX) if high == "+" else high
     return float(low), float(high)
 
 
@@ -421,7 +519,7 @@ def _parse_required_typed_number(
         as_int=as_int,
     )
     if parsed is None:
-        raise ValueError(f"Missing required TSV field '{field}'.")
+        raise ValueError(f"Missing required strategy field '{field}'.")
     return parsed, amount_type
 
 
@@ -437,7 +535,7 @@ def _parse_optional_typed_number(
     text = _optional_text(value)
     if text is None:
         if default_type is None:
-            raise ValueError(f"Missing required TSV field '{field}'.")
+            raise ValueError(f"Missing required strategy field '{field}'.")
         return None, default_type
     suffix, payload = _split_typed_payload(
         text,
@@ -507,6 +605,16 @@ def _parse_optional_tail_unblock(value: object) -> tuple[float | None, str]:
     return parsed, amount_type
 
 
+def _parse_optional_tail_wait(value: object) -> float:
+    text = _optional_text(value)
+    if text is None:
+        return 6.0 * 60.0
+    minutes = float(text)
+    if minutes < 0:
+        raise ValueError("Invalid wUblk value; expected a non-negative wait in minutes.")
+    return minutes * 60.0
+
+
 def _split_typed_payload(
     text: str,
     *,
@@ -544,51 +652,29 @@ def _bounds_for_suffix(suffix: str, low: str, high: str) -> tuple[str, str]:
     raise ValueError(f"Unsupported interval type '{suffix}'.")
 
 
-def split_amount_type(atype: str) -> tuple[str, str, str]:
-    """Extrait les trois codes canoniques depuis la chaine legacy."""
-    compact = atype.strip()
-    quantity_type = _extract_typed_token(compact, "q")
-    tail_type = _extract_typed_token(compact, "t")
-    price_type = _extract_typed_token(compact, "p")
-    return quantity_type, tail_type, price_type
-
-
-def extract_head_delta_type(atype: str) -> str:
-    """Extract optional head offset semantics from the legacy compact type."""
-    return _extract_optional_typed_token(atype.strip(), "o", default="oD")
-
-
-def _extract_typed_token(raw: str, prefix: str) -> str:
-    """Trouve le token d'un prefixe legacy dans atype."""
-    start = raw.find(prefix)
-    if start < 0:
-        raise ValueError(f"Missing {prefix} token in amount type '{raw}'.")
-    if start + 1 >= len(raw):
-        raise ValueError(f"Incomplete {prefix} token in amount type '{raw}'.")
-    suffix = raw[start + 1]
-    if suffix in {"A", "D", "%"}:
-        return f"{prefix}{suffix}"
-    raise ValueError(f"Invalid {prefix} token in amount type '{raw}'.")
-
-
-def _extract_optional_typed_token(raw: str, prefix: str, *, default: str) -> str:
-    start = raw.find(prefix)
-    if start < 0:
-        return default
-    if start + 1 >= len(raw):
-        raise ValueError(f"Incomplete {prefix} token in amount type '{raw}'.")
-    suffix = raw[start + 1]
-    if prefix == "o" and suffix in {"D", "%"}:
-        return f"{prefix}{suffix}"
-    raise ValueError(f"Invalid {prefix} token in amount type '{raw}'.")
-
-
-def validate_price_interval(prix: NumberPair) -> None:
-    """Verifie la stricte croissance de l'intervalle de prix."""
-    low, high = prix
+def validate_price_interval(interval: NumberPair) -> None:
+    """Validate that the price gate interval is strictly ascending."""
+    low, high = interval
     if low >= high:
         raise ValueError(
             f"Invalid canonical price interval: low={low} high={high}; expected low < high."
+        )
+
+
+def validate_head_price_fields(
+    *,
+    name: str,
+    o_type: str,
+    h_delta: float | None,
+    h_price: float | None,
+) -> None:
+    """Keep the head price grammar aligned with exchange order families."""
+    code = parse_order_code(o_type)
+    if code.base_key == "M" and h_price is not None:
+        raise ValueError(f"Invalid hPrice for pair '{name}'; market heads do not use hPrice.")
+    if h_delta is not None and code.base_key not in {"SL", "LT"}:
+        raise ValueError(
+            f"Invalid hDelta for pair '{name}'; hDelta is only valid for SL or LT heads."
         )
 
 

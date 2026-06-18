@@ -6,17 +6,56 @@ from typing import Any, cast
 
 from kolabi.bot.__main__ import build_single_strategy
 from kolabi.bot.domain import OrderMove, OrderState, StrategySpec
-from kolabi.bot.tsv import order_pair_from_legacy_values, read_strategy_file
+from kolabi.bot.tsv import order_pair_from_typed_values, read_strategy_file
 from pytest_bdd import given, scenario, then, when
 
 
-def _write_equivalent_tsv(tmp_path: Path) -> Path:
+def _org_row(values: list[str]) -> str:
+    return "| " + " | ".join(values) + " |"
+
+
+def _write_equivalent_org_strategy(tmp_path: Path) -> Path:
     path = tmp_path / "one_pair.tsv"
+    columns = [
+        "name",
+        "tps_run",
+        "essais",
+        "tOut",
+        "pause",
+        "side",
+        "oType",
+        "hDelta",
+        "tType",
+        "tDelta",
+        "qty",
+        "tPrice",
+        "pGate",
+        "hPrice",
+        "hook",
+    ]
+    row = [
+        "XSellTail",
+        "0 1440",
+        "1",
+        "60",
+        "",
+        "sell",
+        "L",
+        "",
+        "S-",
+        "",
+        "A1",
+        "%0.5",
+        "D1 2",
+        "",
+        "",
+    ]
     path.write_text(
         "\n".join(
             [
-                "name\ttps_run\tessais\ttOut\tpause\tside\toType\toDelta\ttType\ttDelta\tatype\tqty\ttp\tprix\thook",
-                "XSellTail\t0 1440\t1\t60\t\tsell\tL\t\tS-\t\tqAt%pD\t1\t0.5\t1 2\t",
+                _org_row(columns),
+                "|" + "+".join("---" for _ in columns) + "|",
+                _org_row(row),
             ]
         )
         + "\n",
@@ -25,8 +64,8 @@ def _write_equivalent_tsv(tmp_path: Path) -> Path:
     return path
 
 
-@scenario("features/strategy_spec_monolith.feature", "TSV row maps to canonical StrategySpec")
-def test_tsv_row_maps_to_canonical_strategy_spec() -> None:
+@scenario("features/strategy_spec_monolith.feature", "Org strategy table row maps to canonical StrategySpec")
+def test_org_strategy_table_row_maps_to_canonical_strategy_spec() -> None:
     pass
 
 
@@ -37,9 +76,9 @@ def test_run_once_args_map_to_canonical_strategy_spec() -> None:
 
 @scenario(
     "features/strategy_spec_monolith.feature",
-    "TSV and run-once equivalent intent produce same canonical pair",
+    "Org strategy table and run-once equivalent intent produce same canonical pair",
 )
-def test_tsv_and_run_once_equivalence() -> None:
+def test_org_strategy_table_and_run_once_equivalence() -> None:
     pass
 
 
@@ -53,9 +92,9 @@ def test_lifecycle_vocabulary_contracts() -> None:
     pass
 
 
-@given("a valid TSV strategy row payload", target_fixture="payload")
-def given_valid_tsv_payload(tmp_path: Path) -> Path:
-    return _write_equivalent_tsv(tmp_path)
+@given("a valid Org strategy table row payload", target_fixture="payload")
+def given_valid_org_strategy_table_payload(tmp_path: Path) -> Path:
+    return _write_equivalent_org_strategy(tmp_path)
 
 
 @given("a valid run-once argument payload", target_fixture="payload")
@@ -63,42 +102,42 @@ def given_valid_run_once_payload() -> argparse.Namespace:
     return argparse.Namespace(
         name="XSellTail",
         tps_run=[0.0, 1440.0],
-        nbEssais=1,
-        drPause=None,
+        essais="1",
+        pause=None,
         tOut=60,
         side="sell",
-        prix=[1.0, 2.0],
-        quantity=1,
-        tailPrice=0.5,
-        aType="qAt%pD",
+        pGate="D1 2",
+        hPrice=None,
+        qty="A1",
+        tPrice="%0.5",
         oType="L",
-        oDelta=None,
+        hDelta=None,
         tDelta=None,
         tType="S-",
-        Hook="",
+        hook="",
     )
 
 
-@given("equivalent TSV and run-once payloads", target_fixture="payloads")
+@given("equivalent Org strategy table and run-once payloads", target_fixture="payloads")
 def given_equivalent_payloads(tmp_path: Path) -> tuple[Path, argparse.Namespace]:
     return (
-        _write_equivalent_tsv(tmp_path),
+        _write_equivalent_org_strategy(tmp_path),
         argparse.Namespace(
             name="XSellTail",
             tps_run=[0.0, 1440.0],
-            nbEssais=1,
-            drPause=None,
+            essais="1",
+            pause=None,
             tOut=60,
             side="sell",
-            prix=[1.0, 2.0],
-            quantity=1,
-            tailPrice=0.5,
-            aType="qAt%pD",
+            pGate="D1 2",
+            hPrice=None,
+            qty="A1",
+            tPrice="%0.5",
             oType="L",
-            oDelta=None,
+            hDelta=None,
             tDelta=None,
             tType="S-",
-            Hook="",
+            hook="",
         ),
     )
 
@@ -112,12 +151,17 @@ def given_invalid_interval_payload() -> dict[str, object]:
         "dr_pause": None,
         "timeout": 60,
         "side": "sell",
-        "prix": (1.0, 1.0),
-        "q": 1,
-        "tp": 0.5,
-        "atype": "qAt%pD",
+        "pGate": (1.0, 1.0),
+        "head_price_type": "pD",
+        "hPrice": None,
+        "head_order_price_type": "hD",
+        "quantity": 1,
+        "quantity_type": "qA",
+        "tPrice": 0.5,
+        "tail_price_type": "t%",
         "oType": "L",
-        "oDelta": None,
+        "hDelta": None,
+        "head_delta_type": "oD",
         "tDelta": None,
         "tType": "S-",
         "hook": "",
@@ -136,7 +180,7 @@ def when_payload_is_normalized(payload: object) -> object:
     if isinstance(payload, argparse.Namespace):
         return build_single_strategy(payload)
     try:
-        return order_pair_from_legacy_values(**cast(Any, payload))
+        return order_pair_from_typed_values(**cast(Any, payload))
     except ValueError as exc:
         return exc
 

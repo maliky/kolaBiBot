@@ -638,7 +638,7 @@ usage: kolabi.bot run [-h] --strategy STRATEGY [--exchange EXCHANGE]
 options:
   -h, --help            show this help message and exit
   --strategy, -s STRATEGY
-                      Path to TSV strategy file (e.g. orders/demo_ada.tsv)
+                      Path to Org strategy table file (e.g. orders/demo_ada.tsv)
   --exchange EXCHANGE
   --symbol SYMBOL
   --environment {demo,live}
@@ -651,7 +651,7 @@ options:
                         Futures environment.
   --ready-timeout-seconds READY_TIMEOUT_SECONDS
                         Maximum wait for fresh Kraken public/private state
-                        before the TSV loop starts.
+                        before the strategy loop starts.
   --ready-poll-seconds READY_POLL_SECONDS
                         Polling cadence used while waiting for Kraken runtime
                         readiness.
@@ -693,6 +693,38 @@ python -m kolabi.bot run --strategy orders/stra.tsv --exchange kraken --symbol P
 - Replace =logs/stra.log= with the strategy-specific file you want, for example =logs/bmm_ada.log=.
 - Default background DB feeder logs are created by =scripts/kolabidb= under =./logs/kolabidb-*.log=; inspect them with =scripts/kolabidb public logs=, =scripts/kolabidb private logs=, or =scripts/kolabidb postgres logs=.
 
+*** Reporting terminated pairs
+
+=scripts/kolabi-run-report= turns a captured runtime log into an aligned Org table for terminated head/tail pairs. It reads lifecycle timing and amendment events from the log, then reads local account DB fill rows for exact head/tail fill prices, fees, and maker/taker roles. The command does not call the exchange.
+
+#+begin_src bash
+scripts/kolabi-run-report logs/krf_ada.log
+scripts/kolabi-run-report logs/krf_ada.log -o JOURNAL.org
+#+end_src
+
+By default the command resolves =KOLABI_ACCOUNT_DB_URL= from the environment or from =.env.postgres=. Pass =--account-db-url= to use another private account DB. Use =--log-only= only when DB rows are unavailable; in that mode fill prices are the rounded values seen in runtime logs and DB-only columns such as maker/taker, net, and cumulative net can be blank.
+
+The report columns are:
+
+- =H fill UTC= and =T fill UTC=: head and tail fill times in UTC, formatted as =MM-DD HH:MM=.
+- =Life=: elapsed time from head fill to tail fill.
+- =Pair=: pair name plus right-aligned attempt count.
+- =h/t side=: abbreviated head/tail sides, for example =S/B= or =B/S=.
+- =Hfill=, =Tfill=, and =Qty=: DB-backed fill price and quantity when DB rows are available.
+- =H/T liq=: maker/taker roles, abbreviated =M= or =T=.
+- =A#=, =T amend1 UTC=, =T amend2 UTC=, and =A.diff=: tail amendment count, first two amend times, and final amended stop minus initial tail stop. =A.diff= is a quote-price difference per base unit, for example USD/ADA on =PF_ADAUSD=; it is not multiplied by =Qty=. Terminal =0.0000= stop placeholders in close updates are ignored so they do not erase the last real amend price.
+- =Gross USD=, =Net USD=, and =Cum net=: gross before fees, net after DB fees when fee rows are in USD-like currency, and running cumulative net.
+
+Useful options:
+
+#+begin_example
+--account-db-url URL  Use a specific local account DB.
+--env-file PATH      Read KOLABI_ACCOUNT_DB_URL from another env file.
+--log-only           Build a best-effort table from logs only.
+--output, -o PATH    Write the Org table to a file.
+--price-dp N         Decimal places for Hfill and Tfill.
+#+end_example
+
 ** bot run-once
 #+BEGIN_SRC bash :results output
   python -m kolabi.bot run-once --help
@@ -700,86 +732,22 @@ python -m kolabi.bot run --strategy orders/stra.tsv --exchange kraken --symbol P
 
 #+RESULTS:
 #+begin_example
-usage: kolabi.bot run-once [-h] [--exchange EXCHANGE] [--symbol SYMBOL]
-                           [--environment {demo,live}] [--db-url DB_URL]
-                           [--market-db-url MARKET_DB_URL]
-                           [--account-db-url ACCOUNT_DB_URL]
-                           [--ready-timeout-seconds READY_TIMEOUT_SECONDS]
-                           [--ready-poll-seconds READY_POLL_SECONDS]
-                           [--max-public-age-seconds MAX_PUBLIC_AGE_SECONDS]
-                           [--max-private-age-seconds MAX_PRIVATE_AGE_SECONDS]
-                           [--max-reconcile-age-seconds MAX_RECONCILE_AGE_SECONDS]
-                           [--skip-ready-check] [--log-level LOG_LEVEL]
-                           [--update-pause UPDATE_PAUSE]
-                           [--log-pause LOG_PAUSE] [--sync] [--dry-run]
-                           [--tps_run TPS_RUN TPS_RUN] [--name NAME]
-                           [--tOut TOUT] [--drPause DRPAUSE]
-                           [--prix PRIX PRIX] [--quantity QUANTITY]
-                           [--tailPrice TAILPRICE] [--oDelta ODELTA]
-                           [--tDelta TDELTA] [--tUblk TUBLK]
-                           [--nbEssais NBESSAIS]
-                           [--oType OTYPE] [--tType TTYPE] [--side SIDE]
-                           [--aType ATYPE] [--Hook HOOK]
+usage: kolabi.bot run [-h] --strategy STRATEGY [--exchange EXCHANGE]
+                      [--symbol SYMBOL]
+                      [--market-type {futures,spot,margin,isolated_margin}]
+                      [--environment {demo,live}] [--dry-run] [--simulate]
+                      [--max-active-pairs MAX_ACTIVE_PAIRS]
+                      [--rest-min-interval REST_MIN_INTERVAL]
+                      [--rest-max-inflight REST_MAX_INFLIGHT]
 
-Run one order pair through kolabi.bot while keeping the compatibility multi_kola vocabulary. The key point is that --prix is always a two-bound ordered interval, interpreted by --aType.
-
-options:
-  -h, --help            show this help message and exit
-  --exchange EXCHANGE
-  --symbol SYMBOL
-  --environment {demo,live}
-  --db-url DB_URL       Optional database URL for run persistence
-  --market-db-url MARKET_DB_URL
-                        Optional public market data DB URL. Defaults from Kraken Futures environment.
-  --account-db-url ACCOUNT_DB_URL
-                        Optional private account DB URL. Defaults from Kraken Futures environment.
-  --ready-timeout-seconds READY_TIMEOUT_SECONDS
-                        Maximum wait for fresh Kraken public/private state before the TSV loop starts.
-  --ready-poll-seconds READY_POLL_SECONDS
-                        Polling cadence used while waiting for Kraken runtime readiness.
-  --max-public-age-seconds MAX_PUBLIC_AGE_SECONDS
-                        Maximum acceptable age for the public market snapshot.
-  --max-private-age-seconds MAX_PRIVATE_AGE_SECONDS
-                        Maximum acceptable age for the private websocket heartbeat.
-  --max-reconcile-age-seconds MAX_RECONCILE_AGE_SECONDS
-                        Maximum acceptable age for the startup REST reconcile.
-  --skip-ready-check    Skip Kraken runtime freshness checks before starting the strategy.
-  --log-level LOG_LEVEL
-  --update-pause UPDATE_PAUSE
-  --log-pause LOG_PAUSE
-  --sync                Run orders synchronously (blocking) instead of spawning threads
-  --dry-run             Plan the strategy through Orange/Chronos/Isis/Janus without calling Ogun
-  --simulate            Run the async supervisor path with simulated execution and confirmations
-  --tps_run, -t TPS_RUN TPS_RUN
-                        Strategy validity window in minutes from launch, as start end. Example: -t 0 60 means active now for one hour.
-  --name, -m NAME       Internal order name shown in logs.
-  --tOut, -O TOUT       Validation timeout in minutes for the main order lifecycle.
-  --drPause, -p DRPAUSE
-                        Pause between repeated attempts, in minutes.
-  --prix, -x PRIX PRIX  Price interval as two ordered bounds. This is a strict range, not a single point. Meaning depends on aType: pD = differential from reference price, p% = percent from reference price, pA = absolute prices. Examples: -a qAt%pD -x 1 2 means from ref+1 to ref+2; -a qAt%p% -x -1 1 means from -1% to +1% around ref; -a qAt%pA -x 79320 79340 means an absolute interval. Do not use equal bounds like -x 1 1.
-  --quantity, -q QUANTITY
-                        Absolute size or percentage, depending on aType.
-  --tailPrice, -T TAILPRICE
-                        Tail thickness using the compatibility aType semantics. Default interpretation is percent unless aType contains tA or tD.
-  --oDelta, -d ODELTA   Difference between trigger price and order price.
-  --tDelta, -s TDELTA   Difference between trigger price and tail stop price.
-  --tUblk TUBLK         Tail first-unblock favourable movement. Use D for nominal distance or % for percent of the head-fill reference, for example D5 or %0.2.
-                        Once unblocked, the first managed tail update jumps to the profit side of entry by four ticks plus the observed spread.
-  --nbEssais, -n NBESSAIS
-                        Number of attempts.
-  --oType, -o OTYPE     Main order type in the compatibility vocabulary. Examples: M = Market, L = Limit, S = Stop, SL = StopLimit, MT = MarketIfTouched, LT = LimitIfTouched.
-  --tType, -y TTYPE     Tail order type in the compatibility vocabulary. Examples: S- = reduce-only Stop on lastMidPrice, Sf- = reduce-only Stop on fairPrice, SL- = reduce-only StopLimit.
-  --side, -c SIDE       Order side.
-  --aType, -a ATYPE     Compatibility interpretation of prix, quantity, and tailPrice. Use pD/p%/pA for price, q%/qA for quantity, t%/tD/tA for tail. Example: qAt%pD means absolute quantity, percent tail, differential prices.
-  --Hook, -H HOOK       Optional hook dependency, for example XBrx-S_T.
-
-Examples:
-  Differential around current reference:
-    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run
-  Percent around current reference:
-    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XPct -t 0 60 -x -1 1 -q 1 -T 0.5 -o L -y S- -c buy -a qAt%p% --dry-run
-  Absolute interval:
-    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XAbs -t 0 60 -x 79320 79340 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pA --dry-run
+selected options:
+  --strategy, -s STRATEGY
+                        Path to Org strategy table file, for example orders/demo_ada.tsv.
+  --exchange EXCHANGE   Default exchange for rows without an exchg value.
+  --symbol SYMBOL       Default exchange product id for rows without a symbol value.
+  --market-type         Default market lane for strategy rows without an exchange route code.
+  --dry-run             Plan the strategy through Dragon/Chronos/Isis/Horus without calling Ogun.
+  --simulate            Run the async supervisor path with simulated execution and confirmations.
 #+end_example
 
 ** bot preflight
@@ -812,9 +780,9 @@ options:
   --symbol SYMBOL       Exchange product id. Default follows --exchange and
                         --market-type.
   --market-type {futures,spot,margin,isolated_margin}
-                        Default market lane for TSV rows without an exchange
+                        Default market lane for strategy rows without an exchange
                         route code. (default: futures)
-  --strategy STRATEGY   Optional TSV strategy file; checks every
+  --strategy STRATEGY   Optional Org strategy table; checks every
                         exchange/symbol route in the file. (default: None)
   --environment {demo,live}
                         Endpoint family. (default: demo)
@@ -861,7 +829,7 @@ options:
 # Need to centralize this in the doc direclty
 
 - Command: =python -m kolabi.bot preflight=
-- Role: check whether exchange route credentials and public/private DB state are ready enough to start a TSV strategy
+- Role: check whether exchange route credentials and public/private DB state are ready enough to start an Org strategy table
 - Output: reports =credentials_ready=, =base_urls_ready=, and =route_config_ready=; base URL fields report only source names such as =override= or an env var name, not the URL value
 
 Options:
@@ -870,7 +838,7 @@ Options:
 |-------------------------------+----------------------------------------|
 | =--exchange=                  | exchange name                          |
 | =--symbol=                    | native exchange symbol; default follows exchange and market type |
-| =--strategy=                  | optional TSV strategy; checks every route in the file |
+| =--strategy=                  | optional Org strategy table; checks every route in the file |
 | =--environment {demo,live}=   | endpoint family                        |
 | =--base-url=                  | REST base URL override for the default exchange/market route |
 | =--market-db-url=             | public market DB override              |
@@ -920,11 +888,11 @@ python -m kolabi.bargain.cli --environment demo --symbol PI_XBTUSD  cancel --ord
 
 ** Test a more complicated order with a Tail
 #+begin_src bash
-python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -a qAt%pD -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell  --dry-run
+python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 'D1 2' --hPrice D1 --qty A1 --tPrice %0.5 -o L -y S- -c sell --dry-run
 
-python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XPct -t 0 60 -a qAt%p% -x -1 1 -q 1 -T 0.5 -o L -y S- -c buy  --dry-run
+python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XPct -t 0 60 -x '%-1 1' --hPrice %0.5 --qty A1 --tPrice %0.5 -o L -y S- -c buy --dry-run
 
-python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XAbs -t 0 60 -a qAt%pA -x 79320 79340 -q 1 -T 0.5 -o L -y S- -c sell  --dry-run
+python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XAbs -t 0 60 -x 'A79320 79340' --hPrice A79350 --qty A1 --tPrice D0.5 -o L -y S- -c sell --dry-run
 #+end_src
 
 

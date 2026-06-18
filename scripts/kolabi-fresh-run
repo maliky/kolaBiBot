@@ -23,6 +23,8 @@ DRY_RUN=0
 API_KEY_ENV="${API_KEY_ENV:-}"
 API_SECRET_ENV="${API_SECRET_ENV:-}"
 EXTRA_BOT_ARGS=()
+ROUTE_LINES_CACHE=""
+PAIR_COUNT_CACHE=""
 
 usage() {
     cat <<'EOF'
@@ -281,12 +283,35 @@ strategy_pair_count() {
     python -m kolabi.bot.fresh_run pair-count --strategy "$STRATEGY"
 }
 
+resolved_route_lines() {
+    if [[ -z "$ROUTE_LINES_CACHE" ]]; then
+        ROUTE_LINES_CACHE="$(route_lines)"
+    fi
+    printf '%s\n' "$ROUTE_LINES_CACHE"
+}
+
+resolved_pair_count() {
+    if [[ -z "$PAIR_COUNT_CACHE" ]]; then
+        PAIR_COUNT_CACHE="$(strategy_pair_count)"
+    fi
+    printf '%s\n' "$PAIR_COUNT_CACHE"
+}
+
+validate_strategy() {
+    if ! ROUTE_LINES_CACHE="$(route_lines)"; then
+        die "strategy route resolution failed; fix the strategy table before purging DBs or starting listeners."
+    fi
+    if ! PAIR_COUNT_CACHE="$(strategy_pair_count)"; then
+        die "strategy pair count failed; fix the strategy table before purging DBs or starting listeners."
+    fi
+}
+
 resolved_max_active_pairs() {
     if [[ -n "$MAX_ACTIVE_PAIRS" ]]; then
         printf '%s\n' "$MAX_ACTIVE_PAIRS"
         return
     fi
-    strategy_pair_count
+    resolved_pair_count
 }
 
 start_postgres() {
@@ -350,12 +375,17 @@ start_feeders() {
             private_cmd+=(--api-secret-env "$route_secret_env")
         fi
         run_cmd "${private_cmd[@]}"
-    done < <(route_lines)
+    done < <(resolved_route_lines)
 }
 
 bot_command() {
     local max_active_pairs
-    max_active_pairs="$(resolved_max_active_pairs)"
+    if ! max_active_pairs="$(resolved_max_active_pairs)"; then
+        die "could not resolve --max-active-pairs; fix the strategy table or pass --max-active-pairs N."
+    fi
+    if [[ -z "$max_active_pairs" ]]; then
+        die "resolved --max-active-pairs is empty; fix the strategy table or pass --max-active-pairs N."
+    fi
     local cmd=(
         python -m kolabi.bot run
         --strategy "$STRATEGY"
@@ -382,7 +412,9 @@ bot_command() {
 
 print_or_start_bot() {
     local command_text
-    command_text="$(bot_command)"
+    if ! command_text="$(bot_command)"; then
+        exit $?
+    fi
     if [[ "$START_BOT" -eq 0 ]]; then
         info "bot launch command:"
         printf '%s\n' "$command_text"
@@ -401,6 +433,7 @@ main() {
     validate_config
     load_env_file
     info "fresh setup strategy=$STRATEGY environment=$ENVIRONMENT default_route=${EXCHANGE}:${MARKET_TYPE}:${SYMBOL} account_scope=$ACCOUNT_SCOPE"
+    validate_strategy
     stop_listener_services
     start_postgres
     purge_databases

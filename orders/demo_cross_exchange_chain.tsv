@@ -1,13 +1,13 @@
-exchg	symbol	name	tps_run	essais	tOut	pause	side	oType	oDelta	qty	tType	tDelta	prix	tp	hook
+# Org strategy table. File extension is kept for existing commands.
+| exchg | symbol | name | tps_run | essais | tOut | pause | side | oType | hDelta | qty | tType | tDelta | pGate | hPrice | tPrice | tUblk | wUblk | hook |
+|---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---|
+| BTX | XBTUSD | XBTC_SEL | 0 1440 | 1 | 6 |  | sell | L |  | A1 | S- |  | D- + | D6 | D20 |  |  |  |
+| KRKF | PI_ADAUSD | KADA_SEL | 0 1440 | 1 | 6 |  | sell | L |  | A1 | S- |  | D- + | %0.20 | %0.10 |  |  | XBTC_SEL-head-filled |
+| BINS | ADAUSDT | NADA_BUY | 0 1440 | 1 | 6 |  | buy | M |  | A3 | L! |  | D- + |  | D0 |  |  | KADA_SEL-tail-closed |
 
-BTX	XBTUSD	XBTC_SEL	0 1440	1	6		sell	L	D6	A1	S-		D- +	D20
-KRKF	PI_ADAUSD	KADA_SEL	0 1440	1	6		sell	L	%0.20	A1	S-		D- +	%0.10	XBTC_SEL-head-filled
-BINS	ADAUSDT	NADA_BUY	0 1440	1	6		buy	M		A3	L!		D- +	D0	KADA_SEL-tail-closed
-
-
+# Notes from the previous strategy fixture:
 # Demo-only cross-exchange chain:
 # 1. BitMEX futures sells XBTUSD with a limit head 6 USD above the current BTC reference and a buy stop tail 20 USD above the fill/reference.
 # 2. Kraken Futures sells ADA after the BitMEX head fills, with a limit head 20 bps above the current ADA reference and a buy stop tail 10 bps above the fill/reference.
 # 3. Binance spot buys ADA after the Kraken tail closes, then emits a post-only zero-distance limit tail intended to cancel immediately.
 # Before running, probe the Kraken ADA demo symbol and replace PI_ADAUSD if the venue reports a different tradeable ADA instrument.
-

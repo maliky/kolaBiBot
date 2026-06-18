@@ -1,7 +1,7 @@
 Kolabi Bot
 
 * Presentation
-Kolabi is a typed, DB-grounded, async order-pair bot for exchange-routed spot, margin, and futures strategies. The active production path is the TSV strategy runtime in =kolabi.bot=, backed by public market-data feeders and private account/order feeders in =kolabi.tree=. Kraken, Binance, and BitMEX now share the same DB-grounded route model: every order row resolves to an exchange, market type, and native exchange symbol.
+Kolabi is a typed, DB-grounded, async order-pair bot for exchange-routed spot, margin, and futures strategies. The active production path is the Org strategy table runtime in =kolabi.bot=, backed by public market-data feeders and private account/order feeders in =kolabi.tree=. Kraken, Binance, and BitMEX now share the same DB-grounded route model: every order row resolves to an exchange, market type, and native exchange symbol.
 
 The core strategy unit is an order pair:
 - a =head= order enters or opens the position;
@@ -14,13 +14,13 @@ The core strategy unit is an order pair:
 - =binance=: futures, spot, cross-margin, and isolated-margin via =BINF=, =BINS=, =BINM=, and =BINI= route codes.
 - =bitmex=: futures and spot via =BTX= / =BTXF= and =BTXS= route codes, with =BMXF= / =BMXS= kept as aliases.
 
-The bot can run a strategy file whose rows target different exchange routes. TSV rows may carry platform-specific symbols directly; no canonical symbol mapping table is used. Each active route needs matching public and private DB feeder evidence before live execution.
+The bot can run a strategy file whose rows target different exchange routes. Org strategy rows may carry platform-specific symbols directly; no canonical symbol mapping table is used. Each active route needs matching public and private DB feeder evidence before live execution.
 
 * Strategy Conditions
 
 Each pair can be gated by:
 - an entry window, =tps_run=, in minutes from launch;
-- a typed price interval, =prix=;
+- a typed price interval, =pGate=;
 - a head timeout, =tOut=, for unfilled head orders;
 - a repeat count, =essais= / =-n=;
 - a pause between repetitions, =pause= / =-p=;
@@ -34,38 +34,36 @@ Important runtime semantics:
 
 * Price, Quantity, And Tail Units
 
-The active TSV grammar puts the type prefix on each non-empty value:
-- =prix= uses =D=, =%=, or =A= before its two bounds, for example =D- +=, =D- -5=, or =%0.20 0.30=.
+The active Org strategy grammar puts the type prefix on each non-empty value:
+- =pGate= uses =D=, =%=, or =A= before its two bounds, for example =D- +=, =D- -5=, or =%0.20 0.30=.
+- =hPrice= uses =D=, =%=, or =A= before one value; it is forced lazily only when =pGate= opens and is relative to the gate-open reference unless absolute =A= is used.
 - =qty= uses =A= or =%=, for example =A3=.
-- =tp= uses =D=, =%=, or =A=, for example =D20= or =%0.10=.
-- =oDelta= uses =D= or =%=, for example =D6= or =%0.20=; signed =D= values are accepted but materialised as side-aware positive distances.
+- =tPrice= uses =D=, =%=, or =A=, for example =D20= or =%0.10=.
+- =hDelta= uses =D= or =%= for =SL= and =LT= head trigger-to-limit offsets; signed =D= values are accepted but materialised as positive distances.
 - =tDelta= uses =D= when present.
-- =tUblk= uses =D= or =%= when present, for example =D5= or =%0.20=. Empty keeps the default first-unblock distance: the initial tail distance plus observed spread.
-- After =tUblk= unblocks the tail, the first managed update protects entry by jumping to the profit side of entry by four ticks plus the observed spread; later updates use the normal trailing curve.
+- =tUblk= uses =D= or =%= when present, for example =D5= or =%0.20=. Empty keeps the default first-unblock distance: the initial tail distance plus the first-jump guard.
+- After =tUblk= unblocks the tail, the first managed update protects entry by jumping to the profit side of entry by =max(max observed spread, 8 ticks) + two taker fees=; with a taker fee of =0.05%=, the fee part is =0.001 * head-fill price=. Later updates use the normal trailing curve.
 
-Only empty typed fields receive implicit defaults. A non-empty typed value without its prefix is rejected. The old compact =atype= grammar is still accepted for compatibility files, but new files should not use it.
+Only empty typed fields receive implicit defaults. A non-empty typed value without its prefix is rejected. Legacy tab-separated files and compact =atype= inputs are no longer accepted.
 
-The =prix= field is a two-bound interval, not a single price. Use semi-open operator style in TSV files when appropriate, for example =D- -5= or =D5 +=, so the parser can translate the condition into a bounded internal interval.
+The =pGate= field is a two-bound interval, not a single price. Use semi-open operator style in Org strategy tables when appropriate, for example =D- -5= or =D5 +=, so the parser can translate the condition into a bounded internal interval. The =hPrice= field is not resolved before the pair is active; for example a sell =L= with =pGate=%- -2= and =hPrice=D10= places the limit at the gate-open reference plus 10.
 
-* TSV Strategy Files
+* Org Strategy Tables
 
 Strategy files live under =orders/=.
 
-The active TSV grammar is:
+The active Org table grammar is:
 
 #+begin_example
-exchg  symbol  name  tps_run  essais  tOut  pause  side  oType  oDelta  qty  tType  tDelta  prix  tp  tUblk  hook
+| exchg | symbol | name | tps_run | essais | tOut | pause | side | oType | hDelta | qty | tType | tDelta | pGate | hPrice | tPrice | tUblk | wUblk | hook |
 #+end_example
 
-The =exchg= and =symbol= columns are optional. When =exchg= is omitted, the CLI =--exchange= and =--market-type= are used. When =symbol= is omitted, the effective CLI symbol is used. If CLI =--symbol= is also omitted, the route default is selected: =PI_XBTUSD= for Kraken futures, =XBT/USD= for Kraken spot/margin, =BTCUSDT= for Binance futures/spot/margin/isolated margin, =XBTUSD= for BitMEX futures, and =XBT_USDT= for BitMEX spot. When present, rows use platform-specific symbols directly, for example =PI_XBTUSD=, =BTCUSDT=, or =XBTUSD=. Empty TSV columns are ignored. A multi-route TSV run requires one shared market DB URL and public/private feeders for every active exchange, market type, account scope, and symbol.
+The =exchg= and =symbol= columns are optional. When =exchg= is omitted, the CLI =--exchange= and =--market-type= are used. When =symbol= is omitted, the effective CLI symbol is used. If CLI =--symbol= is also omitted, the route default is selected: =PI_XBTUSD= for Kraken futures, =XBT/USD= for Kraken spot/margin, =BTCUSDT= for Binance futures/spot/margin/isolated margin, =XBTUSD= for BitMEX futures, and =XBT_USDT= for BitMEX spot. When present, rows use platform-specific symbols directly, for example =PI_XBTUSD=, =BTCUSDT=, or =XBTUSD=. Blank Org cells keep their typed defaults where a default exists. A multi-route strategy run requires one shared market DB URL and public/private feeders for every active exchange, market type, account scope, and symbol.
 
 Useful examples:
-- =orders/demo_ada.tsv= documents compact grammar examples.
-- =orders/demo_cross_exchange_chain.tsv= demonstrates the typed multi-exchange grammar.
+- =orders/demo_ada.tsv= documents order-type examples in the Org table grammar.
+- =orders/demo_cross_exchange_chain.tsv= demonstrates the typed multi-exchange Org table grammar.
 - =orders/demo_kraken_xbt.tsv= covers Kraken XBT combinations.
-- =orders/chained_xbt.tsv= exercises chained order flow.
-- =orders/rep_xbt.tsv= exercises repetition.
-- =orders/pi_xbtusd_sell_plus1_tail_0p5.tsv= is a one-row tail example.
 
 * DB And Feed Services
 
@@ -85,7 +83,7 @@ scripts/kolabidb public start --exchange kraken --market-type futures --environm
 scripts/kolabidb private start --exchange kraken --market-type futures --environment demo --account-scope default
 #+end_src
 
-Start other route lanes by selecting the same exchange and market type that appears in the TSV:
+Start other route lanes by selecting the same exchange and market type that appears in the Org strategy table:
 
 #+begin_src bash
 scripts/kolabidb public start --exchange binance --market-type spot --environment demo --pair BTCUSDT
@@ -151,15 +149,15 @@ The bot =preflight= command reports =credentials_ready=, =base_urls_ready=, and 
 
 * Running The Bot
 #+begin_src bash
-  # Dry-run a TSV strategy:
+  # Dry-run an Org strategy table:
   python -m kolabi.bot run --strategy orders/demo_ada.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
 
-  # Run a TSV strategy through the async runtime:
+  # Run an Org strategy table through the async runtime:
   python -m kolabi.bot run --strategy orders/rep_xbt.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
   python -m kolabi.bot run --strategy orders/demo_margin.tsv --exchange binance --market-type margin --environment demo --base-url https://margin-demo.example.test
 
-  # Run one compatibility-vocabulary order pair:
-  python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run
+  # Run one typed order pair:
+  python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo -m XSellTail -t 0 1440 -O 60 -x 'D1 2' --hPrice D1 --qty A1 --tPrice %0.5 -o L -y S- -c sell --dry-run
 
   # Preflight route credential and DB readiness:
   python -m kolabi.bot preflight --exchange kraken --symbol PI_XBTUSD --environment demo
@@ -239,7 +237,7 @@ kolabi/
 |  |- indicators.py               # reads indicator snapshots from the public DB
 |  |- persistence.py              # optional bot-run persistence
 |  `- tsv/
-|     `- parser.py                # TSV parser and OrderSpec normalisation
+|     `- parser.py                # Org strategy table parser and OrderSpec normalisation
 |- kraken_contract/
 |  `- futures.py                  # Kraken Futures wire contract and order serialisation
 |- openapi/
@@ -281,13 +279,9 @@ kolabi/
    `- service.py                  # shared service helpers for tree modules
 
 orders/                       # example strategy definitions
-|- demo_ada.tsv                 # compact contract and order-type examples
+|- demo_ada.tsv                 # Org table contract and order-type examples
 |- demo_kraken_xbt.tsv          # Kraken XBT grammar matrix
-|- chained_xbt.tsv              # chained order scenario
-|- rep_xbt.tsv                  # repetition scenario
-|- xbt_bk.tsv                   # broader strategy regression file
-`- pi_xbtusd_sell_plus1_tail_0p5.tsv
-                                # one-row Kraken demo example for a bot-managed tail order
+`- demo_cross_exchange_chain.tsv # multi-exchange chain scenario
 
 tests/                        # active regression suite
 |- bot/                         # bot CLI, parser, and runtime regression tests
@@ -301,7 +295,7 @@ Read order for the core code:
 - Start with =kolabi/tree/kraken.py= and =kolabi/tree/account.py= to see how the public and private Kraken DBs are fed.
 - Read =kolabi/shared/exchanges/kraken_adapter.py= next to inspect real order placement, amend, cancel, and REST mapping.
 - Read =kolabi/bot/__main__.py= and =kolabi/bot/service.py= to see how =run=, =preflight=, and =run-once= enter the runtime.
-- Read =kolabi/bot/tsv/parser.py= if you want to map one TSV row to one normalized bot strategy.
+- Read =kolabi/bot/tsv/parser.py= if you want to map one Org strategy row to one normalized bot strategy.
 - Read =kolabi/bot/= for the active strategy runtime and =archives/runtime/= only for historical reference.
 
 * Misc

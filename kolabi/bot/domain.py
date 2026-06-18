@@ -194,6 +194,9 @@ class OrderPairSpec:
     market_type: str | None = None
     tail_unblock_spec: float | None = None
     tail_unblock_spec_type: str = "uD"
+    tail_second_update_wait_seconds: float = 6.0
+    head_order_price_spec: float | None = None
+    head_order_price_spec_type: str = "hD"
 
     @property
     def attempts(self) -> int | None:
@@ -282,6 +285,8 @@ class TailTrailState:
     first_unblocked_at: datetime | None = None
     last_confirmed_at: datetime | None = None
     max_observed_spread: Decimal = Decimal("0")
+    local_amend_count: int = 0
+    catch_basis_width: Decimal | None = None
 
 
 @dataclass(frozen=True)

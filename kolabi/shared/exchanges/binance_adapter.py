@@ -1,6 +1,6 @@
 """Binance REST adapters.
 
-The bot passes platform-specific symbols in TSV files, so no symbol mapping is
+The bot passes platform-specific symbols in strategy rows, so no symbol mapping is
 attempted here. USD-M Futures remains the default adapter; Spot and Margin share
 the same signing, rounding, audit, and runtime-facing order contract where the
 Binance APIs overlap.

@@ -1,7 +1,7 @@
-"""Parsers for canonical strategy definitions built from legacy TSV input."""
+"""Parsers for canonical strategy definitions built from typed strategy input."""
 
 from .parser import (
-    order_pair_from_legacy_values,
+    order_pair_from_typed_values,
     read_strategy_file,
     strategy_from_pairs,
     strategy_from_run_once_args,
@@ -9,7 +9,7 @@ from .parser import (
 )
 
 __all__ = [
-    "order_pair_from_legacy_values",
+    "order_pair_from_typed_values",
     "read_strategy_file",
     "strategy_from_pairs",
     "strategy_from_run_once_args",

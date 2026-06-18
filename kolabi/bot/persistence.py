@@ -43,7 +43,8 @@ class OrderRecorder:
             symbol="",
             strategy={
                 "tps_run": (pair.window.start_minutes, pair.window.end_minutes),
-                "prix": pair.head_price,
+                "pGate": pair.head_price,
+                "hPrice": pair.head_order_price_spec,
                 "otype": pair.head.order_type,
                 "atype": pair.amount_type,
                 "indicators": indicators,

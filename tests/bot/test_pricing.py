@@ -69,17 +69,17 @@ def test_head_limit_mark_suffix_uses_mark_reference() -> None:
     assert reference == 120.0
 
 
-def test_sell_limit_percent_offset_materialises_above_mark_reference() -> None:
+def test_sell_limit_percent_hprice_materialises_above_mark_reference() -> None:
     pair = replace(
         _pair("Lm!"),
         head=HeadSpec(
             side=Side.SELL,
             order_type="Lm!",
-            delta=1.5,
-            delta_type="o%",
         ),
+        head_order_price_spec=1.5,
+        head_order_price_spec_type="h%",
         head_price=(-1_000_000.0, 1_000_000.0),
-        amount_type="qAtDpDo%",
+        amount_type="qAtDpDh%",
     )
 
     price, stop_price = resolve_head_order_prices(
@@ -96,17 +96,17 @@ def test_sell_limit_percent_offset_materialises_above_mark_reference() -> None:
     assert stop_price is None
 
 
-def test_buy_limit_percent_offset_materialises_below_mark_reference() -> None:
+def test_buy_limit_percent_hprice_materialises_below_mark_reference() -> None:
     pair = replace(
         _pair("Lm!"),
         head=HeadSpec(
             side=Side.BUY,
             order_type="Lm!",
-            delta=1.5,
-            delta_type="o%",
         ),
+        head_order_price_spec=1.5,
+        head_order_price_spec_type="h%",
         head_price=(-1_000_000.0, 1_000_000.0),
-        amount_type="qAtDpDo%",
+        amount_type="qAtDpDh%",
     )
 
     price, stop_price = resolve_head_order_prices(
@@ -123,7 +123,7 @@ def test_buy_limit_percent_offset_materialises_below_mark_reference() -> None:
     assert stop_price is None
 
 
-def test_buy_limit_blank_delta_materialises_one_tick_below_reference() -> None:
+def test_buy_limit_blank_hprice_materialises_one_tick_below_reference() -> None:
     pair = _pair("Lm")
 
     price, stop_price = resolve_head_order_prices(
@@ -141,7 +141,7 @@ def test_buy_limit_blank_delta_materialises_one_tick_below_reference() -> None:
     assert stop_price is None
 
 
-def test_sell_limit_blank_delta_materialises_one_tick_above_reference() -> None:
+def test_sell_limit_blank_hprice_materialises_one_tick_above_reference() -> None:
     pair = replace(_pair("Lm"), head=HeadSpec(side=Side.SELL, order_type="Lm"))
 
     price, stop_price = resolve_head_order_prices(
@@ -159,8 +159,8 @@ def test_sell_limit_blank_delta_materialises_one_tick_above_reference() -> None:
     assert stop_price is None
 
 
-def test_blank_head_delta_requires_tick_size() -> None:
-    with pytest.raises(ValueError, match="blank head oDelta"):
+def test_blank_head_hprice_keyword_requires_tick_size() -> None:
+    with pytest.raises(ValueError, match="blank hPrice"):
         resolve_head_order_prices(
             _pair("Lm"),
             _Market(
@@ -237,7 +237,39 @@ def test_head_limit_hook_carries_materialised_order_price() -> None:
 
     assert move is not None
     assert move.reply is not None
-    assert move.reply["head_order_price"] == 94.5
+    assert move.reply["head_order_price"] == 95.5
+
+
+def test_sell_limit_hprice_is_lazy_relative_to_gate_open_reference() -> None:
+    pair = replace(
+        _pair("L"),
+        head=HeadSpec(side=Side.SELL, order_type="L"),
+        head_price=(-90.0, -2.0),
+        head_price_type="p%",
+        head_order_price_spec=10.0,
+        head_order_price_spec_type="hD",
+    )
+    now = datetime.now(timezone.utc)
+    move = head_hooked_from_market_snapshot(
+        pair_state=PairCycleState(
+            pair=pair,
+            head_trigger_reference_price=Decimal("100"),
+        ),
+        launched_at=now,
+        snapshot=MarketSnapshotFact(
+            symbol="PI_XBTUSD",
+            best_bid=97.9,
+            best_ask=98.1,
+            mid_price=98.0,
+            tick_size=0.1,
+            occurred_at=now,
+        ),
+    )
+
+    assert move is not None
+    assert move.reply is not None
+    assert move.reply["reference_price"] == 97.9
+    assert move.reply["head_order_price"] == 107.9
 
 
 def test_head_stop_hook_carries_materialised_stop_price() -> None:
@@ -269,10 +301,12 @@ def test_head_stop_hook_carries_materialised_stop_price() -> None:
     assert move.reply["head_order_stop_price"] == 103.5
 
 
-def test_buy_stop_head_delta_places_trigger_above_reference() -> None:
+def test_buy_stop_hprice_places_trigger_above_reference() -> None:
     pair = replace(
         _pair("Sl"),
-        head=HeadSpec(side=Side.BUY, order_type="Sl", delta=10.0),
+        head=HeadSpec(side=Side.BUY, order_type="Sl"),
+        head_order_price_spec=10.0,
+        head_order_price_spec_type="hD",
     )
 
     price, stop_price = resolve_head_order_prices(
@@ -289,10 +323,12 @@ def test_buy_stop_head_delta_places_trigger_above_reference() -> None:
     assert stop_price == 110.5
 
 
-def test_sell_stop_head_delta_places_trigger_below_reference() -> None:
+def test_sell_stop_hprice_places_trigger_below_reference() -> None:
     pair = replace(
         _pair("Sl"),
-        head=HeadSpec(side=Side.SELL, order_type="Sl", delta=10.0),
+        head=HeadSpec(side=Side.SELL, order_type="Sl"),
+        head_order_price_spec=10.0,
+        head_order_price_spec_type="hD",
     )
 
     price, stop_price = resolve_head_order_prices(

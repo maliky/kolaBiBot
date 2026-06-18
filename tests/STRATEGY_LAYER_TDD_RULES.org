@@ -6,9 +6,9 @@
 
 *** Rule 1.3 — =OrderSpec= shall be delete immediately and force all callers to build =OrderPairSpec=.
 
-** 2) One ingestion layer for TSV and run-once
+** 2) One ingestion layer for Org strategy tables and run-once
 
-*** Rule 2.1 — TSV ingestion and run-once arguments shall produce the same canonical =StrategySpec= shape before runtime execution.
+*** Rule 2.1 — Org strategy table ingestion and run-once arguments shall produce the same canonical =StrategySpec= shape before runtime execution.
 
 *** Rule 2.2 — The canonical strategy layer shall require =name=.
 *** Rule 2.3 — The canonical strategy layer shall require =window(start_minutes, end_minutes)=.
@@ -30,11 +30,11 @@
 *** Rule 2.11 — The canonical strategy layer shall require =tail_price_spec= and =tail_price_spec_type=.
 
 *** Rule 2.12 — The canonical strategy layer shall require =hook_name=.
-*** Rule 2.13 — Legacy aliases shall continue to parse at the ingestion boundary, including =tps_run=, =prix=, =q=, =tp=, =atype=, =oType=, =tType=, =hook=, =oDelta=, and =tDelta=.
+*** Rule 2.13 — Legacy aliases shall fail at the ingestion boundary; public input uses typed Org fields such as =qty=, =tp=, =pgate=, =hprice=, =oDelta=, =tDelta=, =tUblk=, and =wUblk=.
 
 ** 3) Strict invariants
 
-*** Rule 3.1 — The price interval =prix= shall be strictly ascending: =low < high=.
+*** Rule 3.1 — The price gate interval =pgate= shall be strictly ascending: =low < high=.
 
 *** Rule 3.2 — Strategy-layer quantities shall be positive.
 *** Rule 3.3 — Exchange-specific minimum quantity checks shall be performed at the exchange boundary, not in the strategy parser.
@@ -102,11 +102,11 @@ failed
 
 ** 5) Behaviour scenarios to freeze
 
-*** Rule 5.1 — The first scenario shall prove that one TSV row maps deterministically to one canonical =StrategySpec=.
+*** Rule 5.1 — The first scenario shall prove that one Org strategy row maps deterministically to one canonical =StrategySpec=.
 
 *** Rule 5.2 — The second scenario shall prove that run-once arguments map deterministically to one canonical =StrategySpec=.
 
-*** Rule 5.3 — The third scenario shall prove that equivalent intent from TSV and run-once arguments produces the same canonical spec.
+*** Rule 5.3 — The third scenario shall prove that equivalent intent from an Org strategy row and run-once arguments produces the same canonical spec.
 
 *** Rule 5.4 — The fourth scenario shall prove that an invalid interval produces a deterministic validation error.
 

@@ -36,7 +36,7 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
         "--market-type",
         choices=("futures", "spot", "margin", "isolated_margin"),
         default="futures",
-        help="Default market lane for TSV rows without an exchange route code.",
+        help="Default market lane for strategy rows without an exchange route code.",
     )
     parser.add_argument(
         "--environment",
@@ -128,7 +128,7 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
         "--ready-timeout-seconds",
         type=float,
         default=45.0,
-        help="Maximum wait for fresh exchange public/private state before the TSV loop starts.",
+        help="Maximum wait for fresh exchange public/private state before the strategy loop starts.",
     )
     parser.add_argument(
         "--ready-poll-seconds",
@@ -198,13 +198,13 @@ def add_runtime_options(parser: argparse.ArgumentParser) -> None:
 
 
 def add_single_order_options(parser: argparse.ArgumentParser) -> None:
-    """Expose the compatibility one-order vocabulary on the active kolabi.bot CLI."""
+    """Expose one typed strategy row on the active kolabi.bot CLI."""
     parser.add_argument(
         "--tps_run",
         "-t",
         type=float,
         nargs=2,
-        default=[-1, 800],
+        default=[0, 1440],
         help=(
             "Strategy validity window in minutes from launch, as start end. "
             "Example: -t 0 60 means active now for one hour."
@@ -224,58 +224,58 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         help="Validation timeout in minutes for the main order lifecycle.",
     )
     parser.add_argument(
-        "--drPause",
+        "--pause",
         "-p",
         type=float,
         default=None,
         help="Pause between repeated attempts, in minutes.",
     )
     parser.add_argument(
-        "--prix",
+        "--pGate",
         "-x",
-        type=float,
-        nargs=2,
-        default=[-1, 1],
+        dest="pGate",
+        type=str,
+        default="D- +",
         help=(
-            "Price interval as two ordered bounds. This is a strict range, not a single point. "
-            "Meaning depends on aType: pD = differential from reference price, "
-            "p%% = percent from reference price, pA = absolute prices. "
-            "Examples: -a qAt%%pD -x 1 2 means from ref+1 to ref+2; "
-            "-a qAt%%p%% -x -1 1 means from -1%% to +1%% around ref; "
-            "-a qAt%%pA -x 79320 79340 means an absolute interval. "
-            "Do not use equal bounds like -x 1 1."
+            "Typed activation gate interval as one string. Use D, %%, or A before two bounds, "
+            "for example --pGate 'D- +' or --pGate '%%-1 1'."
         ),
     )
     parser.add_argument(
-        "--quantity",
-        "-q",
-        type=int,
-        default=75,
-        help="Absolute size or percentage, depending on aType.",
-    )
-    parser.add_argument(
-        "--tailPrice",
-        "-T",
-        type=float,
-        default=2.0,
-        help=(
-            "Tail thickness using the compatibility aType semantics. "
-            "Default interpretation is percent unless aType contains tA or tD."
-        ),
-    )
-    parser.add_argument(
-        "--oDelta",
-        "-d",
-        type=float,
+        "--hPrice",
+        dest="hPrice",
+        type=str,
         default=None,
-        help="Head offset. Nominal by default; use aType token o%% for percent offset.",
+        help=(
+            "Typed lazy head order price. Use D, %%, or A before one value, "
+            "for example --hPrice D10 or --hPrice '%%0.2'."
+        ),
+    )
+    parser.add_argument(
+        "--qty",
+        type=str,
+        required=True,
+        help="Typed quantity, for example A17 for absolute size or %%5 for percent.",
+    )
+    parser.add_argument(
+        "--tPrice",
+        dest="tPrice",
+        type=str,
+        default=None,
+        help="Typed tail distance, for example D20, %%1.2, or A0.25.",
+    )
+    parser.add_argument(
+        "--hDelta",
+        dest="hDelta",
+        type=str,
+        default=None,
+        help="Typed SL/LT trigger-to-limit offset, for example D6 or %%0.20.",
     )
     parser.add_argument(
         "--tDelta",
-        "-s",
-        type=float,
+        type=str,
         default=None,
-        help="Difference between trigger price and tail stop price.",
+        help="Typed tail trigger-to-limit difference, for example D0.0001.",
     )
     parser.add_argument(
         "--tUblk",
@@ -287,11 +287,19 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--nbEssais",
+        "--wUblk",
+        type=float,
+        default=None,
+        help=(
+            "Minutes to wait before the second tail update. "
+            "Blank or omitted means 6 minutes."
+        ),
+    )
+    parser.add_argument(
+        "--essais",
         "-n",
-        type=int,
-        default=1,
-        help="Number of attempts.",
+        default="1",
+        help="Number of attempts, or * to repeat until the time window closes.",
     )
     parser.add_argument(
         "--oType",
@@ -299,7 +307,7 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         type=str,
         default="M",
         help=(
-            "Main order type in the compatibility vocabulary. "
+            "Head order type. "
             "Examples: M = Market, L = Limit, S = Stop, SL = StopLimit, "
             "MT = MarketIfTouched, LT = LimitIfTouched."
         ),
@@ -310,7 +318,7 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         type=str,
         default="Si-",
         help=(
-            "Tail order type in the compatibility vocabulary. "
+            "Tail order type. "
             "Examples: S- = reduce-only Stop on last price, "
             "Sm- = reduce-only Stop on mark price, "
             "Si- = reduce-only Stop on index price, "
@@ -325,19 +333,7 @@ def add_single_order_options(parser: argparse.ArgumentParser) -> None:
         help="Order side.",
     )
     parser.add_argument(
-        "--aType",
-        "-a",
-        type=str,
-        default="p%q%t%",
-        help=(
-            "Compatibility interpretation of prix, quantity, tailPrice, and optional oDelta. "
-            "Use pD/p%%/pA for price, q%%/qA for quantity, t%%/tD/tA for tail, oD/o%% for head offset. "
-            "Example: qAt%%pDo%% means absolute quantity, percent tail, differential prices, percent head offset."
-        ),
-    )
-    parser.add_argument(
-        "--Hook",
-        "-H",
+        "--hook",
         type=str,
         default="",
         help="Optional hook dependency, for example XBrx-S_T.",
@@ -399,7 +395,7 @@ def build_service(args: argparse.Namespace) -> BotService:
 
 
 def build_single_strategy(args: argparse.Namespace) -> StrategySpec:
-    """Traduit la CLI legacy vers une StrategySpec canonique."""
+    """Traduit la CLI typee vers une StrategySpec canonique."""
     return strategy_from_run_once_args(args)
 
 
@@ -413,36 +409,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser(
         "run",
-        help="Run strategies defined in a TSV file",
+        help="Run strategies defined in an Org strategy table",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     run_parser.add_argument(
         "--strategy",
         "-s",
         required=True,
-        help="Path to TSV strategy file (e.g. orders/demo_ada.tsv)",
+        help="Path to Org strategy table file (e.g. orders/demo_ada.tsv)",
     )
     add_runtime_options(run_parser)
 
     run_once_parser = subparsers.add_parser(
         "run-once",
-        help="Run one strategy-defined order pair from the command line using compatibility vocabulary",
+        help="Run one typed strategy-defined order pair from the command line",
         description=(
-            "Run one order pair through kolabi.bot while keeping the compatibility "
-            "multi_kola vocabulary. The key point is that --prix is always a "
-            "two-bound ordered interval, interpreted by --aType."
+            "Run one typed order pair through kolabi.bot. The typed values match "
+            "the Org strategy table columns: qty, pGate, hPrice, tPrice, hDelta, tDelta, tUblk."
         ),
         epilog=(
             "Examples:\n"
             "  Differential around current reference:\n"
             "    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo "
-            "-m XSellTail -t 0 1440 -O 60 -x 1 2 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pD --dry-run\n"
+            "-m XSellTail -t 0 1440 -O 60 -x 'D1 2' --hPrice D1 --qty A1 --tPrice %0.5 -o L -y S- -c sell --dry-run\n"
             "  Percent around current reference:\n"
             "    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo "
-            "-m XPct -t 0 60 -x -1 1 -q 1 -T 0.5 -o L -y S- -c buy -a qAt%p% --dry-run\n"
+            "-m XPct -t 0 60 -x '%-1 1' --hPrice %0.5 --qty A1 --tPrice %0.5 -o L -y S- -c buy --dry-run\n"
             "  Absolute interval:\n"
             "    python -m kolabi.bot run-once --symbol PI_XBTUSD --environment demo "
-            "-m XAbs -t 0 60 -x 79320 79340 -q 1 -T 0.5 -o L -y S- -c sell -a qAt%pA --dry-run"
+            "-m XAbs -t 0 60 -x 'A79320 79340' --hPrice A79350 --qty A1 --tPrice D0.5 -o L -y S- -c sell --dry-run"
         ),
         formatter_class=RawTextDefaultsFormatter,
     )
@@ -467,11 +462,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--market-type",
         choices=("futures", "spot", "margin", "isolated_margin"),
         default="futures",
-        help="Default market lane for TSV rows without an exchange route code.",
+        help="Default market lane for strategy rows without an exchange route code.",
     )
     preflight_parser.add_argument(
         "--strategy",
-        help="Optional TSV strategy file; checks every exchange/symbol route in the file.",
+        help="Optional Org strategy table; checks every exchange/symbol route in the file.",
     )
     preflight_parser.add_argument(
         "--environment", choices=("demo", "live"), default="demo", help="Endpoint family."
@@ -582,7 +577,7 @@ def run_command(args: argparse.Namespace) -> int:
 
 
 def run_once_command(args: argparse.Namespace) -> int:
-    """Run one command-line strategy row using the compatibility parameter names."""
+    """Run one command-line strategy row using typed parameter names."""
     strategy = build_single_strategy(args)
 
     service = build_service(args)
@@ -624,7 +619,7 @@ def _command_to_pretty_dict(command) -> dict[str, object]:
 
 
 def preflight_command(args: argparse.Namespace) -> int:
-    """Print a readiness snapshot for the Kraken TSV route."""
+    """Print a readiness snapshot for strategy routes."""
     service = BotService(
         BotConfig(
             exchange=args.exchange,

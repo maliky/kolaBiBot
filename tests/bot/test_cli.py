@@ -14,7 +14,7 @@ from kolabi.bot.__main__ import (
 from kolabi.bot.domain import StrategySpec
 
 
-def test_run_once_parser_accepts_legacy_short_flags() -> None:
+def test_run_once_parser_accepts_typed_fields() -> None:
     parser = build_parser()
 
     args = parser.parse_args(
@@ -30,20 +30,17 @@ def test_run_once_parser_accepts_legacy_short_flags() -> None:
             "-O",
             "60",
             "-x",
-            "1",
-            "2",
-            "-q",
-            "1",
-            "-T",
-            "0.5",
+            "D1 2",
+            "--qty",
+            "A1",
+            "--tPrice",
+            "%0.5",
             "-o",
             "L",
             "-y",
             "S-",
             "-c",
             "sell",
-            "-a",
-            "qAt%pD",
             "--dry-run",
         ]
     )
@@ -63,7 +60,7 @@ def test_run_once_parser_accepts_legacy_short_flags() -> None:
     assert pair.head.order_type == "L"
     assert pair.tail.order_type == "S-"
     assert pair.head.side.value == "sell"
-    assert pair.amount_type == "qAt%pD"
+    assert pair.amount_type == "qAt%pDhDoD"
 
 
 def test_run_once_parser_keeps_percent_tail_percent_head_grammar() -> None:
@@ -75,20 +72,17 @@ def test_run_once_parser_keeps_percent_tail_percent_head_grammar() -> None:
             "-m",
             "XSellPercentTail",
             "-x",
-            "-1",
-            "1",
-            "-q",
-            "1",
-            "-T",
-            "0.5",
+            "%-1 1",
+            "--qty",
+            "A1",
+            "--tPrice",
+            "%0.5",
             "-o",
             "M",
             "-y",
             "S-",
             "-c",
             "sell",
-            "-a",
-            "qAt%p%",
             "--dry-run",
         ]
     )
@@ -101,6 +95,47 @@ def test_run_once_parser_keeps_percent_tail_percent_head_grammar() -> None:
     assert pair.tail_price_spec == 0.5
 
 
+@pytest.mark.parametrize(
+    "removed_args",
+    [
+        ["--aType", "qAt%pD"],
+        ["--quantity", "1"],
+        ["-q", "1"],
+        ["--tailPrice", "0.5"],
+        ["-T", "0.5"],
+        ["--pgate", "D1 2"],
+        ["--hprice", "D1"],
+        ["--tp", "%0.5"],
+        ["--oDelta", "D1"],
+    ],
+)
+def test_run_once_parser_rejects_removed_legacy_args(removed_args: list[str]) -> None:
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "run-once",
+                "-m",
+                "XRemoved",
+                "-x",
+                "D1 2",
+                "--qty",
+                "A1",
+                "--tPrice",
+                "%0.5",
+                "-o",
+                "L",
+                "-y",
+                "S-",
+                "-c",
+                "sell",
+                *removed_args,
+                "--dry-run",
+            ]
+        )
+
+
 def test_run_once_parser_accepts_tublk_keyword() -> None:
     parser = build_parser()
 
@@ -110,12 +145,11 @@ def test_run_once_parser_accepts_tublk_keyword() -> None:
             "-m",
             "XTublk",
             "-x",
-            "1",
-            "2",
-            "-q",
-            "1",
-            "-T",
-            "0.5",
+            "D1 2",
+            "--qty",
+            "A1",
+            "--tPrice",
+            "%0.5",
             "--tUblk",
             "D5",
             "-o",
@@ -124,8 +158,6 @@ def test_run_once_parser_accepts_tublk_keyword() -> None:
             "S-",
             "-c",
             "sell",
-            "-a",
-            "qAt%pD",
             "--dry-run",
         ]
     )
@@ -134,6 +166,37 @@ def test_run_once_parser_accepts_tublk_keyword() -> None:
 
     assert pair.tail_unblock_spec == 5.0
     assert pair.tail_unblock_spec_type == "uD"
+
+
+def test_run_once_parser_accepts_wublk_keyword() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "run-once",
+            "-m",
+            "XWublk",
+            "-x",
+            "D1 2",
+            "--qty",
+            "A1",
+            "--tPrice",
+            "%0.5",
+            "--wUblk",
+            "6",
+            "-o",
+            "L",
+            "-y",
+            "S-",
+            "-c",
+            "sell",
+            "--dry-run",
+        ]
+    )
+
+    pair = build_single_strategy(args).pairs[0]
+
+    assert pair.tail_second_update_wait_seconds == 360.0
 
 
 def test_bot_parser_uses_critical_db_url_only() -> None:
@@ -339,19 +402,18 @@ def test_run_once_command_dry_run_prints_canonical_structure(capsys) -> None:
     args = argparse.Namespace(
         name="XSellTail",
         tps_run=[0.0, 1440.0],
-        nbEssais=1,
-        drPause=None,
+        essais="1",
+        pause=None,
         tOut=60,
         side="sell",
-        prix=[1.0, 2.0],
-        quantity=1,
-        tailPrice=0.5,
-        aType="qAt%pD",
+        pGate="D1 2",
+        qty="A1",
+        tPrice="%0.5",
         oType="L",
-        oDelta=None,
+        hDelta=None,
         tDelta=None,
         tType="S-",
-        Hook="",
+        hook="",
         dry_run=True,
         sync=False,
         simulate=False,
@@ -413,19 +475,18 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
     run_once_args = argparse.Namespace(
         name="XSellTail",
         tps_run=[0.0, 1440.0],
-        nbEssais=1,
-        drPause=None,
+        essais="1",
+        pause=None,
         tOut=60,
         side="sell",
-        prix=[1.0, 2.0],
-        quantity=1,
-        tailPrice=0.5,
-        aType="qAt%pD",
+        pGate="D1 2",
+        qty="A1",
+        tPrice="%0.5",
         oType="L",
-        oDelta=None,
+        hDelta=None,
         tDelta=None,
         tType="S-",
-        Hook="",
+        hook="",
         dry_run=False,
         sync=True,
         simulate=False,
@@ -454,19 +515,18 @@ def test_run_once_returns_130_on_keyboard_interrupt(monkeypatch, capsys) -> None
     args = argparse.Namespace(
         name="XSellTail",
         tps_run=[0.0, 1440.0],
-        nbEssais=1,
-        drPause=None,
+        essais="1",
+        pause=None,
         tOut=60,
         side="sell",
-        prix=[1.0, 2.0],
-        quantity=1,
-        tailPrice=0.5,
-        aType="qAt%pD",
+        pGate="D1 2",
+        qty="A1",
+        tPrice="%0.5",
         oType="L",
-        oDelta=None,
+        hDelta=None,
         tDelta=None,
         tType="S-",
-        Hook="",
+        hook="",
         dry_run=False,
         sync=True,
         simulate=False,

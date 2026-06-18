@@ -91,6 +91,23 @@ def egg_move(kind: EggMoveKind, *, played_quantity: float = 0.0) -> EggMove:
     )
 
 
+def post_only_would_fill_move(*, role: OrderRole = OrderRole.HEAD) -> EggMove:
+    return EggMove(
+        kind=EggMoveKind.PLAYED_AND_CANCELED,
+        role=role,
+        occurred_at=datetime.now(timezone.utc),
+        symbol="PI_XBTUSD",
+        reply={
+            "orderID": "OID-1",
+            "clOrdID": "CID-1",
+            "cumQty": 0.0,
+            "orderQty": 2.0,
+            "execType": OrderReason.POST_ONLY_WOULD_FILL.value,
+            "reference_price": 100.0,
+        },
+    )
+
+
 def submitted_state() -> PairCycleState:
     return PairCycleState(
         pair=sample_pair(),
@@ -221,27 +238,85 @@ def test_would_not_reduce_position_is_not_treated_as_played() -> None:
 
 
 def test_post_only_would_fill_head_reject_is_not_treated_as_played() -> None:
+    pair = sample_pair()
+    state = PairCycleState(
+        pair=replace(pair, head=replace(pair.head, order_type="L!")),
+        head_state=HeadState.SUBMITTED,
+    )
+
     next_state, intents = step_pair(
-        submitted_state(),
-        EggMove(
-            kind=EggMoveKind.PLAYED_AND_CANCELED,
-            role=OrderRole.HEAD,
-            occurred_at=datetime.now(timezone.utc),
-            symbol="PI_XBTUSD",
-            reply={
-                "orderID": "OID-1",
-                "clOrdID": "CID-1",
-                "cumQty": 0.0,
-                "orderQty": 2.0,
-                "execType": OrderReason.POST_ONLY_WOULD_FILL.value,
-                "reference_price": 100.0,
-            },
-        ),
+        state,
+        post_only_would_fill_move(),
     )
 
     assert next_state.head_state == HeadState.FAILED
     assert next_state.tail_state == TailState.LATENT
     assert next_state.tail_mode is None
+    assert intents == ()
+
+
+def test_zero_offset_post_only_trigger_limit_probe_hooks_tail() -> None:
+    pair = sample_pair()
+    state = PairCycleState(
+        pair=replace(
+            pair,
+            head=replace(pair.head, order_type="LT!"),
+            head_order_price_spec=0.0,
+            head_order_price_spec_type="hD",
+        ),
+        head_state=HeadState.SUBMITTED,
+    )
+
+    next_state, intents = step_pair(state, post_only_would_fill_move())
+
+    assert next_state.head_state == HeadState.CLOSED
+    assert next_state.tail_state == TailState.HOOKED
+    assert next_state.tail_mode == TailMode.FLYING
+    assert next_state.tail_trail is not None
+    assert next_state.played_quantity == Decimal("0.0")
+    assert len(intents) == 1
+    assert intents[0].kind == PairIntentKind.PLACE_TAIL
+
+    commands = plan_runtime_commands(next_state, intents, symbol=Symbol("PI_XBTUSD"))
+    assert len(commands) == 1
+    assert isinstance(commands[0], PlaceTailCommand)
+    assert commands[0].request.orderQty == Decimal("2")
+
+
+def test_nonzero_post_only_trigger_limit_reject_fails_without_tail() -> None:
+    pair = sample_pair()
+    state = PairCycleState(
+        pair=replace(
+            pair,
+            head=replace(pair.head, order_type="LT!"),
+            head_order_price_spec=0.1,
+            head_order_price_spec_type="hD",
+        ),
+        head_state=HeadState.SUBMITTED,
+    )
+
+    next_state, intents = step_pair(state, post_only_would_fill_move())
+
+    assert next_state.head_state == HeadState.FAILED
+    assert next_state.tail_state == TailState.LATENT
+    assert next_state.tail_mode is None
+    assert intents == ()
+
+
+def test_tail_role_post_only_would_fill_reject_is_unchanged() -> None:
+    played, _ = step_pair(
+        submitted_state(),
+        egg_move(EggMoveKind.PLAYED_NOT_CANCELED, played_quantity=2.0),
+    )
+
+    next_state, intents = step_pair(
+        played,
+        post_only_would_fill_move(role=OrderRole.TAIL),
+    )
+
+    assert next_state.head_state == HeadState.LIVING
+    assert next_state.tail_state == TailState.CLOSED
+    assert next_state.tail_mode == TailMode.FLYING
     assert intents == ()
 
 
@@ -371,10 +446,14 @@ def test_percent_tail_place_uses_reference_price_not_raw_tail_spec() -> None:
     assert commands[0].request.stopPx == Decimal("98.500")
 
 
-def test_market_tick_with_tail_identity_waits_before_first_amend() -> None:
+def test_market_tick_with_tail_identity_amends_on_first_unblock() -> None:
     played, _ = step_pair(
         submitted_state(),
         egg_move(EggMoveKind.PLAYED_NOT_CANCELED, played_quantity=2.0),
+    )
+    played = replace(
+        played,
+        pair=replace(played.pair, tail_second_update_wait_seconds=6.0),
     )
     first_unblocked_at = datetime.now(timezone.utc)
     identified = PairCycleState(
@@ -396,7 +475,7 @@ def test_market_tick_with_tail_identity_waits_before_first_amend() -> None:
         played_quantity=played.played_quantity,
     )
 
-    moved, intents = step_pair(
+    amended, amended_intents = step_pair(
         identified,
         EggMove(
             kind=EggMoveKind.MARKET_TICK,
@@ -406,36 +485,24 @@ def test_market_tick_with_tail_identity_waits_before_first_amend() -> None:
             reply={"reference_price": 102.0},
         ),
     )
-    amended, amended_intents = step_pair(
-        moved,
-        EggMove(
-            kind=EggMoveKind.MARKET_TICK,
-            occurred_at=first_unblocked_at + timedelta(seconds=50),
-            symbol="PI_XBTUSD",
-            pair_name="pair-a",
-            reply={"reference_price": 102.2},
-        ),
-    )
     repeated, repeated_intents = step_pair(
         amended,
         EggMove(
             kind=EggMoveKind.MARKET_TICK,
-            occurred_at=first_unblocked_at + timedelta(seconds=53),
+            occurred_at=first_unblocked_at + timedelta(seconds=3),
             symbol="PI_XBTUSD",
             pair_name="pair-a",
             reply={"reference_price": 102.3},
         ),
     )
 
-    assert moved.tail_trail is not None
-    assert moved.tail_trail.current_stop_price == Decimal("99.0")
-    assert moved.tail_trail.first_unblocked_at == first_unblocked_at
-    assert intents == ()
     assert amended.tail_trail is not None
     assert amended.tail_trail.current_stop_price > Decimal("100")
+    assert amended.tail_trail.first_unblocked_at == first_unblocked_at
     assert len(amended_intents) == 1
     assert amended_intents[0].kind == PairIntentKind.AMEND_TAIL
-    assert repeated == amended or repeated.tail_trail is not None
+    assert repeated.tail_trail is not None
+    assert repeated.tail_trail.current_stop_price == amended.tail_trail.current_stop_price
     assert repeated_intents == ()
 
 
@@ -471,7 +538,7 @@ def test_market_tick_tublk_controls_first_tail_amend_threshold() -> None:
             reply={"reference_price": 100.4},
         ),
     )
-    armed, armed_intents = step_pair(
+    amended, amended_intents = step_pair(
         before_threshold,
         EggMove(
             kind=EggMoveKind.MARKET_TICK,
@@ -481,37 +548,25 @@ def test_market_tick_tublk_controls_first_tail_amend_threshold() -> None:
             reply={"reference_price": 100.6},
         ),
     )
-    amended, amended_intents = step_pair(
-        armed,
-        EggMove(
-            kind=EggMoveKind.MARKET_TICK,
-            occurred_at=first_unblocked_at + timedelta(seconds=57),
-            symbol="PI_XBTUSD",
-            pair_name="pair-a",
-            reply={"reference_price": 100.7},
-        ),
-    )
 
     assert before_threshold.tail_trail is not None
     assert before_threshold.tail_trail.first_unblocked_at is None
     assert before_intents == ()
-    assert armed.tail_trail is not None
-    assert armed.tail_trail.first_unblocked_at == first_unblocked_at + timedelta(seconds=7)
-    assert armed_intents == ()
     assert amended.tail_trail is not None
-    assert amended.tail_trail.current_stop_price > armed.tail_trail.current_stop_price
+    assert amended.tail_trail.first_unblocked_at == first_unblocked_at + timedelta(seconds=7)
+    assert amended.tail_trail.current_stop_price > before_threshold.tail_trail.current_stop_price
     assert len(amended_intents) == 1
     assert amended_intents[0].kind == PairIntentKind.AMEND_TAIL
 
 
-def test_market_tick_before_tail_identity_waits_then_updates_state_without_amend() -> None:
+def test_market_tick_before_tail_identity_updates_state_without_amend() -> None:
     played, _ = step_pair(
         submitted_state(),
         egg_move(EggMoveKind.PLAYED_NOT_CANCELED, played_quantity=2.0),
     )
     first_unblocked_at = datetime.now(timezone.utc)
 
-    waiting, waiting_intents = step_pair(
+    moved, intents = step_pair(
         played,
         EggMove(
             kind=EggMoveKind.MARKET_TICK,
@@ -521,23 +576,10 @@ def test_market_tick_before_tail_identity_waits_then_updates_state_without_amend
             reply={"reference_price": 102.0},
         ),
     )
-    moved, intents = step_pair(
-        waiting,
-        EggMove(
-            kind=EggMoveKind.MARKET_TICK,
-            occurred_at=first_unblocked_at + timedelta(seconds=50),
-            symbol="PI_XBTUSD",
-            pair_name="pair-a",
-            reply={"reference_price": 102.2},
-        ),
-    )
 
-    assert waiting.tail_trail is not None
-    assert waiting.tail_trail.current_stop_price == Decimal("99.0")
-    assert waiting.tail_trail.first_unblocked_at == first_unblocked_at
-    assert waiting_intents == ()
     assert moved.tail_trail is not None
     assert moved.tail_trail.current_stop_price > Decimal("100")
+    assert moved.tail_trail.first_unblocked_at == first_unblocked_at
     assert intents == ()
 
 

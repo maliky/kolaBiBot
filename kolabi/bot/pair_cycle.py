@@ -32,6 +32,7 @@ from kolabi.bot.domain import (
     classify_confirmed_move,
 )
 from kolabi.bot.dragon import reason_from_status_or_reason
+from kolabi.bot.order_codes import parse_order_code
 from kolabi.bot.tail_tracking import initial_tail_trail, step_tail_trail
 from kolabi.shared.core.runtime_types import to_decimal
 
@@ -125,7 +126,10 @@ def step_pair(
         )
         return next_state, ()
 
-    if _is_zero_fill_post_only_head_reject(state, move):
+    if _is_zero_fill_post_only_head_reject(
+        state,
+        move,
+    ) and not _is_zero_fill_post_only_probe_head_reject(state):
         move = replace(move, kind=EggMoveKind.NOT_PLAYED_CANCELED)
 
     if move.kind == EggMoveKind.MARKET_TICK:
@@ -145,7 +149,7 @@ def step_pair(
             state.tail_trail,
             reference_price,
             move.occurred_at,
-            tick_size=tick_size_from_move(move),
+            tick_size=tick_size_from_move(move) or state.instrument_tick_size,
             spread=spread_from_move(move),
             symbol=move.symbol,
         )
@@ -365,6 +369,17 @@ def _is_zero_fill_post_only_head_reject(
         return False
     played_quantity = played_quantity_from_move(state, move)
     return played_quantity is None or played_quantity <= Decimal("0")
+
+
+def _is_zero_fill_post_only_probe_head_reject(state: PairCycleState) -> bool:
+    code = parse_order_code(state.pair.head.order_type)
+    if code.base_key not in {"LT", "SL"} or not code.post_only:
+        return False
+    if (state.pair.head_order_price_spec_type or "").lower() != "hd":
+        return False
+    if state.pair.head_order_price_spec is None:
+        return False
+    return abs(to_decimal(state.pair.head_order_price_spec)) == Decimal("0")
 
 
 def reference_price_from_move(state: PairCycleState, move: EggMove) -> Decimal | None:

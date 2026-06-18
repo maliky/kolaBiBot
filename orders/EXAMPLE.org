@@ -1,350 +1,79 @@
-#+PROPERTY: header-args:bash :session examples :results output :exports code
+#+TITLE: Kolabi Org Strategy Table CLI Examples
 
-#+TITLE: Kolabi TSV Grammar CLI Examples
+This file shows the active strategy grammar used by =kolabi.bot=. Strategy files are Org tables, and =run-once= uses the same typed value syntax for one pair.
 
-This file translates the =orders/demo_ada.tsv= grammar into explicit =kolabi.bot run-once= commands.  The commands are intentionally safe by default: they use = so they validate the strategy shape without calling Ogun or an exchange.
+* Typed Value Rules
 
-# > explain this --skip-ready-check?
+- =qty= is required and starts with =A= or =%=, for example =A11=.
+- =pGate= is a typed two-bound interval, for example =D1 2=, =D- +=, =%-1 1=, or =A79320 79340=.
+- =hPrice= is a lazy typed head price, for example =D6=, =%0.2=, or =A79350=; it is computed only when =pGate= opens.
+- =tPrice= is a typed tail distance, for example =D20=, =%1.2=, or =A0.25=.
+- =hDelta= starts with =D= or =%= when present and is only for =SL= or =LT= head trigger-to-limit offsets.
+- =tDelta= starts with =D= when present.
+- =tUblk= starts with =D= or =%= when present.
+- =wUblk= is a plain number of minutes; blank defaults to 6.
 
-The common vocabulary is:
+Removed compatibility flags and old keyword spellings are intentionally absent: =--aType=, =-a=, =--quantity=, =-q=, =--tailPrice=, =-T=, =--pgate=, =--hprice=, =--tp=, and =--oDelta= are no longer accepted.
 
-- =-o, --oType=: head order type.
-- =-y, --tType=: tail order type.
-- =-c, --side=: head side; the tail side is the opposite side.
-- =-a, --aType=: interpretation of quantity, tail distance, and price interval.
-- =-x, --prix=: two ordered price bounds.  Equal bounds are invalid.
-- =-T, --tailPrice=: tail distance using the =t= token from =aType=.
-- =-d, --oDelta=: head trigger-to-limit difference for stop-limit and touch-limit orders.
-- =-s, --tDelta=: tail trigger-to-limit difference.
-- =-t, --tps_run=: start and end in minutes from launch.
-- =-O, --tOut=: head lifecycle timeout in minutes.
-- =-p, --drPause=: pause between retries in minutes.
+* One Pair Commands
 
-Order type vocabulary:
-
-- =M=: Market.
-- =L=: Limit.
-- =S=: Stop market.
-- =MT=: MarketIfTouched.
-- =SL=: StopLimit.
-- =LT=: LimitIfTouched.
-- =f=, =l=, =m=: trigger-price suffixes for fair, last, and mark price.
-- =!=: ParticipateDoNotInitiate, useful for passive limit orders, not market orders.
-- =-=: ReduceOnly, useful for protective tail orders, not market orders.
-
-
-The =aType= field combines three interpretations:
-
-- =qA= absolute quantity.
-- =q%= percentage quantity.
-- =t%= percent tail distance.
-- =tD= nominal tail distance from reference.
-- =tA= absolute tail price.
-- =p%= percent price interval.
-- =pD= nominal differential price interval.
-- =pA= absolute price interval.
-  
-
-Time fields are minutes:
-
-- 24h = =1440=.
-- 48h = =2880=.
-- 4d = =5760=.
-- 7d is about =10000=.
-
-* Repeat
-#+BEGIN_SRC bash  -i
-python -m kolabi.bot run-once -m B5M -t 0 1440 -O 120 -n 5 -p 0.1 -c buy -a qAtDpD -x -0 +0 -q 2 -T 5 -o M -y S-
-
-#Buy five at market after drop 5
-python -m kolabi.bot run-once -m B5M-D5 -t 0 1440 -O 120 -n 5 -p 0.1667 -c buy -a qAt%pD -x -5.5 -5.0 -q 1 -T 1.5 -o M -y S-
-#+END_SRC
-* Individual Order Type Commands
-
-These commands focus on one head order type at a time.  They all use the same symbol and demo environment so differences stay visible.
-
-** Market Head
-
-Command: submit a buy market head with a reduce-only stop tail planned after the head fills.  Do not combine =M= with =!= or =-=.
-
-#+BEGIN_SRC bash :results output :exports code
+#+begin_src bash
 python -m kolabi.bot run-once \
-  -m M \
-  -t 0 1440 \
-  -O 120 \
-  -c buy \
-  -a qAt%p% \
-  -x -0.25 0.25 \
-  -q 3 \
-  -T 1.5 \
-  -o M \
-  -y S-
-#+END_SRC
+  --symbol PI_XBTUSD \
+  --environment demo \
+  --name XSellTail \
+  --tps_run 0 1440 \
+  --tOut 60 \
+  --side sell \
+  --oType L \
+  --hPrice D1 \
+  --qty A1 \
+  --tType S- \
+  --pGate 'D1 2' \
+  --tPrice %0.5 \
+  --dry-run
 
-** Limit Head
-
-Place a passive sell limit head around a percent band, then protect the resulting exposure with a reduce-only stop tail.
-
-#+BEGIN_SRC bash :results output :exports code
 python -m kolabi.bot run-once \
-  -m L \
-  -t 0 1440 \
-  -O 120 \
-  -c sell \
-  -a qAt%p% \
-  -x 0.50 0.5001 \
-  -q 11 \
-  -T 1.5 \
-  -o L! \
-  -y S-
-#+END_SRC
+  --symbol PI_XBTUSD \
+  --environment demo \
+  --name XPct \
+  --tps_run 0 60 \
+  --side buy \
+  --oType L \
+  --hPrice %0.5 \
+  --qty A1 \
+  --tType S- \
+  --pGate '%-1 1' \
+  --tPrice %0.5 \
+  --dry-run
 
-** Stop Head
-
-Sell only if the market breaks below the current reference range; the tail is a reduce-only stop on the opposite side.
-
-#+BEGIN_SRC bash :results output :exports code
 python -m kolabi.bot run-once \
-  -m S \
-  -t 0 1440 \
-  -O 120 \
-  -c sell \
-  -a qAt%p% \
-  -x -0.50 -0.4999 \
-  -q 11 \
-  -T 1.5 \
-  -o S \
-  -y S-
-#+END_SRC
+  --symbol PI_XBTUSD \
+  --environment demo \
+  --name XAbs \
+  --tps_run 0 60 \
+  --side sell \
+  --oType L \
+  --hPrice A79350 \
+  --qty A1 \
+  --tType S- \
+  --pGate 'A79320 79340' \
+  --tPrice D0.5 \
+  --dry-run
+#+end_src
 
-** MarketIfTouched Head
+* Strategy Table Shape
 
-Buy with a market-if-touched head when price pulls back to the lower band, then attach a protective sell stop tail.
-# > What do you mean by prices pulls back for a buy ? how does this differes from limit buy?
-# > althoug strange the -x should be a positive interval. price going up... That is the diff with a buy limit order.
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-once \
- \
-  \
-  \
-  \
-  \
-  -m MT \
-  -t 0 1440 \
-  -O 120 \
-  -c buy \
-  -a qAt%p% \
-  -x -0.50 -0.4999 \
-  -q 11 \
-  -T 1.5 \
-  -o MT \
-  -y S-
-#+END_SRC
+#+begin_src org
+| exchg | symbol | name | tps_run | essais | tOut | pause | side | oType | hDelta | qty | tType | tDelta | pGate | hPrice | tPrice | tUblk | wUblk | hook |
+|---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---|
+| KRKF | PI_XBTUSD | XBTC_SEL | 0 1440 | 1 | 6 |  | sell | L |  | A1 | S- |  | D- + | D6 | D20 |  |  |  |
+| KRKF | PI_ADAUSD | KADA_SEL | 0 1440 | 1 | 6 |  | sell | L |  | A1 | S- |  | D- + | %0.20 | %0.10 |  |  | XBTC_SEL-head-filled |
+| BINS | ADAUSDT | NADA_BUY | 0 1440 | 1 | 6 |  | buy | M |  | A3 | L! |  | D- + |  | D0 |  |  | KADA_SEL-tail-closed |
+#+end_src
 
-** StopLimit Head
-Sell with a stop-limit head.  The =-d= delta keeps the limit close to the trigger and in the same sell direction.
-Here I want to be market maker.
-# What's the unit of my delta ?
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-once \
- \
-  \
-  \
-  \
-  \
-  -m SL \
-  -t 0 1440 \
-  -O 120 \
-  -c sell \
-  -a qAt%p% \
-  -x -0.50 -0.4999 \
-  -q 11 \
-  -T 1.5 \
-  -d 0.05 \
-  -o SLm \
-  -y S-
-#+END_SRC
+Run the table through the normal strategy path:
 
-** LimitIfTouched Head
-
-Buy with a limit-if-touched head after a pullback.  The =-d= delta keeps the execution limit close to the touch trigger.
-
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-once \
- \
-  \
-  \
-  \
-  \
-  -m LT \
-  -t 0 1440 \
-  -O 120 \
-  -c buy \
-  -a qAt%p% \
-  -x -0.50 -0.4999 \
-  -q 11 \
-  -T 1.5 \
-  -d 0.05 \
-  -o LTm \
-  -y S-
-#+END_SRC
-
-* Tail Order Commands
-
-Tail orders are planned only after the head lifecycle confirms the correct event. Use reduce-only tails for protection.  Do not use reduce-only with market tails.
-
-#+BEGIN_SRC bash :results output :exports code
-  # Market Tail: force a passive head shape, then plan a market tail.  This is useful for parser coverage, but it is rarely the preferred protective tail.
-  python -m kolabi.bot run-onc -m TAIL_M -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y M
-  # Limit Tail: after a passive buy head, plan a sell limit tail at the configured profit distance.
-  python -m kolabi.bot run-onc -m TAIL_L -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y L
-  # Stop Tail: after a passive buy head, plan a reduce-only sell stop tail.
-  python -m kolabi.bot run-onc -m TAIL_S -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
-  # MarketIfTouched Tail: after a passive buy head, plan a sell market-if-touched tail.
-  python -m kolabi.bot run-onc -m TAIL_MT -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y MT
-  # StopLimit Tail: after a passive buy head, plan a reduce-only sell stop-limit tail.  The =-s= delta keeps the tail limit close to the tail trigger.
-  python -m kolabi.bot run-onc -m TAIL_SL -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -s 0.05 -o L! -y SL-
-  # LimitIfTouched Tail: after a passive buy head, plan a reduce-only sell limit-if-touched tail.
-  python -m kolabi.bot run-onc -m TAIL_LT -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -s 0.05 -o L! -y LT-
-#+END_SRC
-
-* Amount And Price Grammar
-
-Command: use absolute quantity, a nominal tail distance, and a nominal price difference from the reference.
-
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-onc -m qAtDpD -t 0 1440 -O 120 -c buy -a qAtDpD -x -50 -49 -q 11 -T 25 -o L! -y S-
-#+END_SRC
-
-
-* Time, Timeout, Pause, And Retry
-
-# > have a batteries of order (paires)  been canceled and reset at regulare intervale. eg every 6 minutes for 48 h.
-# > for the one further to the market price can reset every 17 minutes...
-
-** One Day Window
-
-Command: valid immediately for 24 hours.
-
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-onc -m TIME_24h -t 0 1440 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
-#+END_SRC
-
-** Two Day Window
-
-Command: valid immediately for 48 hours.
-
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-onc -m TIME_48h -t 0 2880 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
-#+END_SRC
-
-** Four Day Window
-
-Command: valid immediately for four days.
-
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-onc -m TIME_4d -t 0 5760 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
-#+END_SRC
-
-** Seven Day Window
-
-Command: approximate a seven-day strategy window.
-
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-onc -m TIME_7d -t 0 10000 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
-#+END_SRC
-
-** Retry With Pause
-
-Command: attempt three times, pausing one minute between attempts, while the overall strategy window remains open.
-
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-onc -m RETRY -t 0 1440 -n 3 -p 1 -O 120 -c buy -a qAt%p% -x -0.50 -0.4999 -q 11 -T 1.5 -o L! -y S-
-#+END_SRC
-
-* Market Scenarios
-
-These examples are still not live orders.  They use =--simulate= so the active runtime path can be exercised with simulated confirmations:
-=Dragon -> Chronos -> Isis -> Horus -> Ogun=
-
-Use the same shape without =--simulate= only when the exchange account, symbol, quantity, and price bands have been checked.
-
-** Passive Pullback Entry With Protective Stop
-
-Buy only if the market pulls back into a better entry band, then attach a reduce-only sell stop so the position has an explicit exit if the pullback becomes a breakdown.
-
-Execution path: Chronos waits for the price band, Isis activates the head, Horus plans a limit head, Ogun receives the command, and a simulated fill event causes the tail to be planned.
-
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-once \
- \
-  -m SC_Pullback_Buy_Stop_Tail \
-  -t 0 1440 \
-  -O 120 \
-  -c buy \
-  -a qAt%p% \
-  -x -0.50 -0.4999 \
-  -q 11 \
-  -T 1.5 \
-  -o L! \
-  -y S-
-#+END_SRC
-
-** Breakout Failure Short With StopLimit Head
-
-Strategic goal: sell only after price breaks down through a watched mark-price level, but use stop-limit instead of a pure stop so execution stays bounded.
-
-Execution path: the =SLm= head waits on mark price.  If the trigger appears, the limit is placed close to the trigger using =-d=.  A protective buy stop tail is then prepared after the head fill.
-
-#+BEGIN_SRC bash :results output :exports code
-python -m kolabi.bot run-once \
- \
-  -m SC_Breakdown_Sell_StopLimit \
-  -t 0 2880 \
-  -O 180 \
-  -c sell \
-  -a qAt%p% \
-  -x -0.75 -0.7499 \
-  -q 11 \
-  -T 1.5 \
-  -d 0.05 \
-  -o SLm \
-  -y S-
-#+END_SRC
-
-** Passive Take-Profit Tail
-
-Strategic goal: open passively, then exit with a limit tail instead of a stop. This is useful for a planned scalp where the risk exit is handled elsewhere or by another pair.
-# >  need to be coupled with a another strategy handling a clean deterministic exist or canceling if this first strategy worked
-
-Execution path: after the buy head is filled, the sell limit tail is planned at the configured tail distance.  Because this is not a stop tail, it is a profit target rather than emergency protection.
-
-# > We need example with chained orders
-
-* Multi market scenari
-
-** Hooked orders
-  - Add a “Chained Pairs” section using python -m kolabi.bot run --strategy ..., because run-once can express one pair only.
-  - Include a TSV block showing two pairs:
-      - Pair A: passive buy limit with a limit take-profit tail.
-      - Pair B: activated only when Pair A’s tail closes, using hook_name = A_L_BUY_DIP-tail-closed.
-      - Note explicitly that current Chronos hook semantics distinguish “tail closed”, not “closed in profit” versus “closed by stop”.
-
-  Example rows to include:
-
-  name  tps_run essais  tOut    pause   side    oType   oDelta  tType   tDelta  atype   quantity        tp      prix    hook
-  A_L_BUY_DIP   0 1440  1       120     1       buy     L!              L               qAt%p%  11      0.75    -0.50 -0.4999
-  B_MT_BUY_CONT 0 1440  1       120     1       buy     MT              S-              qAt%p%  11      1.00    0.20 0.2001     A_L_BUY_DIP-tail-closed
-
-   
-
-** “Same Head, Different Exits” section:
-      - Pair A: same passive sell head, passive limit exit.
-      - Pair B: same passive sell head, more aggressive reduce-only stop exit.
-      - Use this to show strategic tradeoff between maker-style profit taking and protective exit behavior.
-
-  name  tps_run essais  tOut    pause   side    oType   oDelta  tType   tDelta  atype   quantity        tp      prix    hook
-  A_L_SELL_LIMIT_EXIT   0 1440  1       120     1       sell    L!              L               qAt%p%  11      0.75    0.50 0.5001
-  B_L_SELL_STOP_EXIT    0 1440  1       120     1       sell    L!              S-              qAt%p%  11      1.50    0.50 0.5001
-
-  
+#+begin_src bash
+python -m kolabi.bot run --strategy orders/demo_cross_exchange_chain.tsv --environment demo --symbol PI_XBTUSD --dry-run
+#+end_src

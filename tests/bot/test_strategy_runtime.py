@@ -244,7 +244,7 @@ class _DbBackedOneLifecycleSource:
                 symbol=runtime.symbol,
                 pair_name=pair_name,
                 event_id="test:market-tick-first-unblock",
-                reply={"reference_price": 103.0, "tick_size": 0.5},
+                reply={"reference_price": 107.0, "tick_size": 0.5},
             )
         )
         await runtime.enqueue(
@@ -254,7 +254,7 @@ class _DbBackedOneLifecycleSource:
                 symbol=runtime.symbol,
                 pair_name=pair_name,
                 event_id="test:market-tick-amend",
-                reply={"reference_price": 103.5, "tick_size": 0.5},
+                reply={"reference_price": 107.5, "tick_size": 0.5},
             )
         )
         amend_command = await _wait_for_command(runtime, AmendTailCommand, pair_name)
@@ -3276,6 +3276,67 @@ def test_late_tail_visibility_window_clears_after_private_identity(caplog) -> No
 
     assert "TAIL_VISIBLE (pair-a#1):" in caplog.text
     assert slot not in runtime._pending_tail_visibility
+
+
+def test_private_lease_open_replay_is_debug_but_close_stays_info(caplog) -> None:
+    pair = sample_strategy()[0]
+    now = datetime.now(timezone.utc)
+
+    def runtime_with_submitted_tail() -> StrategyRuntime:
+        runtime = StrategyRuntime(
+            strategy=StrategySpec(name="demo", pairs=(pair,)),
+            symbol="PI_XBTUSD",
+            simulate=False,
+        )
+        runtime.state = replace(
+            runtime.state,
+            pairs={
+                "pair-a": PairCycleState(
+                    pair=pair,
+                    head_state=HeadState.CLOSED,
+                    tail_state=TailState.SUBMITTED,
+                    played_quantity=Decimal("1"),
+                )
+            },
+        )
+        return runtime
+
+    def private_tail_status(status: str) -> EggMove:
+        return EggMove(
+            kind=EggMoveKind.NOT_PLAYED_NOR_CANCELED,
+            occurred_at=now,
+            symbol="PI_XBTUSD",
+            pair_name="pair-a",
+            role=OrderRole.TAIL,
+            reply={
+                "clOrdID": "CID-T",
+                "orderID": "OID-T",
+                "ordStatus": status,
+                "side": "sell",
+                "orderQty": "1",
+                "price": "99",
+            },
+            is_private=True,
+        )
+
+    runtime = runtime_with_submitted_tail()
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._record_private_event_for_leases(private_tail_status("open"))
+
+    assert "LEASE_OPEN (pair-a#1):" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="kola"):
+        runtime._record_private_event_for_leases(private_tail_status("filled"))
+
+    assert "LEASE_CLOSED (pair-a#1):" in caplog.text
+
+    debug_runtime = runtime_with_submitted_tail()
+    caplog.clear()
+    with caplog.at_level("DEBUG", logger="kola"):
+        debug_runtime._record_private_event_for_leases(private_tail_status("open"))
+
+    assert "LEASE_OPEN (pair-a#1):" in caplog.text
 
 
 def test_runtime_matches_private_record_to_tail_identity() -> None:

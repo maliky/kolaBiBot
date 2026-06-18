@@ -102,6 +102,8 @@ def head_place_request(
 
 def _head_exchange_offset(pair: OrderPairSpec) -> PriceOffset | None:
     """Return only exchange-native nominal offsets for head placement."""
+    if base_order_type(pair.head.order_type) not in {"SL", "LT"}:
+        return None
     if pair.head.delta is None:
         return None
     if pair.head.delta_type.lower() == "o%":

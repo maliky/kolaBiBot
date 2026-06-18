@@ -82,3 +82,38 @@ def test_fresh_run_max_active_pairs_override_wins() -> None:
 
     assert result.returncode == 0
     assert "--max-active-pairs 1" in result.stdout
+
+
+def test_fresh_run_validates_strategy_before_purging(tmp_path: Path) -> None:
+    strategy = tmp_path / "duplicate.org"
+    strategy.write_text(
+        "\n".join(
+            [
+                "| exchg | symbol | name | tps_run | essais | tOut | pause | side | oType | hDelta | qty | tType | tDelta | pGate | hPrice | tPrice | tUblk | wUblk | hook |",
+                "|---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---|",
+                "| KRKF | PF_ADAUSD | DUP | 0 60 | 1 | 4 |  | buy | L |  | A1 | S |  | D- + | D.0001 | %1 |  |  |  |",
+                "| KRKF | PF_ADAUSD | DUP | 0 60 | 1 | 4 |  | sell | L |  | A1 | S |  | D- + | D.0001 | %1 |  |  |  |",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = run_script(
+        "--dry-run",
+        "--env-file",
+        "docker/postgres/kolabi-postgres.env.example",
+        "--strategy",
+        str(strategy),
+        "--environment",
+        "demo",
+        "--symbol",
+        "PF_ADAUSD",
+    )
+
+    output = result.stdout + result.stderr
+    assert result.returncode == 2
+    assert "Duplicate pair name(s) in strategy table: DUP" in output
+    assert "strategy route resolution failed" in output
+    assert "kolabi-purge:" not in output
+    assert "--max-active-pairs ''" not in output

@@ -57,8 +57,18 @@ from kolabi.bot.pricing import (
     pair_window_is_open,
     tail_reference_price,
 )
+from kolabi.bot.runtime_policy import (
+    CommandSlot as _CommandSlot,
+    active_pair_count,
+    active_pair_names,
+    append_pending_command,
+    command_slot,
+    command_slot_still_live,
+    head_capacity_available,
+    pair_runtime_complete as _policy_pair_runtime_complete,
+)
 from kolabi.bot.telemetry import TailTelemetryRow
-from kolabi.bot.tail_tracking import tail_unblock_requirement
+from kolabi.bot.tail_tracking import tail_first_jump_guard_width, tail_unblock_requirement
 from kolabi.shared.core.models import OrderAck
 from kolabi.shared.core.runtime_types import (
     AmendHeadCommand,
@@ -184,13 +194,6 @@ class StrategyRuntimeLike(RuntimeQueueLike, Protocol):
 
 class TailTelemetryWriter(Protocol):
     def record_rows(self, rows: tuple[TailTelemetryRow, ...]) -> None: ...
-
-
-@dataclass(frozen=True)
-class _CommandSlot:
-    pair_name: str
-    attempt_index: int
-    role: str
 
 
 @dataclass(frozen=True)
@@ -1051,15 +1054,7 @@ class StrategyRuntime:
                 self._launch_command(slot, prepared)
                 continue
             pending = self._pending_commands.setdefault(slot, deque())
-            if isinstance(prepared, AmendTailCommand):
-                pending = deque(
-                    command for command in pending if not isinstance(command, AmendTailCommand)
-                )
-                pending.append(prepared)
-                self._pending_commands[slot] = pending
-                continue
-            pending.append(prepared)
-            self._pending_commands[slot] = pending
+            self._pending_commands[slot] = append_pending_command(pending, prepared)
 
     def _launch_command(self, slot: _CommandSlot, prepared: DragonSong) -> None:
         identity = self._command_identity_from_command(prepared)
@@ -1181,60 +1176,41 @@ class StrategyRuntime:
         self._pending_head_commands = deferred
 
     def _head_capacity_available(self, command: PlaceHeadCommand) -> bool:
-        if self.max_active_pairs <= 0:
-            return True
-        active_pairs = self._active_pair_names()
-        if command.pair_name in active_pairs:
-            return True
-        return len(active_pairs) < self.max_active_pairs
-
-    def _active_pair_count(self) -> int:
-        return len(self._active_pair_names())
-
-    def _active_pair_names(self) -> set[str]:
-        now = datetime.now(timezone.utc)
-        active: set[str] = set()
-        for pair_name, pair_state in self.state.pairs.items():
-            if pair_state.head_state == HeadState.LATENT:
-                continue
-            if _pair_runtime_complete(
-                pair_state,
-                launched_at=self.state.launched_at,
-                now=now,
-            ):
-                continue
-            active.add(pair_name)
-        for slot, entry in self._inflight_commands.items():
-            if isinstance(entry.command, (PlaceHeadCommand, PlaceTailCommand, AmendTailCommand)):
-                active.add(slot.pair_name)
-        return active
-
-    def _command_slot(self, command: DragonSong) -> _CommandSlot:
-        pair_name = command.pair_name
-        pair_state = self.state.pairs.get(pair_name)
-        attempt_index = 1 if pair_state is None else pair_state.attempt_index
-        role = "head"
-        if isinstance(command, (PlaceTailCommand, AmendTailCommand)):
-            role = "tail"
-        elif isinstance(command, CancelCommand):
-            role = "cancel"
-        return _CommandSlot(
-            pair_name=pair_name,
-            attempt_index=attempt_index,
-            role=role,
+        return head_capacity_available(
+            command,
+            state=self.state,
+            max_active_pairs=self.max_active_pairs,
+            inflight_commands=self._inflight_command_policy_items(),
+            now=datetime.now(timezone.utc),
         )
 
+    def _active_pair_count(self) -> int:
+        return active_pair_count(
+            self.state,
+            inflight_commands=self._inflight_command_policy_items(),
+            now=datetime.now(timezone.utc),
+        )
+
+    def _active_pair_names(self) -> set[str]:
+        return set(
+            active_pair_names(
+                self.state,
+                inflight_commands=self._inflight_command_policy_items(),
+                now=datetime.now(timezone.utc),
+            )
+        )
+
+    def _command_slot(self, command: DragonSong) -> _CommandSlot:
+        return command_slot(command, state=self.state)
+
     def _command_slot_still_live(self, slot: _CommandSlot) -> bool:
-        pair_state = self.state.pairs.get(slot.pair_name)
-        if pair_state is None:
-            return False
-        if pair_state.attempt_index != slot.attempt_index:
-            return False
-        if slot.role == "tail":
-            return pair_state.tail_state not in {None, TailState.CLOSED, TailState.FAILED}
-        if slot.role == "head":
-            return pair_state.head_state not in {HeadState.CLOSED, HeadState.FAILED}
-        return True
+        return command_slot_still_live(slot, state=self.state)
+
+    def _inflight_command_policy_items(self) -> tuple[tuple[_CommandSlot, DragonSong], ...]:
+        return tuple(
+            (slot, entry.command)
+            for slot, entry in self._inflight_commands.items()
+        )
 
     async def _pump_tail_telemetry(self) -> None:
         interval = max(self.tail_telemetry_interval_seconds, 1.0)
@@ -1330,7 +1306,11 @@ class StrategyRuntime:
             if stop is None:
                 continue
             current_distance = _tail_signed_distance(pair_state, to_decimal(ref), stop)
-            spread_guard = pair_state.tail_trail.max_observed_spread
+            spread_guard = tail_first_jump_guard_width(
+                pair_state.tail_trail,
+                getattr(market, "tick_size", None) or pair_state.instrument_tick_size,
+                getattr(market, "spread", None),
+            )
             unblock_requirement = tail_unblock_requirement(
                 pair_state.pair,
                 pair_state.tail_trail,
@@ -1598,10 +1578,10 @@ class StrategyRuntime:
                     "index",
                 ),
             ),
-            ("GATE_WAIT-1", ("status", "hook/window", "oType", "oDelta", "tOut")),
+            ("GATE_WAIT-1", ("status", "hook/window", "oType", "hPrice", "tOut")),
             (
                 "GATE_WAIT-2",
-                ("status", "src", "ref", "base", "move", "gate", "unit", "oType", "oDelta", "tOut"),
+                ("status", "src", "ref", "base", "move", "gate", "unit", "oType", "hPrice", "tOut"),
             ),
             ("GATE_WAIT-ERR", ("status", "symbol", "error")),
             ("LATENT_TIMEOUT_ARMED", ("deadline",)),
@@ -1653,7 +1633,9 @@ class StrategyRuntime:
                         pair.hook_name,
                         pair.head.order_type,
                         _fmt_compact_price(
-                            None if pair.head.delta is None else Decimal(str(pair.head.delta))
+                            None
+                            if pair.head_order_price_spec is None
+                            else Decimal(str(pair.head_order_price_spec))
                         ),
                         "-" if pair.timeout_minutes is None else pair.timeout_minutes,
                     ),
@@ -1676,7 +1658,9 @@ class StrategyRuntime:
                         f"{pair.window.start_minutes}..{pair.window.end_minutes}",
                         pair.head.order_type,
                         _fmt_compact_price(
-                            None if pair.head.delta is None else Decimal(str(pair.head.delta))
+                            None
+                            if pair.head_order_price_spec is None
+                            else Decimal(str(pair.head_order_price_spec))
                         ),
                         "-" if pair.timeout_minutes is None else pair.timeout_minutes,
                     ),
@@ -1734,7 +1718,9 @@ class StrategyRuntime:
                     unit,
                     pair.head.order_type,
                     _fmt_compact_price(
-                        None if pair.head.delta is None else Decimal(str(pair.head.delta))
+                        None
+                        if pair.head_order_price_spec is None
+                        else Decimal(str(pair.head_order_price_spec))
                     ),
                     "-" if pair.timeout_minutes is None else pair.timeout_minutes,
                 ),
@@ -1829,7 +1815,8 @@ class StrategyRuntime:
         updated = self._lease_with_private_event(lease, move)
         self._order_leases[slot] = updated
         if lease.status != updated.status:
-            _LOGGER.info(
+            log = _LOGGER.info if updated.status == _LEASE_CLOSED else _LOGGER.debug
+            log(
                 "LEASE_%s (%s#%s): %s",
                 "CLOSED" if updated.status == _LEASE_CLOSED else "OPEN",
                 updated.pair_name,
@@ -3092,21 +3079,11 @@ def _pair_runtime_complete(
     launched_at: datetime,
     now: datetime,
 ) -> bool:
-    """Return true only when head and required tail work have completed."""
-    if pair_state.head_state == HeadState.LATENT and pair_window_has_ended(
-        pair_state.pair,
+    return _policy_pair_runtime_complete(
+        pair_state,
         launched_at=launched_at,
         now=now,
-    ):
-        return True
-    if pair_state.head_state == HeadState.FAILED:
-        return True
-    if pair_state.head_state != HeadState.CLOSED:
-        return False
-    played = pair_state.played_quantity is not None and pair_state.played_quantity > 0
-    if not played:
-        return True
-    return pair_state.tail_state in {TailState.CLOSED, TailState.FAILED}
+    )
 
 
 def _head_timeout_cancel_command(

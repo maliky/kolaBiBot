@@ -78,19 +78,23 @@ def resolve_head_price(pair: OrderPairSpec, market: MarketLike) -> float | None:
 def resolve_head_order_prices(
     pair: OrderPairSpec,
     market: MarketLike,
+    *,
+    gate_reference_price: Decimal | int | float | str | None = None,
 ) -> tuple[float | None, float | None]:
     """Resolve concrete price/stopPx values for a non-market head order.
 
-    The `prix` interval is the hook condition. It is not a limit price. Once the
-    hook fires, order placement is anchored to the same market reference source
-    that the order type selects.  ``oDelta`` defaults to nominal USD distance;
-    when the head carries ``o%`` it is materialised as a percentage of the same
-    reference before any exchange command is built.
+    The `pGate` interval is the hook condition. It is not a limit price. Once
+    the hook fires, ``hPrice`` is materialised lazily against the gate-opening
+    reference.  ``hDelta`` is only a trigger-to-limit offset for SL/LT heads.
     """
     code = parse_order_code(pair.head.order_type)
     if code.base_key == "M":
         return None, None
-    reference = to_decimal(head_price_reference_price(pair, market)[1])
+    reference = (
+        to_decimal(gate_reference_price)
+        if gate_reference_price is not None
+        else to_decimal(executable_head_reference_price(pair, market)[1])
+    )
     if reference <= 0:
         return None, None
     if code.base_key == "L":
@@ -98,13 +102,14 @@ def resolve_head_order_prices(
     if code.base_key == "S":
         return None, decimal_to_float(_stop_head_price(pair, reference, market))
     if code.base_key in {"SL", "LT"}:
-        price = _trigger_limit_head_price(pair, reference, market)
+        stop_price = _touch_or_stop_head_price(pair, reference, market)
+        price = _trigger_limit_head_price(pair, stop_price)
         return (
             None if price is None else decimal_to_float(price),
-            decimal_to_float(reference),
+            decimal_to_float(stop_price),
         )
-    if code.base_key in {"SL", "MT", "LT"}:
-        return None, decimal_to_float(reference)
+    if code.base_key == "MT":
+        return None, decimal_to_float(_touch_head_price(pair, reference, market))
     return None, None
 
 
@@ -120,10 +125,12 @@ def _plain_limit_head_price(
     reference: Decimal,
     market: MarketLike,
 ) -> Decimal:
-    distance = _head_delta_distance(pair, reference, market)
+    value = _head_order_price_value(pair, reference, market)
+    if value.absolute is not None:
+        return value.absolute
     if pair.head.side == Side.BUY:
-        return reference - distance
-    return reference + distance
+        return reference - value.distance
+    return reference + value.distance
 
 
 def _stop_head_price(
@@ -131,36 +138,80 @@ def _stop_head_price(
     reference: Decimal,
     market: MarketLike,
 ) -> Decimal:
-    distance = _head_delta_distance(pair, reference, market)
+    value = _head_order_price_value(pair, reference, market)
+    if value.absolute is not None:
+        return value.absolute
     if pair.head.side == Side.BUY:
-        return reference + distance
-    return reference - distance
+        return reference + value.distance
+    return reference - value.distance
 
 
-def _trigger_limit_head_price(
-    pair: OrderPairSpec,
-    reference: Decimal,
-    market: MarketLike,
-) -> Decimal | None:
-    distance = _head_delta_distance(pair, reference, market)
-    if pair.head.side == Side.BUY:
-        return reference + distance
-    return reference - distance
-
-
-def _head_delta_distance(
+def _touch_head_price(
     pair: OrderPairSpec,
     reference: Decimal,
     market: MarketLike,
 ) -> Decimal:
-    if pair.head.delta is None:
+    value = _head_order_price_value(pair, reference, market)
+    if value.absolute is not None:
+        return value.absolute
+    if pair.head.side == Side.BUY:
+        return reference - value.distance
+    return reference + value.distance
+
+
+def _touch_or_stop_head_price(
+    pair: OrderPairSpec,
+    reference: Decimal,
+    market: MarketLike,
+) -> Decimal:
+    code = parse_order_code(pair.head.order_type)
+    if code.base_key == "LT":
+        return _touch_head_price(pair, reference, market)
+    return _stop_head_price(pair, reference, market)
+
+
+def _trigger_limit_head_price(
+    pair: OrderPairSpec,
+    stop_price: Decimal,
+) -> Decimal | None:
+    distance = _head_limit_offset_distance(pair, stop_price)
+    if pair.head.side == Side.BUY:
+        return stop_price + distance
+    return stop_price - distance
+
+
+class _HeadOrderPriceValue:
+    def __init__(self, *, distance: Decimal, absolute: Decimal | None = None) -> None:
+        self.distance = distance
+        self.absolute = absolute
+
+
+def _head_order_price_value(
+    pair: OrderPairSpec,
+    reference: Decimal,
+    market: MarketLike,
+) -> _HeadOrderPriceValue:
+    if pair.head_order_price_spec is None:
         tick = _tick_size_from_market(market)
         if tick is None:
             raise ValueError(
                 f"Order pair '{pair.name}' needs an instrument tick size to materialise "
-                "blank head oDelta"
+                "blank hPrice"
             )
-        return tick
+        return _HeadOrderPriceValue(distance=tick)
+    value = to_decimal(pair.head_order_price_spec)
+    price_type = pair.head_order_price_spec_type.lower()
+    if price_type == "ha":
+        return _HeadOrderPriceValue(distance=Decimal("0"), absolute=value)
+    distance = abs(value)
+    if price_type == "h%":
+        distance = reference * distance / Decimal("100")
+    return _HeadOrderPriceValue(distance=distance)
+
+
+def _head_limit_offset_distance(pair: OrderPairSpec, reference: Decimal) -> Decimal:
+    if pair.head.delta is None:
+        return Decimal("0")
     delta = abs(to_decimal(pair.head.delta or 0))
     if pair.head.delta_type.lower() == "o%":
         return reference * delta / Decimal("100")
@@ -205,7 +256,7 @@ def head_price_condition_satisfied(
     pair_state: PairCycleState,
     reference_price: Decimal | int | float | str,
 ) -> bool:
-    """Evaluate the head prix interval against current and baseline reference."""
+    """Evaluate the head pGate interval against current and baseline reference."""
     pair = pair_state.pair
     current = to_decimal(reference_price)
     low, high = (to_decimal(pair.head_price[0]), to_decimal(pair.head_price[1]))

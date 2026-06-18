@@ -101,7 +101,11 @@ def head_hooked_from_market_snapshot(
         )
     if not head_price_condition_satisfied(pair_state, reference):
         return None
-    order_price, order_stop_price = resolve_head_order_prices(pair, snapshot)
+    order_price, order_stop_price = resolve_head_order_prices(
+        pair,
+        snapshot,
+        gate_reference_price=reference,
+    )
     return head_hooked_event(
         pair_name=pair.name,
         symbol=snapshot.symbol,

@@ -1,10 +1,10 @@
 Feature: Monolithic strategy specification layer
   As an operator
   I want one typed strategy layer
-  So that TSV and run-once are normalized once before runtime
+  So that Org strategy tables and run-once are normalized once before runtime
 
-  Scenario: TSV row maps to canonical StrategySpec
-    Given a valid TSV strategy row payload
+  Scenario: Org strategy table row maps to canonical StrategySpec
+    Given a valid Org strategy table row payload
     When the payload is normalized into the canonical strategy layer
     Then a typed StrategySpec should be produced
 
@@ -13,8 +13,8 @@ Feature: Monolithic strategy specification layer
     When the payload is normalized into the canonical strategy layer
     Then a typed StrategySpec should be produced
 
-  Scenario: TSV and run-once equivalent intent produce same canonical pair
-    Given equivalent TSV and run-once payloads
+  Scenario: Org strategy table and run-once equivalent intent produce same canonical pair
+    Given equivalent Org strategy table and run-once payloads
     When both payloads are normalized into the canonical strategy layer
     Then the normalized OrderPairSpec values should match
 

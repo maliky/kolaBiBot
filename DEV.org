@@ -22,9 +22,9 @@ It could be implemented by changing the =tOut= strategy parameter, making it a r
 
 ** Tail unblock parameter
 - =tUblk= is the favourable move required before the first managed tail update.
-- Empty =tUblk= keeps the current default: the initial tail distance plus observed spread.
-- Once unblocked, the first managed tail update jumps to the profit side of the head-fill entry by four ticks plus the observed spread, then later updates resume the normal trailing curve.
-- Ten ticks must be converted to nominal distance before entry, for example =D5= on a product with tick size =0.5=.
+- Empty =tUblk= keeps the current default: the initial tail distance plus the first-jump guard.
+- Once unblocked, the first managed tail update jumps to the profit side of the head-fill entry by =max(max observed spread, 8 ticks) + two taker fees=, then later updates resume the normal trailing curve.
+- The taker fee guard uses =0.05%= per side, so two fees add =0.001 * head-fill price=. Tick guards are converted from the instrument tick size at runtime.
 
 
 * DONE <2026-05-26 Tue 18:08>
@@ -839,26 +839,6 @@ PGPASSWORD="$KOLABI_POSTGRES_PASSWORD" psql -h 127.0.0.1 -p "$KOLABI_POSTGRES_PO
   python -m kolabi.bot run --strategy orders/xbt_bk.tsv --exchange kraken --symbol PI_XBTUSD --environment live --dry-run
 
 
-#+end_src
-
-** Tail Order Example
-
-The simplest reusable bot-tail example is stored in:
-
-#+begin_example
-orders/pi_xbtusd_sell_plus1_tail_0p5.tsv
-#+end_example
-
-It describes:
-
-- one sell limit order
-- order price at current lower ask + 1.0
-- one bot-managed stop tail at 0.5 percent
-
-Run it with:
-
-#+begin_src bash
-python -m kolabi.bot run --strategy orders/pi_xbtusd_sell_plus1_tail_0p5.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
 #+end_src
 
 ** Cost Commands

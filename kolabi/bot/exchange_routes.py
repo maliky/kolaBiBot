@@ -66,7 +66,7 @@ def market_types_for_exchange(exchange: str) -> frozenset[str]:
 
 
 def route_codes_for_market(exchange: str, market_type: str) -> tuple[str, ...]:
-    """Return advertised TSV route codes for one exchange/market lane."""
+    """Return advertised strategy route codes for one exchange/market lane."""
 
     exchange_name = str(exchange or "").strip().lower()
     route_market_type = str(market_type or DEFAULT_MARKET_TYPE).strip().lower()
@@ -231,7 +231,7 @@ _EXCHANGE_CODE_ALIASES: dict[str, str] = {
 
 
 def parse_exchange_code(raw: str | None) -> tuple[str | None, str | None]:
-    """Parse a TSV exchange code into canonical exchange and market type."""
+    """Parse a strategy exchange code into canonical exchange and market type."""
 
     text = str(raw or "").strip()
     if not text:
@@ -262,7 +262,7 @@ def parse_exchange_code(raw: str | None) -> tuple[str | None, str | None]:
 
 
 def normalise_exchange_name(raw: str) -> str:
-    """Return a canonical exchange name from CLI names or TSV codes."""
+    """Return a canonical exchange name from CLI names or strategy route codes."""
 
     exchange, market_type = parse_exchange_code(raw)
     if exchange is None:

@@ -1145,7 +1145,7 @@ class BotService:
                 )
 
     def _materialize_strategy_symbols(self, strategy: StrategySpec) -> StrategySpec:
-        """Attach the CLI default symbol to TSV rows that did not specify one."""
+        """Attach the CLI default symbol to strategy rows that did not specify one."""
         names: set[str] = set()
         duplicates: list[str] = []
         pairs: list[OrderPairSpec] = []
