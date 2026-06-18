@@ -693,18 +693,18 @@ python -m kolabi.bot run --strategy orders/stra.tsv --exchange kraken --symbol P
 - Replace =logs/stra.log= with the strategy-specific file you want, for example =logs/bmm_ada.log=.
 - Default background DB feeder logs are created by =scripts/kolabidb= under =./logs/kolabidb-*.log=; inspect them with =scripts/kolabidb public logs=, =scripts/kolabidb private logs=, or =scripts/kolabidb postgres logs=.
 
-*** Reporting terminated pairs
+*** Reporting run state
 
-=scripts/kolabi-run-report= turns a captured runtime log into an aligned Org table for terminated head/tail pairs. It reads lifecycle timing and amendment events from the log, then reads local account DB fill rows for exact head/tail fill prices, fees, and maker/taker roles. The command does not call the exchange.
+=scripts/kolabi-run-report= turns a captured runtime log into aligned Org tables for terminated head/tail pairs, living tail-flying pairs, and latest active latent pairs. It reads lifecycle timing, amendment events, tail telemetry, and latent gate events from the log, then reads local account DB rows for exact fills, fees, maker/taker roles, and still-open tail status. The command does not call the exchange.
 
 #+begin_src bash
 scripts/kolabi-run-report logs/krf_ada.log
 scripts/kolabi-run-report logs/krf_ada.log -o JOURNAL.org
 #+end_src
 
-By default the command resolves =KOLABI_ACCOUNT_DB_URL= from the environment or from =.env.postgres=. Pass =--account-db-url= to use another private account DB. Use =--log-only= only when DB rows are unavailable; in that mode fill prices are the rounded values seen in runtime logs and DB-only columns such as maker/taker, net, and cumulative net can be blank.
+By default the command resolves =KOLABI_ACCOUNT_DB_URL= from the environment or from =.env.postgres=. Pass =--account-db-url= to use another private account DB. Use =--log-only= only when DB rows are unavailable; in that mode fill prices are the rounded values seen in runtime logs and DB-only columns such as maker/taker, net, cumulative net, and tail DB status can be blank.
 
-The report columns are:
+The terminated-pair columns are:
 
 - =H fill UTC= and =T fill UTC=: head and tail fill times in UTC, formatted as =MM-DD HH:MM=.
 - =Life=: elapsed time from head fill to tail fill.
@@ -713,7 +713,11 @@ The report columns are:
 - =Hfill=, =Tfill=, and =Qty=: DB-backed fill price and quantity when DB rows are available.
 - =H/T liq=: maker/taker roles, abbreviated =M= or =T=.
 - =A#=, =T amend1 UTC=, =T amend2 UTC=, and =A.diff=: tail amendment count, first two amend times, and final amended stop minus initial tail stop. =A.diff= is a quote-price difference per base unit, for example USD/ADA on =PF_ADAUSD=; it is not multiplied by =Qty=. Terminal =0.0000= stop placeholders in close updates are ignored so they do not erase the last real amend price.
-- =Gross USD=, =Net USD=, and =Cum net=: gross before fees, net after DB fees when fee rows are in USD-like currency, and running cumulative net.
+- =Gross USD=, =Net USD=, =ROI %=, and =Cum net=: gross before fees, net after DB fees when fee rows are in USD-like currency, return on notional, and running cumulative net. ROI uses =Net USD / (Hfill * Qty) * 100= when DB fees are available, otherwise =Gross USD / (Hfill * Qty) * 100= in =--log-only= mode.
+
+The living tail-flying section shows head-filled pairs whose tail has not filled. =Age= is measured from head fill to the latest parsed log timestamp. =Tstop= and =Dist= come from latest tail lifecycle/telemetry. =T status= and =T filled= come from the local account DB when available.
+
+The latest latent section shows one latest active not-yet-filled attempt per pair name. Attempts already ended by =HEAD_CANCELLED=, =COMMAND_FAILED=, =HEAD_TIMEOUT=, or a filled head are excluded. The section is meant to surface current pending gate/head state, not the full history of failed repeats. A compact =Latest prices:= line after the latent table prints the latest parsed mark and market prices from runtime telemetry.
 
 Useful options:
 
