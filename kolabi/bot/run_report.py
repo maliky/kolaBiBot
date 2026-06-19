@@ -12,6 +12,7 @@ import argparse
 import os
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -56,6 +57,7 @@ class PairLifecycle:
     tail_client_id: str | None = None
     head_fill: FillLeg | None = None
     tail_fill: FillLeg | None = None
+    tail_placed_at: datetime | None = None
     initial_tail_stop: Decimal | None = None
     latest_tail_stop: Decimal | None = None
     amend_count: int = 0
@@ -83,6 +85,7 @@ class MarketSnapshot:
 
     recorded_at: datetime
     source: str
+    spread_guard: Decimal | None
     bid_price: Decimal | None
     ask_price: Decimal | None
     mid_price: Decimal | None
@@ -156,6 +159,7 @@ class ReportRow:
     key: PairKey
     head_fill_at: datetime
     tail_fill_at: datetime
+    tail_placed_at: datetime | None
     life_seconds: int
     side: str
     head_price: Decimal
@@ -485,6 +489,7 @@ def build_report_rows(
                 key=row.key,
                 head_fill_at=row.head_fill_at,
                 tail_fill_at=row.tail_fill_at,
+                tail_placed_at=row.tail_placed_at,
                 life_seconds=row.life_seconds,
                 side=row.side,
                 head_price=row.head_price,
@@ -517,15 +522,15 @@ def render_org_table(
         "T fill UTC",
         "Life",
         "Pair",
-        "h/t side",
+        "Side",
         "Hfill",
         "Tfill",
         "Qty",
-        "H/T liq",
+        "Liq",
         "A#",
-        "T amend1 UTC",
-        "T amend2 UTC",
-        "A.diff",
+        "Tamend1 UTC",
+        "Tamend2 UTC",
+        "Amd Diff",
         "Gross USD",
         "Net USD",
         "ROI %",
@@ -560,13 +565,82 @@ def render_org_table(
         "Tfill",
         "Qty",
         "A#",
-        "A.diff",
+        "Amd Diff",
         "Gross USD",
         "Net USD",
         "ROI %",
         "Cum net",
     }
     return _format_table(headers, body, align_right=align_right)
+
+
+def render_terminated_summary_table(
+    rows: Sequence[ReportRow],
+    *,
+    options: ReportOptions | None = None,
+) -> str:
+    """Render a compact stats table for terminated-pair numeric columns."""
+
+    options = options or ReportOptions()
+    headers = (
+        "Stat",
+        "Life",
+        "Hfill",
+        "Tfill",
+        "Qty",
+        "A#",
+        "AmendLife",
+        "amendDif",
+        "Gross USD",
+        "Net USD",
+        "ROI %",
+    )
+    stats = ("min", "max", "median", "mode", "average")
+    body = [
+        (
+            stat,
+            _format_stat_life(_stat_value(_row_life_values(rows), stat)),
+            _format_stat_decimal(
+                _stat_value((row.head_price for row in rows), stat),
+                options.price_places,
+            ),
+            _format_stat_decimal(
+                _stat_value((row.tail_price for row in rows), stat),
+                options.price_places,
+            ),
+            _format_stat_decimal(
+                _stat_value((row.quantity for row in rows), stat),
+                options.diff_places,
+            ),
+            _format_stat_decimal(
+                _stat_value((Decimal(row.amend_count) for row in rows), stat),
+                2,
+            ),
+            _format_stat_life(_stat_value(_row_amend_phase_values(rows), stat)),
+            _format_stat_decimal(
+                _stat_value(_optional_values(row.amend_diff for row in rows), stat),
+                options.diff_places,
+                signed=True,
+            ),
+            _format_stat_decimal(
+                _stat_value((row.gross_usd for row in rows), stat),
+                options.money_places,
+                signed=True,
+            ),
+            _format_stat_decimal(
+                _stat_value(_optional_values(row.net_usd for row in rows), stat),
+                options.money_places,
+                signed=True,
+            ),
+            _format_stat_decimal(
+                _stat_value(_optional_values(row.roi_percent for row in rows), stat),
+                options.pct_places,
+                signed=True,
+            ),
+        )
+        for stat in stats
+    ]
+    return _format_table(headers, body, align_right=set(headers) - {"Stat"})
 
 
 def build_living_tail_rows(
@@ -651,7 +725,7 @@ def render_living_tail_table(
         "H fill UTC",
         "Age",
         "Pair",
-        "h/t side",
+        "Side",
         "Hfill",
         "Qty",
         "Hliq",
@@ -763,27 +837,49 @@ def render_latent_table(
     )
 
 
-def render_market_snapshot_line(
+def render_market_snapshot_table(
     snapshot: MarketSnapshot | None,
     *,
     options: ReportOptions | None = None,
 ) -> str:
-    """Render the latest parsed mark and market prices as one compact line."""
+    """Render the latest parsed mark and market prices as a one-row table."""
 
     options = options or ReportOptions()
+    headers = (
+        "Latest prices",
+        "Mark",
+        "Last",
+        "Spread",
+        "Max spread",
+        "Bid",
+        "Ask",
+        "Mid",
+        "Index",
+        "Src",
+    )
     if snapshot is None:
-        return "Latest prices: unavailable."
-    return " ".join(
-        (
-            f"Latest prices: {_format_time(snapshot.recorded_at)}",
-            f"mark={_format_optional_price_word(snapshot.mark_price, options.price_places)}",
-            f"bid={_format_optional_price_word(snapshot.bid_price, options.price_places)}",
-            f"ask={_format_optional_price_word(snapshot.ask_price, options.price_places)}",
-            f"mid={_format_optional_price_word(snapshot.mid_price, options.price_places)}",
-            f"last={_format_optional_price_word(snapshot.last_price, options.price_places)}",
-            f"index={_format_optional_price_word(snapshot.index_price, options.price_places)}",
-            f"src={snapshot.source or '-'}",
+        body = (("unavailable", "", "", "", "", "", "", "", "", ""),)
+    else:
+        body = (
+            (
+                _format_time(snapshot.recorded_at),
+                _format_optional_price_word(snapshot.mark_price, options.price_places),
+                _format_optional_price_word(snapshot.last_price, options.price_places),
+                _format_optional_price_word(
+                    _snapshot_spread(snapshot), options.price_places
+                ),
+                _format_optional_price_word(snapshot.spread_guard, options.price_places),
+                _format_optional_price_word(snapshot.bid_price, options.price_places),
+                _format_optional_price_word(snapshot.ask_price, options.price_places),
+                _format_optional_price_word(snapshot.mid_price, options.price_places),
+                _format_optional_price_word(snapshot.index_price, options.price_places),
+                snapshot.source or "-",
+            ),
         )
+    return _format_table(
+        headers,
+        body,
+        align_right=set(headers) - {"Latest prices", "Src"},
     )
 
 
@@ -793,21 +889,35 @@ def render_run_report(
     latent_rows: Sequence[LatentRow],
     *,
     market_snapshot: MarketSnapshot | None = None,
+    report_at: datetime | None = None,
     options: ReportOptions | None = None,
 ) -> str:
     """Render the full operator report as Org sections."""
 
     options = options or ReportOptions()
     sections = [
-        "* Terminated pairs",
-        _render_section_table(render_org_table, terminated_rows, options=options),
+        _format_org_heading(
+            _report_timestamp(
+                terminated_rows,
+                living_rows,
+                latent_rows,
+                market_snapshot=market_snapshot,
+                report_at=report_at,
+            )
+        ),
+        render_market_snapshot_table(market_snapshot, options=options),
         "",
-        "* Living tail-flying pairs",
+        "** Terminated pairs",
+        render_terminated_counts_line(terminated_rows),
+        "",
+        _render_section_table(render_org_table, terminated_rows, options=options),
+        _render_optional_summary(terminated_rows, options=options),
+        "",
+        "** Living tail-flying pairs",
         _render_section_table(render_living_tail_table, living_rows, options=options),
         "",
-        "* Latest latent pairs",
+        "** Latest latent pairs",
         _render_section_table(render_latent_table, latent_rows, options=options),
-        render_market_snapshot_line(market_snapshot, options=options),
     ]
     return "\n".join(sections)
 
@@ -851,6 +961,9 @@ def build_report_table(
         living_rows,
         latent_rows,
         market_snapshot=snapshot.market_snapshot,
+        report_at=snapshot.market_snapshot.recorded_at
+        if snapshot.market_snapshot is not None
+        else snapshot.last_log_at,
         options=options,
     )
 
@@ -910,7 +1023,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         "-o",
-        help="Write the Org table to this file instead of stdout.",
+        help="Prepend the Org report to this file instead of stdout.",
     )
     parser.add_argument(
         "--price-dp",
@@ -941,7 +1054,7 @@ def main(
             options=ReportOptions(price_places=args.price_dp),
         )
         if args.output:
-            Path(args.output).write_text(table + "\n", encoding="utf-8")
+            _prepend_output(Path(args.output), table)
         else:
             print(table, file=out)
     except ReportError as exc:
@@ -991,6 +1104,8 @@ def _parse_update(lifecycle: PairLifecycle, body: str) -> None:
             lifecycle.initial_tail_stop = confirmed_stop
         if desired_stop is not None:
             lifecycle.latest_tail_stop = desired_stop
+        if lifecycle.tail_placed_at is None:
+            lifecycle.tail_placed_at = _parse_iso_utc(fields[6])
         lifecycle.tail_client_id = fields[4]
     elif state == "closed--closed" and len(fields) >= 8:
         if lifecycle.tail_fill is None:
@@ -1050,6 +1165,7 @@ def _parse_market_snapshot(
     return MarketSnapshot(
         recorded_at=log_time,
         source=fields[8],
+        spread_guard=_field_decimal(fields[5]),
         bid_price=_field_decimal(fields[9]),
         ask_price=_field_decimal(fields[10]),
         mid_price=_field_decimal(fields[11]),
@@ -1201,6 +1317,7 @@ def _build_report_row(
         key=lifecycle.key,
         head_fill_at=lifecycle.head_fill.filled_at,
         tail_fill_at=lifecycle.tail_fill.filled_at,
+        tail_placed_at=lifecycle.tail_placed_at,
         life_seconds=int(
             (
                 lifecycle.tail_fill.filled_at.replace(microsecond=0)
@@ -1388,6 +1505,15 @@ def _format_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).strftime("%m-%d %H:%M")
 
 
+def _format_org_heading(value: datetime) -> str:
+    local_value = value.astimezone(timezone.utc)
+    weekdays = ("lun.", "mar.", "mer.", "jeu.", "ven.", "sam.", "dim.")
+    return (
+        f"* <{local_value:%Y-%m-%d} {weekdays[local_value.weekday()]} "
+        f"{local_value:%H:%M}>"
+    )
+
+
 def _format_optional_time(value: datetime | None) -> str:
     if value is None:
         return ""
@@ -1434,6 +1560,37 @@ def _format_optional_price_word(value: Decimal | None, places: int) -> str:
     if value is None:
         return "-"
     return _format_decimal(value, places)
+
+
+def _format_stat_decimal(
+    value: Decimal | None,
+    places: int,
+    *,
+    signed: bool = False,
+) -> str:
+    if value is None:
+        return ""
+    quant = Decimal("1").scaleb(-places)
+    rounded = value.quantize(quant, rounding=ROUND_HALF_UP)
+    if rounded == rounded.to_integral_value():
+        formatted = str(int(rounded))
+    else:
+        formatted = format(rounded.normalize(), "f")
+    if signed and not formatted.startswith("-"):
+        return f"+{formatted}"
+    return formatted
+
+
+def _format_stat_life(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    return _format_life(int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)))
+
+
+def _snapshot_spread(snapshot: MarketSnapshot) -> Decimal | None:
+    if snapshot.bid_price is None or snapshot.ask_price is None:
+        return None
+    return snapshot.ask_price - snapshot.bid_price
 
 
 def _format_signed(value: Decimal, places: int) -> str:
@@ -1494,6 +1651,116 @@ def _render_section_table(
     return renderer(rows, options=options)
 
 
+def _render_optional_summary(
+    rows: Sequence[ReportRow],
+    *,
+    options: ReportOptions,
+) -> str:
+    if not rows:
+        return ""
+    return (
+        "\n"
+        + render_terminated_summary_table(rows, options=options)
+        + "\nMode note: mode is the most repeated value; blank means no value repeats."
+    )
+
+
+def _report_timestamp(
+    terminated_rows: Sequence[ReportRow],
+    living_rows: Sequence[LivingTailRow],
+    latent_rows: Sequence[LatentRow],
+    *,
+    market_snapshot: MarketSnapshot | None,
+    report_at: datetime | None,
+) -> datetime:
+    if report_at is not None:
+        return report_at
+    if market_snapshot is not None:
+        return market_snapshot.recorded_at
+    candidates: list[datetime] = []
+    candidates.extend(row.tail_fill_at for row in terminated_rows)
+    candidates.extend(row.head_fill_at for row in living_rows)
+    candidates.extend(row.time for row in latent_rows)
+    if candidates:
+        return max(candidates)
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def render_terminated_counts_line(rows: Sequence[ReportRow]) -> str:
+    """Render compact side and liquidity counts for terminated rows."""
+
+    if not rows:
+        return "Side: none | Liq: none"
+    side_counts = Counter(row.side or "-" for row in rows)
+    liq_counts = Counter(row.liquidity or "-" for row in rows)
+    return (
+        f"Side: {_format_counts(side_counts)} | "
+        f"Liq: {_format_counts(liq_counts)}"
+    )
+
+
+def _format_counts(counts: Counter[str]) -> str:
+    return " ".join(f"{key}={counts[key]}" for key in sorted(counts))
+
+
+def _stat_value(values: Iterable[Decimal], stat: str) -> Decimal | None:
+    items = tuple(values)
+    if not items:
+        return None
+    if stat == "min":
+        return min(items)
+    if stat == "max":
+        return max(items)
+    if stat == "median":
+        return _median(items)
+    if stat == "mode":
+        return _mode(items)
+    if stat == "average":
+        return sum(items, Decimal("0")) / Decimal(len(items))
+    raise ValueError(f"unknown stat {stat!r}")
+
+
+def _median(values: Sequence[Decimal]) -> Decimal:
+    items = sorted(values)
+    midpoint = len(items) // 2
+    if len(items) % 2:
+        return items[midpoint]
+    return (items[midpoint - 1] + items[midpoint]) / Decimal("2")
+
+
+def _mode(values: Sequence[Decimal]) -> Decimal | None:
+    counts = Counter(values)
+    highest = max(counts.values())
+    modes = sorted(value for value, count in counts.items() if count == highest)
+    if highest == 1 and len(modes) > 1:
+        return None
+    return modes[0]
+
+
+def _optional_values(values: Iterable[Decimal | None]) -> tuple[Decimal, ...]:
+    return tuple(value for value in values if value is not None)
+
+
+def _row_life_values(rows: Sequence[ReportRow]) -> tuple[Decimal, ...]:
+    return tuple(Decimal(row.life_seconds) for row in rows)
+
+
+def _row_amend_phase_values(rows: Sequence[ReportRow]) -> tuple[Decimal, ...]:
+    values: list[Decimal] = []
+    for row in rows:
+        if row.tail_placed_at is None:
+            continue
+        seconds = int(
+            (
+                row.tail_fill_at.replace(microsecond=0)
+                - row.tail_placed_at.replace(microsecond=0)
+            ).total_seconds()
+        )
+        if seconds >= 0:
+            values.append(Decimal(seconds))
+    return tuple(values)
+
+
 def _latent_status(attempt: LatentAttempt) -> str:
     if attempt.status:
         return attempt.status
@@ -1526,6 +1793,15 @@ def _load_env_file(path: Path, *, env: Mapping[str, str]) -> dict[str, str]:
 
 def _compact_error(exc: BaseException) -> str:
     return " ".join(str(exc).split())
+
+
+def _prepend_output(path: Path, text: str) -> None:
+    rendered = text.rstrip() + "\n"
+    if path.exists():
+        existing = path.read_text(encoding="utf-8")
+        if existing:
+            rendered = rendered + "\n" + existing
+    path.write_text(rendered, encoding="utf-8")
 
 
 if __name__ == "__main__":

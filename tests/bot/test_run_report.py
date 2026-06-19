@@ -21,8 +21,10 @@ from kolabi.bot.run_report import (
     parse_log_text,
     render_latent_table,
     render_living_tail_table,
-    render_market_snapshot_line,
+    render_market_snapshot_table,
     render_org_table,
+    render_terminated_counts_line,
+    render_terminated_summary_table,
 )
 from kolabi.shared.persistence import Base, ExchangeFill, ExchangeOrder
 
@@ -110,19 +112,63 @@ def test_render_log_only_table_aligns_pair_attempt() -> None:
     table = render_org_table(rows, options=ReportOptions())
 
     assert (
-        "| H fill UTC  | T fill UTC  | Life     | Pair      | h/t side |"
+        "| H fill UTC  | T fill UTC  | Life     | Pair      | Side |"
         in table
     )
-    assert "T amend1 UTC" in table
-    assert "T amend2 UTC" in table
+    assert "Tamend1 UTC" in table
+    assert "Tamend2 UTC" in table
     assert (
-        "| 06-17 23:05 | 06-17 23:21 | 00:15:52 | MM_BUY #4 | B/S      |"
+        "| 06-17 23:05 | 06-17 23:21 | 00:15:52 | MM_BUY #4 | B/S  |"
         in table
     )
-    assert "|  2 | 06-17 23:19  | 06-17 23:20  | +0.00240 |" in table
+    assert "|  2 | 06-17 23:19 | 06-17 23:20 | +0.00240 |" in table
     assert "| 0.16670 | 0.16690 |" in table
     assert "| +0.00240 | +0.002400 |" in table
     assert "| +0.002400 |         | +0.1200 |" in table
+
+
+def test_render_terminated_summary_table_uses_stat_rows() -> None:
+    rows = build_report_rows(parse_log_text(SAMPLE_LOG))
+    table = render_terminated_summary_table(rows, options=ReportOptions())
+
+    assert "| Stat    |" in table
+    assert "AmendLife" in table
+    assert "Tamend1" not in table
+    assert "Tamend2" not in table
+    assert "amendDif" in table
+    assert "| min     | 00:15:52 | 0.1667 | 0.1669 |  12 |  2 |  00:15:52 |  +0.0024 |" in table
+    assert "| average | 00:15:52 | 0.1667 | 0.1669 |  12 |  2 |  00:15:52 |  +0.0024 |" in table
+
+
+def test_terminated_summary_amend_life_uses_tail_placement() -> None:
+    log = "\n".join(
+        (
+            "2026-06-17 23:00:00,000 MainThread~20 /strategy_runtime.py@1@x/ "
+            "HEAD_SENT (MM_BUY#1): H1alpha buy L 1.00 0.1000 -",
+            "2026-06-17 23:00:00,100 MainThread~20 /strategy_runtime.py@1@x/ "
+            "UPDATE (MM_BUY#1): closed--hooked 1.0 0.1010 buy 1.00 0.1000 "
+            "2026-06-17T23:00:00.000000+00:00",
+            "2026-06-17 23:02:00,100 MainThread~20 /strategy_runtime.py@1@x/ "
+            "UPDATE (MM_BUY#1): closed--living 1.0 0.1010 0.1010 T1beta "
+            "tail-order 2026-06-17T23:02:00.000000+00:00",
+            "2026-06-17 23:05:00,100 MainThread~20 /strategy_runtime.py@1@x/ "
+            "UPDATE (MM_BUY#1): closed--closed 1.0 0.1010 0.1010 sell 1.00 "
+            "0.1010 2026-06-17T23:05:00.000000+00:00",
+        )
+    )
+    rows = build_report_rows(parse_log_text(log))
+    table = render_terminated_summary_table(rows, options=ReportOptions())
+
+    assert rows[0].tail_placed_at is not None
+    assert rows[0].life_seconds == 300
+    assert "| min     | 00:05:00 |   0.1 | 0.101 |   1 |  0 |  00:03:00 |" in table
+
+
+def test_render_terminated_counts_line_counts_side_and_liquidity() -> None:
+    rows = build_report_rows(parse_log_text(SAMPLE_LOG))
+
+    assert render_terminated_counts_line(rows) == "Side: B/S=1 | Liq: -=1"
+    assert render_terminated_counts_line(()) == "Side: none | Liq: none"
 
 
 def test_render_log_only_table_leaves_second_amend_time_blank() -> None:
@@ -132,7 +178,7 @@ def test_render_log_only_table_leaves_second_amend_time_blank() -> None:
     rows = build_report_rows(parse_log_text(single_amend_log))
     table = render_org_table(rows, options=ReportOptions())
 
-    assert "|  1 | 06-17 23:19  |              | +0.00240 |" in table
+    assert "|  1 | 06-17 23:19 |             | +0.00240 |" in table
 
 
 def test_fetch_fill_summaries_aggregates_local_db_rows(postgres_url_factory) -> None:
@@ -208,7 +254,7 @@ def test_fetch_fill_summaries_aggregates_local_db_rows(postgres_url_factory) -> 
     table = render_org_table(rows)
 
     assert "| 0.16671 | 0.16685 |" in table
-    assert "| M/T     |" in table
+    assert "| M/T |" in table
     assert "| +0.001680 | +0.000279 | +0.0139 | +0.000279 |" in table
 
 
@@ -296,12 +342,13 @@ def test_living_tail_rows_include_latest_metrics_and_db_order_state(postgres_url
     table = render_living_tail_table(rows)
 
     assert "Ref" not in table.splitlines()[0]
-    assert "| 06-18 15:23 | 03:26:57 | MM_BUY #1 | B/S      |" in table
+    assert "| 06-18 15:23 | 03:26:57 | MM_BUY #1 | B/S  |" in table
     assert "| 0.16247 |   6 | M    | 0.15940 | 0.00290 | untouched |        0 |" in table
+    prices = render_market_snapshot_table(snapshot.market_snapshot)
+    assert "| Latest prices |    Mark |    Last |  Spread | Max spread |" in prices
     assert (
-        render_market_snapshot_line(snapshot.market_snapshot)
-        == "Latest prices: 06-18 18:50 mark=0.16230 bid=0.16070 "
-        "ask=0.16080 mid=0.16070 last=0.16220 index=0.16230 src=last"
+        "| 06-18 18:50   | 0.16230 | 0.16220 | 0.00010 |    0.00040 |"
+        in prices
     )
 
 
@@ -341,10 +388,19 @@ def test_full_report_renders_three_sections_in_log_only_mode(tmp_path: Path) -> 
 
     table = build_report_table(log_path, log_only=True)
 
-    assert "* Terminated pairs" in table
-    assert "* Living tail-flying pairs\nNo rows." in table
-    assert "* Latest latent pairs\nNo rows." in table
-    assert "Latest prices: unavailable." in table
+    lines = table.splitlines()
+    assert lines[0] == "* <2026-06-17 mer. 23:21>"
+    assert lines[1].startswith("| Latest prices |")
+    assert lines[3].startswith("| unavailable")
+    assert lines[5] == "** Terminated pairs"
+    assert "\n** Terminated pairs" in table
+    assert table.count("Latest prices") == 1
+    assert "Side: B/S=1 | Liq: -=1" in table
+    assert "\n| Stat" in table
+    assert "Mode note: mode is the most repeated value; blank means no value repeats." in table
+    assert "** Terminated pairs" in table
+    assert "** Living tail-flying pairs\nNo rows." in table
+    assert "** Latest latent pairs\nNo rows." in table
 
 
 def test_cli_log_only_writes_stdout(tmp_path: Path) -> None:
@@ -357,7 +413,30 @@ def test_cli_log_only_writes_stdout(tmp_path: Path) -> None:
 
     assert result == 0
     assert err.getvalue() == ""
+    assert out.getvalue().startswith("* <2026-06-17 mer. 23:21>")
     assert "| 06-17 23:05 | 06-17 23:21 | 00:15:52 | MM_BUY #4 |" in out.getvalue()
+
+
+def test_cli_output_prepends_report_without_erasing_existing_content(tmp_path: Path) -> None:
+    log_path = tmp_path / "sample.log"
+    output_path = tmp_path / "JOURNAL.org"
+    log_path.write_text(SAMPLE_LOG, encoding="utf-8")
+    output_path.write_text("* older report\nolder body\n", encoding="utf-8")
+    out = StringIO()
+    err = StringIO()
+
+    result = main(
+        ["--log-only", str(log_path), "--output", str(output_path)],
+        stdout=out,
+        stderr=err,
+    )
+
+    assert result == 0
+    assert out.getvalue() == ""
+    assert err.getvalue() == ""
+    text = output_path.read_text(encoding="utf-8")
+    assert text.startswith("* <2026-06-17 mer. 23:21>\n")
+    assert "\n\n* older report\nolder body\n" in text
 
 
 def test_cli_requires_db_unless_log_only(tmp_path: Path) -> None:
