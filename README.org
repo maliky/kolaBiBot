@@ -203,21 +203,6 @@ Legacy tests and archived paths exist for behavioural reference, but the active 
 
 This is an educational and experimental trading system. It can submit real orders when run against a live platform. Review the code, use small size, keep exchange-side risk limits in place, and do not run unattended until the live preprod path has proven itself under your operating conditions.
 
-* Vocabulary Translation                                           :noexport:
-Canonical runtime naming keeps literal typed names in code and uses metaphors
-as operator-facing aliases.
-
-| Literal role/type | Metaphor alias |
-|-------------------+----------------|
-| =StrategySpec=    | =Dragon=       |
-| =OrderPairSpec=   | =DragonPhero=  |
-| =PairCycleState=  | =DragonEgg=    |
-| =PairActor=       | =DragonFly=    |
-| =Chronos=         | =Chronos=      |
-| =RuntimeCommand=  | =OgunBang=     |
-| =CommandAck=      | =OgunAck=      |
-| =CommandExecutor= | =Ogun=         |
-
 #+begin_example
 kolabi/
 |- bargain/                     # direct exchange-facing operator tools

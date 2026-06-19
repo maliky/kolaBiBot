@@ -118,6 +118,20 @@ for a stop sell:
  - =Admitted -> Confirmed= on private DB confirmation
 
 a lease ?
+** Vocabulary translation
+Canonical runtime naming keeps literal typed names in code and uses metaphors as operator-facing aliases.
+
+| Literal role/type | Metaphor alias |
+|-------------------+----------------|
+| =StrategySpec=    | =Dragon=       |
+| =OrderPairSpec=   | =DragonPhero=  |
+| =PairCycleState=  | =DragonEgg=    |
+| =PairActor=       | =DragonFly=    |
+| =Chronos=         | =Chronos=      |
+| =RuntimeCommand=  | =OgunBang=     |
+| =CommandAck=      | =OgunAck=      |
+| =CommandExecutor= | =Ogun=         |
+
 ** Runtime log keywords
 These are runtime/operator log labels, not exchange feed labels. Each entry says when the keyword appears and what it means for the operator.
 
