@@ -19,7 +19,7 @@ def run_script(*args: str) -> subprocess.CompletedProcess[str]:
 
 def test_cross_exchange_strategy_resolves_feed_routes() -> None:
     plan = feeder_plan_for_strategy(
-        "orders/demo_cross_exchange_chain.tsv",
+        "orders/demo_cross_exchange_chain.org",
         default_exchange="kraken",
         default_market_type="futures",
         default_symbol="PI_XBTUSD",
@@ -34,7 +34,7 @@ def test_cross_exchange_strategy_resolves_feed_routes() -> None:
 
 
 def test_strategy_pair_count_reads_all_strategy_pairs() -> None:
-    assert strategy_pair_count("orders/demo_cross_exchange_chain.tsv") == 3
+    assert strategy_pair_count("orders/demo_cross_exchange_chain.org") == 3
 
 
 def test_fresh_run_dry_run_restarts_all_strategy_feed_routes() -> None:
@@ -43,7 +43,7 @@ def test_fresh_run_dry_run_restarts_all_strategy_feed_routes() -> None:
         "--env-file",
         "docker/postgres/kolabi-postgres.env.example",
         "--strategy",
-        "orders/demo_cross_exchange_chain.tsv",
+        "orders/demo_cross_exchange_chain.org",
         "--environment",
         "demo",
         "--symbol",
@@ -71,7 +71,7 @@ def test_fresh_run_max_active_pairs_override_wins() -> None:
         "--env-file",
         "docker/postgres/kolabi-postgres.env.example",
         "--strategy",
-        "orders/demo_cross_exchange_chain.tsv",
+        "orders/demo_cross_exchange_chain.org",
         "--environment",
         "demo",
         "--symbol",

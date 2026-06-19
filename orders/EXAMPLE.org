@@ -75,5 +75,5 @@ python -m kolabi.bot run-once \
 Run the table through the normal strategy path:
 
 #+begin_src bash
-python -m kolabi.bot run --strategy orders/demo_cross_exchange_chain.tsv --environment demo --symbol PI_XBTUSD --dry-run
+python -m kolabi.bot run --strategy orders/demo_cross_exchange_chain.org --environment demo --symbol PI_XBTUSD --dry-run
 #+end_src

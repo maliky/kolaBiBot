@@ -565,7 +565,7 @@ def test_bitmex_btx_exchange_codes_parse(tmp_path: Path) -> None:
 
 
 def test_demo_cross_exchange_chain_parses_route_symbols() -> None:
-    strategy = read_strategy_file(Path("orders/demo_cross_exchange_chain.tsv"))
+    strategy = read_strategy_file(Path("orders/demo_cross_exchange_chain.org"))
 
     assert strategy.name == "demo_cross_exchange_chain"
     assert [pair.name for pair in strategy.pairs] == [

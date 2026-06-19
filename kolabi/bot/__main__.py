@@ -416,7 +416,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--strategy",
         "-s",
         required=True,
-        help="Path to Org strategy table file (e.g. orders/demo_ada.tsv)",
+        help="Path to Org strategy table file (e.g. orders/demo_ada.org)",
     )
     add_runtime_options(run_parser)
 

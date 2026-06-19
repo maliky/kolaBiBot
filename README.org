@@ -61,9 +61,9 @@ The active Org table grammar is:
 The =exchg= and =symbol= columns are optional. When =exchg= is omitted, the CLI =--exchange= and =--market-type= are used. When =symbol= is omitted, the effective CLI symbol is used. If CLI =--symbol= is also omitted, the route default is selected: =PI_XBTUSD= for Kraken futures, =XBT/USD= for Kraken spot/margin, =BTCUSDT= for Binance futures/spot/margin/isolated margin, =XBTUSD= for BitMEX futures, and =XBT_USDT= for BitMEX spot. When present, rows use platform-specific symbols directly, for example =PI_XBTUSD=, =BTCUSDT=, or =XBTUSD=. Blank Org cells keep their typed defaults where a default exists. A multi-route strategy run requires one shared market DB URL and public/private feeders for every active exchange, market type, account scope, and symbol.
 
 Useful examples:
-- =orders/demo_ada.tsv= documents order-type examples in the Org table grammar.
-- =orders/demo_cross_exchange_chain.tsv= demonstrates the typed multi-exchange Org table grammar.
-- =orders/demo_kraken_xbt.tsv= covers Kraken XBT combinations.
+- =orders/demo_ada.org= documents order-type examples in the Org table grammar.
+- =orders/demo_cross_exchange_chain.org= demonstrates the typed multi-exchange Org table grammar.
+- =orders/demo_kraken_xbt.org= covers Kraken XBT combinations.
 
 * DB And Feed Services
 
@@ -108,7 +108,7 @@ Reset a local runtime before a fresh live or demo test with =scripts/kolabi-fres
 #+begin_src bash
 scripts/kolabi-fresh-run --dry-run --strategy orders/bmm_ada.tsv --environment live
 scripts/kolabi-fresh-run --strategy orders/bmm_ada.tsv --environment live
-scripts/kolabi-fresh-run --strategy orders/demo_cross_exchange_chain.tsv --environment demo --symbol PI_XBTUSD
+scripts/kolabi-fresh-run --strategy orders/demo_cross_exchange_chain.org --environment demo --symbol PI_XBTUSD
 #+end_src
 
 Operator logs must not print credential-bearing DB URLs. Runtime preflight and feeder startup logs redact database passwords as =postgresql+psycopg://user:***@host/db=. Historical log files created before this rule may still contain full URLs and should be treated as sensitive.
@@ -150,7 +150,7 @@ The bot =preflight= command reports =credentials_ready=, =base_urls_ready=, and 
 * Running The Bot
 #+begin_src bash
   # Dry-run an Org strategy table:
-  python -m kolabi.bot run --strategy orders/demo_ada.tsv --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
+  python -m kolabi.bot run --strategy orders/demo_ada.org --exchange kraken --symbol PI_XBTUSD --environment demo --dry-run
 
   # Run an Org strategy table through the async runtime:
   python -m kolabi.bot run --strategy orders/rep_xbt.tsv --exchange kraken --symbol PI_XBTUSD --environment demo
@@ -264,9 +264,9 @@ kolabi/
    `- service.py                  # shared service helpers for tree modules
 
 orders/                       # example strategy definitions
-|- demo_ada.tsv                 # Org table contract and order-type examples
-|- demo_kraken_xbt.tsv          # Kraken XBT grammar matrix
-`- demo_cross_exchange_chain.tsv # multi-exchange chain scenario
+|- demo_ada.org                 # Org table contract and order-type examples
+|- demo_kraken_xbt.org          # Kraken XBT grammar matrix
+`- demo_cross_exchange_chain.org # multi-exchange chain scenario
 
 tests/                        # active regression suite
 |- bot/                         # bot CLI, parser, and runtime regression tests

@@ -8,7 +8,7 @@ This file archives implementation notes that were completed and moved out of act
 ** DONE <2026-06-11 jeu. 06:30> typed TSV grammar
 CLOSED: [2026-06-12 ven.]
 
-- Active TSV rows use =exchg= and =qty= at the operator boundary.
+- Active strategy rows use =exchg= and =qty= at the operator boundary.
 - Empty TSV columns are ignored, so template spacing columns do not become strategy fields.
 - Non-empty typed fields carry their own prefix: =D=, =%=, or =A= where the field supports it.
 - Only empty typed fields receive implicit defaults. A value such as =6= in =oDelta= is rejected; write =D6= instead.
@@ -80,7 +80,7 @@ CLOSED: [2026-06-12 ven.]
 The demo strategy is stored in:
 
 #+begin_example
-orders/demo_cross_exchange_chain.tsv
+orders/demo_cross_exchange_chain.org
 #+end_example
 
 Intent:
@@ -112,6 +112,6 @@ scripts/kolabidb private start --exchange binance --market-type spot --environme
 Check readiness before live demo execution:
 
 #+begin_src bash
-python -m kolabi.bot preflight --strategy orders/demo_cross_exchange_chain.tsv --exchange bitmex --market-type futures --symbol XBTUSD --environment demo
-python -m kolabi.bot run --strategy orders/demo_cross_exchange_chain.tsv --exchange bitmex --market-type futures --symbol XBTUSD --environment demo --dry-run
+python -m kolabi.bot preflight --strategy orders/demo_cross_exchange_chain.org --exchange bitmex --market-type futures --symbol XBTUSD --environment demo
+python -m kolabi.bot run --strategy orders/demo_cross_exchange_chain.org --exchange bitmex --market-type futures --symbol XBTUSD --environment demo --dry-run
 #+end_src

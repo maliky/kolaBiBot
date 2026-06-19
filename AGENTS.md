@@ -26,7 +26,7 @@
 1. Implement a minimal engine in `kolabi/` that reads one TSV, drives price/time conditions, and submits orders through `ExchangeABC`.
 2. Use `DummyBitMEX` (ported or wrapped) so integration tests run offline.
 3. Record every tick/order event through SQLAlchemy models (start with SQLite file).
-4. Expose it via the active bot CLI (`python -m kolabi.bot run --strategy Orders/demo_ada.tsv ...`) so the strategy path stays single and obvious.
+4. Expose it via the active bot CLI (`python -m kolabi.bot run --strategy Orders/demo_ada.org ...`) so the strategy path stays single and obvious.
 
 ## 6. Style & Notes
 - Keep comments bilingual when touching legacy sections.

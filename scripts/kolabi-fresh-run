@@ -33,15 +33,15 @@ Usage:
 
 Purpose:
   Stop local kolabidb listener processes, purge configured PostgreSQL runtime
-  rows, restart the public/private DB listeners required by a strategy TSV, and
+  rows, restart the public/private DB listeners required by an Org strategy table, and
   print the bot launch command. Add --start-bot to launch the bot.
 
 Options:
-  --strategy PATH              Strategy TSV. Default: orders/bmm_ada.tsv.
-  --exchange NAME              Default exchange for TSV rows without exchg. Default: kraken.
+  --strategy PATH              Org strategy table. Default: orders/bmm_ada.tsv.
+  --exchange NAME              Default exchange for strategy rows without exchg. Default: kraken.
   --market-type TYPE           Default market type. Default: futures.
   --environment demo|live      Endpoint family. Default: live.
-  --symbol SYMBOL              Default symbol for TSV rows without symbol. Default: PF_ADAUSD.
+  --symbol SYMBOL              Default symbol for strategy rows without symbol. Default: PF_ADAUSD.
   --account-scope NAME         Account scope for private listeners. Default: default.
   --env-file PATH              PostgreSQL env file. Default: .env.postgres.
   --api-key-env NAME           Optional bot default-route API key env override.
@@ -59,7 +59,7 @@ Options:
 
 Examples:
   scripts/kolabi-fresh-run --strategy orders/bmm_ada.tsv --environment live
-  scripts/kolabi-fresh-run --strategy orders/demo_cross_exchange_chain.tsv --environment demo --symbol PI_XBTUSD
+  scripts/kolabi-fresh-run --strategy orders/demo_cross_exchange_chain.org --environment demo --symbol PI_XBTUSD
   scripts/kolabi-fresh-run --dry-run --strategy orders/bmm_ada.tsv --environment live
 EOF
 }

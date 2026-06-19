@@ -467,7 +467,7 @@ def test_run_and_run_once_share_bot_service_path(monkeypatch) -> None:
     monkeypatch.setattr("kolabi.bot.__main__.build_service", lambda _args: service)
 
     run_args = argparse.Namespace(
-        strategy="orders/demo_ada.tsv",
+        strategy="orders/demo_ada.org",
         dry_run=False,
         sync=True,
         simulate=False,

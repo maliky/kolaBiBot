@@ -150,7 +150,7 @@ def _xbt_sell_tail_strategy() -> StrategySpec:
 
 
 def test_demo_ada_strategy_parsed_and_planned_on_active_runtime() -> None:
-    strategy = read_strategy_file(Path("orders/demo_ada.tsv"))
+    strategy = read_strategy_file(Path("orders/demo_ada.org"))
     assert len(strategy.pairs) >= 2
 
     service = BotService(

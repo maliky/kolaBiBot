@@ -104,5 +104,5 @@ setup(
         "Topic :: Utilities",
         "Topic :: System :: Monitoring",
     ],
-    package_data={"Doc": ["Doc/*"], "demo_Orders": ["orders/*demo*.tsv"]},
+    package_data={"Doc": ["Doc/*"], "demo_Orders": ["orders/*demo*.org"]},
 )

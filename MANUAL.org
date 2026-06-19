@@ -638,7 +638,7 @@ usage: kolabi.bot run [-h] --strategy STRATEGY [--exchange EXCHANGE]
 options:
   -h, --help            show this help message and exit
   --strategy, -s STRATEGY
-                      Path to Org strategy table file (e.g. orders/demo_ada.tsv)
+                      Path to Org strategy table file (e.g. orders/demo_ada.org)
   --exchange EXCHANGE
   --symbol SYMBOL
   --environment {demo,live}
@@ -749,7 +749,7 @@ usage: kolabi.bot run [-h] --strategy STRATEGY [--exchange EXCHANGE]
 
 selected options:
   --strategy, -s STRATEGY
-                        Path to Org strategy table file, for example orders/demo_ada.tsv.
+                        Path to Org strategy table file, for example orders/demo_ada.org.
   --exchange EXCHANGE   Default exchange for rows without an exchg value.
   --symbol SYMBOL       Default exchange product id for rows without a symbol value.
   --market-type         Default market lane for strategy rows without an exchange route code.
